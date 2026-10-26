@@ -255,6 +255,27 @@ func (c *Client) Ping(ctx context.Context) (*proto.Pong, error) {
 	return &pong, err
 }
 
+// KeepAlive pings every interval in the background until ctx ends or the connection closes, as game clients do
+// (every 15 s): the server drops connections that sent nothing for 45 s.
+func (c *Client) KeepAlive(ctx context.Context, every time.Duration) {
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.done:
+				return
+			case <-t.C:
+				pctx, cancel := context.WithTimeout(ctx, every)
+				c.Ping(pctx)
+				cancel()
+			}
+		}
+	}()
+}
+
 func (c *Client) session(ctx context.Context, typ proto.Type, req proto.Message) (*proto.Session, error) {
 	var s proto.Session
 	if err := c.Request(ctx, typ, req, &s); err != nil {

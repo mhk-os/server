@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/mhk-os/server/internal/ghost"
 	"github.com/mhk-os/server/internal/store"
@@ -56,11 +57,12 @@ func run(ctx context.Context, args []string) error {
 	ghostPath := fs.String("ghost", "", ".mhkghost file to replay in every race")
 	manifests := fs.String("manifests", "", "pack manifest file (mhk-bot dump-manifests)")
 	n := fs.Int("n", 1, "number of bots")
+	keepAlive := fs.Duration("keepalive", 15*time.Second, "TCP Ping interval (the server drops connections silent for 45 s)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *user == "" || *pass == "" || *ghostPath == "" || *manifests == "" || (*join == "") == (*quick == 0) ||
-		*n < 1 || *quick < 0 || *quick > 255 {
+		*n < 1 || *quick < 0 || *quick > 255 || *keepAlive <= 0 {
 		fs.Usage()
 		return errors.New("need -user, -pass, -ghost, -manifests and exactly one of -join or -quick")
 	}
@@ -82,7 +84,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	cfg := &botConfig{addr: addr, host: host, tls: tlsConf, pass: *pass, join: strings.ToUpper(*join),
 		quick: uint8(*quick), character: *character, kart: *kart, trackID: g.TrackID, replay: newReplay(g, frames),
-		manifests: mf}
+		manifests: mf, keepAlive: *keepAlive}
 	if cfg.character == "" {
 		cfg.character = g.CharacterID
 	}

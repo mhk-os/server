@@ -135,21 +135,31 @@ func TestParseServer(t *testing.T) {
 	}
 }
 
-// TestBotRacesHuman: a human creates a private room, the bot joins by code with a manifest file and a ghost,
-// the human starts a race and the bot replays the ghost: its states reach the human through World and it
-// finishes first.
-func TestBotRacesHuman(t *testing.T) {
+// stack is an in-process server (content catalog, race engine, lobbies) on ephemeral ports with a fresh catalog
+// (its own simVersion) and the files a bot needs.
+type stack struct {
+	addr      string
+	st        *store.Store
+	sim       int32
+	mf        *manifestFile
+	dir       string
+	ghost     string // path of the short ghost
+	manifests string // path of the manifest file
+}
+
+// startStack starts the server with the given idle timeout (0 = the protocol's 45 s).
+func startStack(t *testing.T, idle time.Duration) *stack {
+	t.Helper()
 	dsn := os.Getenv("MHK_TEST_DSN")
 	if dsn == "" {
 		t.Skip("MHK_TEST_DSN not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	ctx := context.Background()
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { st.Close() })
 	if err := st.Migrate(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +176,7 @@ func TestBotRacesHuman(t *testing.T) {
 	limits := auth.Limits{Register: auth.Rate{N: 1000, Per: time.Hour}, LoginFailIP: auth.Rate{N: 1000, Per: time.Hour},
 		LoginFailAccount: auth.Rate{N: 1000, Per: time.Hour}}
 	srv := server.New(server.Config{Version: "test", UDPPort: uint16(udp.LocalAddr().(*net.UDPAddr).Port),
-		ConnLimit: auth.Rate{N: 1000, Per: time.Minute}},
+		ConnLimit: auth.Rate{N: 1000, Per: time.Minute}, IdleTimeout: idle},
 		server.Deps{Log: log, Auth: auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, 2), limits),
 			Accounts: st, Sessions: st, Moderation: st, Runs: st, Blobs: ghosts})
 	catalog := content.New(st, log)
@@ -179,66 +189,92 @@ func TestBotRacesHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sctx, stop := context.WithCancel(context.Background())
+	sctx, stop := context.WithCancel(ctx)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(sctx, ln) }()
-	defer func() {
+	t.Cleanup(func() {
 		stop()
 		<-served
 		lobbies.Close()
 		races.Close()
-	}()
+	})
 
 	var simBytes [4]byte
 	rand.Read(simBytes[:])
-	sim := int32(binary.LittleEndian.Uint32(simBytes[:])&0xFFFFFF) + 1_000_000 // fresh catalog per run
-	mf := testManifests(sim)
+	s := &stack{addr: ln.Addr().String(), st: st, dir: t.TempDir(),
+		sim: int32(binary.LittleEndian.Uint32(simBytes[:])&0xFFFFFF) + 1_000_000}
+	s.mf = testManifests(s.sim)
+	s.manifests = writeJSON(t, s.mf)
+	s.ghost = filepath.Join(s.dir, "run.mhkghost")
+	if err := os.WriteFile(s.ghost, shortGhost(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
-	// The human.
-	human, err := testclient.Dial(ctx, ln.Addr().String(), nil)
+func randomName(prefix string) string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return prefix + hex.EncodeToString(b)
+}
+
+// human connects a scripted player that pings like the game, announces the stack's content and creates a
+// private room with a loadout.
+func (s *stack) human(t *testing.T, ctx context.Context) (*testclient.Client, *proto.LobbyState) {
+	t.Helper()
+	c, err := testclient.Dial(ctx, s.addr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer human.Close()
+	t.Cleanup(func() { c.Close() })
 	hello := testclient.DefaultHello()
-	hello.SimVersion = sim
-	if _, err := human.Hello(ctx, hello); err != nil {
+	hello.SimVersion = s.sim
+	if _, err := c.Hello(ctx, hello); err != nil {
 		t.Fatal(err)
 	}
-	nb := make([]byte, 4)
-	rand.Read(nb)
-	if _, err := human.Register(ctx, "hu"+hex.EncodeToString(nb), "kart-racer-2026"); err != nil {
+	c.KeepAlive(ctx, 200*time.Millisecond)
+	if _, err := c.Register(ctx, randomName("hu"), "kart-racer-2026"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := human.ContentHello(ctx, sim, mf.refs())
+	res, err := c.ContentHello(ctx, s.sim, s.mf.refs())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := human.ContentManifests(ctx, mf.manifests(res.Missing)); err != nil {
+	if err := c.ContentManifests(ctx, s.mf.manifests(res.Missing)); err != nil {
 		t.Fatal(err)
 	}
-	room, err := human.CreateRoom(ctx, &proto.RoomSettings{Mode: proto.RoomRaceSet, Packs: []string{"mhk2"},
+	room, err := c.CreateRoom(ctx, &proto.RoomSettings{Mode: proto.RoomRaceSet, Packs: []string{"mhk2"},
 		Anticheat: true, EngineClass: 2, MaxPlayers: 4, TrackPick: proto.PickOwner, RacesPerSet: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := human.SetLoadout(ctx, "game.huhn", "game.kart"); err != nil {
+	if err := c.SetLoadout(ctx, "game.huhn", "game.kart"); err != nil {
 		t.Fatal(err)
 	}
+	return c, room
+}
 
-	// The bot.
-	dir := t.TempDir()
-	ghostPath := filepath.Join(dir, "run.mhkghost")
-	if err := os.WriteFile(ghostPath, shortGhost(t), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rand.Read(nb)
-	botDone := make(chan error, 1)
+// bot runs mhk-bot into the room; the returned channel yields run's result.
+func (s *stack) bot(ctx context.Context, code string, keepAlive time.Duration) <-chan error {
+	done := make(chan error, 1)
 	go func() {
-		botDone <- run(ctx, []string{"-server", "tcp://" + ln.Addr().String(), "-user", "bt" + hex.EncodeToString(nb),
-			"-pass", "kart-racer-2026", "-join", room.Code, "-ghost", ghostPath, "-manifests", writeJSON(t, mf),
-			"-character", "game.huhn", "-kart", "game.kart"})
+		done <- run(ctx, []string{"-server", "tcp://" + s.addr, "-user", randomName("bt"), "-pass", "kart-racer-2026",
+			"-join", code, "-ghost", s.ghost, "-manifests", s.manifests, "-character", "game.huhn", "-kart", "game.kart",
+			"-keepalive", keepAlive.String()})
 	}()
+	return done
+}
+
+// TestBotRacesHuman: a human creates a private room, the bot joins by code with a manifest file and a ghost,
+// the human starts a race and the bot replays the ghost: its states reach the human through World and it
+// finishes first. The 1 s idle timeout is shorter than the countdown plus the race, which the bot spends without
+// any other TCP traffic: its keepalive pings hold the connection.
+func TestBotRacesHuman(t *testing.T) {
+	s := startStack(t, time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	human, room := s.human(t, ctx)
+	botDone := s.bot(ctx, room.Code, 200*time.Millisecond)
 	if _, err := human.WaitLobbyState(ctx, func(s *proto.LobbyState) bool {
 		return len(s.Members) == 2 && s.Members[1].KartID == "game.kart" && s.Members[1].Ready
 	}); err != nil {
@@ -294,16 +330,50 @@ func TestBotRacesHuman(t *testing.T) {
 	}
 
 	// Both announced the same manifests, so a dump reproduces the file the bot used.
-	out := filepath.Join(dir, "dump.json")
-	if err := dumpManifests(context.Background(), st, sim, []string{"game", "mhk2"}, out); err != nil {
+	out := filepath.Join(s.dir, "dump.json")
+	if err := dumpManifests(context.Background(), s.st, s.sim, []string{"game", "mhk2"}, out); err != nil {
 		t.Fatal(err)
 	}
 	dumped, err := loadManifests(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dumped.SimVersion != sim || len(dumped.Packs) != 2 || dumped.Packs[1].ManifestHash != mf.Packs[1].ManifestHash ||
+	if dumped.SimVersion != s.sim || len(dumped.Packs) != 2 || dumped.Packs[1].ManifestHash != s.mf.Packs[1].ManifestHash ||
 		dumped.Packs[0].Commit != "botcommit" {
 		t.Fatalf("dump %+v", dumped)
+	}
+}
+
+// TestBotSurvivesIdleTimeout: with a 1 s idle timeout, a bot idling in a room for 4 s stays thanks to its pings,
+// while one that pings too rarely is dropped (and leaves the lobby), which shows the test can see the failure.
+func TestBotSurvivesIdleTimeout(t *testing.T) {
+	s := startStack(t, time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	human, room := s.human(t, ctx)
+	members := func(n int) func(*proto.LobbyState) bool {
+		return func(st *proto.LobbyState) bool { return len(st.Members) == n }
+	}
+
+	quiet, stopQuiet := context.WithCancel(ctx)
+	defer stopQuiet()
+	s.bot(quiet, room.Code, time.Hour)
+	if _, err := human.WaitLobbyState(ctx, members(2)); err != nil {
+		t.Fatal(err)
+	}
+	dropCtx, dropCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer dropCancel()
+	if _, err := human.WaitLobbyState(dropCtx, members(1)); err != nil {
+		t.Fatalf("a bot without keepalive was not dropped: %v", err)
+	}
+
+	s.bot(ctx, room.Code, 200*time.Millisecond)
+	if _, err := human.WaitLobbyState(ctx, members(2)); err != nil {
+		t.Fatal(err)
+	}
+	idleCtx, idleCancel := context.WithTimeout(ctx, 4*time.Second)
+	defer idleCancel()
+	if st, err := human.WaitLobbyState(idleCtx, members(1)); err == nil {
+		t.Fatalf("the pinging bot was dropped: %+v", st.Members)
 	}
 }

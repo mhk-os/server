@@ -28,6 +28,7 @@ type botConfig struct {
 	trackID   string // the ghost's track: voted for when the lobby offers it
 	replay    *replay
 	manifests *manifestFile
+	keepAlive time.Duration // TCP Ping interval
 }
 
 // bot is one simulated player: lobby member and racer replaying the ghost.
@@ -90,6 +91,8 @@ func (b *bot) connect(ctx context.Context) error {
 		return fmt.Errorf("hello: %w", err)
 	}
 	b.offset = ok.ServerTime.Sub(sent.Add(time.Since(sent) / 2))
+	// Races are UDP only, so without these the server's idle timeout drops the bot mid-race.
+	c.KeepAlive(ctx, b.cfg.keepAlive)
 	s, err := c.Login(ctx, b.name, b.cfg.pass)
 	if testclient.StatusOf(err) == proto.StatusInvalidCredentials {
 		s, err = c.Register(ctx, b.name, b.cfg.pass)
