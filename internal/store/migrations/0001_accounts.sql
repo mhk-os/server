@@ -16,7 +16,7 @@ CREATE TABLE accounts (
     PRIMARY KEY (id),
     UNIQUE KEY accounts_username_lower (username_lower),
     KEY accounts_role (role)
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 CREATE TABLE sessions (
     token_hash   BINARY(32)      NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE sessions (
     KEY sessions_account (account_id),
     KEY sessions_expires (expires_at),
     CONSTRAINT sessions_account_fk FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- No foreign keys: the audit log must outlive deleted actors and targets.
 CREATE TABLE moderation_actions (
@@ -44,4 +44,4 @@ CREATE TABLE moderation_actions (
     PRIMARY KEY (id),
     KEY moderation_actions_target (target_account_id),
     KEY moderation_actions_created (created_at)
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;

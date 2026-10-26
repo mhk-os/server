@@ -24,8 +24,8 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// Integration tests need a MySQL database: MHK_TEST_DSN=mhk:mhk@tcp(localhost:3307)/mhk_test?parseTime=true
-// (docker compose up -d mysql creates mhk_test). They create uniquely named accounts and leave them in place.
+// Integration tests need a MariaDB database: MHK_TEST_DSN=mhk:mhk@tcp(localhost:3307)/mhk_test?parseTime=true
+// (docker compose up -d db creates mhk_test). They create uniquely named accounts and leave them in place.
 
 const password = "kart-racer-2026"
 

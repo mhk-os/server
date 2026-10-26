@@ -1,0 +1,8 @@
+#!/bin/sh
+# Sysadmin CLI on the production host (run as root): `mhk-server admin` as the service user with the service's
+# database and data directory, e.g. `mhk-admin account set-role alice moderator`.
+set -eu
+set -a
+. /etc/mhk-server/env
+set +a
+exec setpriv --reuid=mhk-server --regid=mhk-server --init-groups /usr/local/bin/mhk-server admin "$@"

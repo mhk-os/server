@@ -4,7 +4,7 @@ The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts, time
 upload and download, in-game moderation, and real-time multiplayer (public lobbies, private rooms, races over UDP).
 Clients speak a small binary protocol over one TCP (or TLS) connection plus UDP during races, specified in
 [docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run reports, content manifests and votes,
-content strikes, cheat kicks and the moderation audit log live in MySQL 8.4; the ghost files themselves live in the
+content strikes, cheat kicks and the moderation audit log live in MariaDB (10.11+); the ghost files themselves live in the
 data directory. Lobbies and races live in the server's memory: a restart ends them.
 
 ## Quick start
@@ -12,14 +12,14 @@ data directory. Lobbies and races live in the server's memory: a restart ends th
 Requires Go 1.27 and Docker.
 
 ```sh
-docker compose up -d mysql
+docker compose up -d db
 MHK_DB_DSN='mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true' go run ./cmd/mhk-server serve
 ```
 
 The server applies its database migrations at startup and listens on `:7350` in plaintext, which the game
 accepts for `localhost` and private networks (editor builds connect to `tcp://localhost:7350` by default).
 
-`docker compose up -d` runs MySQL and the server together (image built from the `Dockerfile`).
+`docker compose up -d` runs MariaDB and the server together (image built from the `Dockerfile`).
 
 ### Tests
 
@@ -29,8 +29,8 @@ go test ./...                                    # unit tests; integration tests
 MHK_TEST_DSN='mhk:mhk@tcp(localhost:3307)/mhk_test?parseTime=true' go test -race ./...
 ```
 
-The compose MySQL creates the `mhk_test` database for the integration tests on first start
-(`deploy/mysql-init`). `internal/testclient` is a protocol client for tests, bots and load tests.
+The compose MariaDB creates the `mhk_test` database for the integration tests on first start
+(`deploy/db-init`). `internal/testclient` is a protocol client for tests, bots and load tests.
 
 ### Bots
 
@@ -61,7 +61,7 @@ Every `serve` flag falls back to an environment variable.
 |------|-------------|---------|-|
 | `-listen` | `MHK_LISTEN` | `:7350` | TCP listen address |
 | `-udp-listen` | `MHK_UDP_LISTEN` | `:7350` | UDP realtime listen address (races); its port is announced in `HelloOk` |
-| `-db` | `MHK_DB_DSN` | | MySQL DSN, e.g. `user:pass@tcp(host:3306)/mhk?parseTime=true` (time zone and charset are forced to UTC/utf8mb4) |
+| `-db` | `MHK_DB_DSN` | | MariaDB DSN, e.g. `user:pass@tcp(host:3306)/mhk?parseTime=true` (time zone and charset are forced to UTC/utf8mb4) |
 | `-tls-cert`, `-tls-key` | `MHK_TLS_CERT`, `MHK_TLS_KEY` | | PEM certificate chain and key; reloaded when the files change |
 | `-acme-domain` | `MHK_ACME_DOMAIN` | | obtain a Let's Encrypt certificate for this domain instead |
 | `-acme-cache` | `MHK_ACME_CACHE` | | directory for ACME account and certificates (required with ACME) |
@@ -116,15 +116,36 @@ Reports from game clients (`flags`) never hide anything by themselves.
 
 ## Deployment
 
-- **Ports**: 7350/tcp for the control connection and 7350/udp for real-time races (phase 3). Open both.
+- **Ports**: 7350/tcp for the control connection and 7350/udp for real-time races. Open both.
 - **TLS**: release builds of the game connect to `tls://mhk-os.svit.ac:7350` and validate the certificate
   against the system roots (TLS 1.2+, SNI). Either point `MHK_TLS_CERT`/`MHK_TLS_KEY` at certificates renewed by
   another tool (picked up without restart), or set `MHK_ACME_DOMAIN` and `MHK_ACME_CACHE` and keep port 80 reachable
-  for the HTTP-01 challenge. The protocol is raw TLS over TCP, so no HTTP reverse proxy or CDN in front.
-- **GeoIP**: download a country database (e.g. [DB-IP Lite Country](https://db-ip.com/db/download/ip-to-country-lite),
-  CC BY 4.0, monthly updates) and set `MHK_GEOIP`. Restart to load a newer file.
-- **Database**: MySQL 8.4 with utf8mb4. Back it up; it holds all accounts and runs.
+  for the HTTP-01 challenge. The protocol is raw TLS over TCP, so no HTTP reverse proxy or CDN in front: the DNS record
+  must stay DNS-only in Cloudflare.
+- **GeoIP**: a country database (e.g. [DB-IP Lite Country](https://db-ip.com/db/download/ip-to-country-lite),
+  CC BY 4.0 - attribution: IP Geolocation by DB-IP, monthly updates) in `MHK_GEOIP`. Restart to load a newer file.
+- **Database**: MariaDB 10.11+ with utf8mb4. Back it up together with the data directory; they hold all accounts and runs.
 - **Container**: the image runs as a non-root user from a distroless base; mount a volume at `/data` (ghost files).
+
+### Production host (mhk-os.svit.ac)
+
+The production server runs from systemd on an Ubuntu host next to the host's MariaDB and nginx; the files are in
+`deploy/`:
+
+| Path on the host | From | |
+|------|------|-|
+| `/usr/local/bin/mhk-server` | `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=<commit>" ./cmd/mhk-server` | the binary |
+| `/etc/systemd/system/mhk-server.service` | `deploy/systemd/mhk-server.service` | runs as user `mhk-server`, data in `/var/lib/mhk-server` |
+| `/etc/mhk-server/env` | `deploy/env.example` | DSN (database `mhk`, user `mhk@localhost`), TLS, data and GeoIP paths; `root:mhk-server 0640` |
+| `/etc/mhk-server/tls/` | `deploy/certbot/20-mhk-server.sh` | readable copies of the Let's Encrypt certificate |
+| `/etc/letsencrypt/renewal-hooks/deploy/20-mhk-server.sh` | `deploy/certbot/20-mhk-server.sh` | refreshes the copies after renewal |
+| `/etc/nginx/sites-enabled/mhk-os.svit.ac` | `deploy/nginx/mhk-os.svit.ac.conf` | HTTP-01 challenges (webroot `/var/www/acme`), browsers to GitHub |
+| `/usr/local/lib/mhk-server/mhk-geoip-update.sh`, `mhk-geoip.{service,timer}` | `deploy/geoip/` | monthly DB-IP update, then a restart |
+| `/usr/local/bin/mhk-admin` | `deploy/mhk-admin` | the admin CLI with the service's configuration, e.g. `mhk-admin account list` |
+
+The certificate comes from `certbot certonly --webroot -w /var/www/acme -d mhk-os.svit.ac --key-type ecdsa`. To update
+the server: build, copy the binary, `systemctl restart mhk-server` (migrations run at startup; running lobbies and races
+end). `journalctl -u mhk-server` shows the log.
 
 ## License
 

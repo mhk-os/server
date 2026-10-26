@@ -15,8 +15,8 @@ import (
 	"github.com/mhk-os/server/internal/store"
 )
 
-// TestCatalogOnMySQL runs the catalog on the real store (MHK_TEST_DSN) and lists the results with the admin CLI.
-func TestCatalogOnMySQL(t *testing.T) {
+// TestCatalogOnMariaDB runs the catalog on the real store (MHK_TEST_DSN) and lists the results with the admin CLI.
+func TestCatalogOnMariaDB(t *testing.T) {
 	dsn := os.Getenv("MHK_TEST_DSN")
 	if dsn == "" {
 		t.Skip("MHK_TEST_DSN not set")
@@ -57,7 +57,7 @@ func TestCatalogOnMySQL(t *testing.T) {
 	}
 	res := announce(t, c, ids[3], bad)
 	if len(res.Strikes) != 1 || !c.Differs(ids[3], "MHK2") {
-		t.Fatalf("no strike on MySQL: %+v", res)
+		t.Fatalf("no strike on MariaDB: %+v", res)
 	}
 	announce(t, c, ids[3], bad)
 

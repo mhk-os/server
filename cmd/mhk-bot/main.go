@@ -132,7 +132,7 @@ func parseServer(uri string) (addr, host string, conf *tls.Config, err error) {
 
 func dump(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("dump-manifests", flag.ContinueOnError)
-	dsn := fs.String("dsn", os.Getenv("MHK_DB_DSN"), "MySQL DSN of the server (MHK_DB_DSN)")
+	dsn := fs.String("dsn", os.Getenv("MHK_DB_DSN"), "MariaDB DSN of the server (MHK_DB_DSN)")
 	sim := fs.Int("sim", 0, "simVersion of the manifests")
 	out := fs.String("out", "manifests.json", "file to write")
 	if err := fs.Parse(args); err != nil {

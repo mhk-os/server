@@ -15,8 +15,8 @@ var migrations embed.FS
 
 const migrateLock = "mhk_schema_migrate"
 
-// Migrate applies the embedded migrations not yet recorded in schema_migrations, in file name order. A MySQL named
-// lock serializes concurrent servers and CLI runs. MySQL DDL commits implicitly, so a migration that fails halfway
+// Migrate applies the embedded migrations not yet recorded in schema_migrations, in file name order. A MariaDB named
+// lock serializes concurrent servers and CLI runs. MariaDB DDL commits implicitly, so a migration that fails halfway
 // must be repaired by hand; keep each file small.
 func (s *Store) Migrate(ctx context.Context, log *slog.Logger) error {
 	conn, err := s.db.Conn(ctx)
@@ -37,7 +37,7 @@ func (s *Store) Migrate(ctx context.Context, log *slog.Logger) error {
 	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    VARCHAR(255) NOT NULL PRIMARY KEY,
 		applied_at DATETIME(3)  NOT NULL
-	) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci`); err != nil {
+	) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci`); err != nil {
 		return fmt.Errorf("store: create schema_migrations: %w", err)
 	}
 

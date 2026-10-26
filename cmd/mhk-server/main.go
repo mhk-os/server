@@ -100,7 +100,7 @@ func envBool(key string, def bool) bool {
 
 func dbFlag(fs *flag.FlagSet) *string {
 	return fs.String("db", env("MHK_DB_DSN", ""),
-		"MySQL DSN, e.g. mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true (MHK_DB_DSN)")
+		"MariaDB DSN, e.g. mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true (MHK_DB_DSN)")
 }
 
 func dataDirFlag(fs *flag.FlagSet) *string {

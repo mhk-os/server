@@ -1,6 +1,6 @@
 // Package store keeps accounts, sessions, the moderation audit log and the time-trial boards, runs and reports in
-// MySQL. Callers depend on the small interfaces below rather than on *Store so later phases (and tests) can compose
-// or replace them.
+// MariaDB (through the MySQL protocol driver). Callers depend on the small interfaces below rather than on *Store so
+// later phases (and tests) can compose or replace them.
 package store
 
 import (
@@ -146,7 +146,7 @@ type Moderation interface {
 	CountActiveSessions(ctx context.Context, accountID uint64, now time.Time) (int, error)
 }
 
-// Store implements every interface on one MySQL database.
+// Store implements every interface on one MariaDB database.
 type Store struct {
 	db *sql.DB
 }
@@ -157,7 +157,7 @@ var (
 	_ Moderation = (*Store)(nil)
 )
 
-// Open connects to MySQL. The DSN is normalized to parseTime=true, UTC and utf8mb4 so callers cannot get time
+// Open connects to MariaDB. The DSN is normalized to parseTime=true, UTC and utf8mb4 so callers cannot get time
 // zones or character sets wrong.
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := mysql.ParseDSN(dsn)
@@ -167,7 +167,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	cfg.ParseTime = true
 	cfg.Loc = time.UTC
 	cfg.ClientFoundRows = true
-	cfg.Collation = "utf8mb4_0900_ai_ci"
+	cfg.Collation = "utf8mb4_unicode_ci"
 	if cfg.Params == nil {
 		cfg.Params = map[string]string{}
 	}

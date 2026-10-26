@@ -22,7 +22,7 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// Integration tests need MySQL (MHK_TEST_DSN, see internal/server); they drive real TCP and UDP through
+// Integration tests need MariaDB (MHK_TEST_DSN, see internal/server); they drive real TCP and UDP through
 // Engine.Start with bots.
 
 type harness struct {

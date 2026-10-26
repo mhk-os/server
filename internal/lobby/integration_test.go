@@ -21,7 +21,7 @@ import (
 	"github.com/mhk-os/server/internal/testclient"
 )
 
-// Integration tests run the real server, content catalog and lobby manager over TCP against MySQL
+// Integration tests run the real server, content catalog and lobby manager over TCP against MariaDB
 // (MHK_TEST_DSN, see internal/server tests); races are faked so the test decides when they go and finish.
 
 const itPassword = "kart-racer-2026"

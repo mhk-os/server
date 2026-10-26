@@ -1,20 +1,21 @@
-# Local development: `docker compose up -d mysql` and run the server with `go run`, or `docker compose up -d` for both.
+# Local development: `docker compose up -d db` and run the server with `go run`, or `docker compose up -d` for both.
+# MariaDB 10.11 matches the production host.
 services:
-  mysql:
-    image: mysql:8.4
+  db:
+    image: mariadb:10.11
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: mhk
-      MYSQL_USER: mhk
-      MYSQL_PASSWORD: mhk
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: mhk
+      MARIADB_USER: mhk
+      MARIADB_PASSWORD: mhk
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
     ports:
       - "3307:3306"
     volumes:
-      - mysql-data:/var/lib/mysql
-      - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/mysql
+      - ./deploy/db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-umhk", "-pmhk"]
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -23,10 +24,10 @@ services:
   server:
     build: .
     depends_on:
-      mysql:
+      db:
         condition: service_healthy
     environment:
-      MHK_DB_DSN: "mhk:mhk@tcp(mysql:3306)/mhk?parseTime=true"
+      MHK_DB_DSN: "mhk:mhk@tcp(db:3306)/mhk?parseTime=true"
       MHK_LISTEN: ":7350"
       MHK_DATA_DIR: /data
     ports:
@@ -36,5 +37,5 @@ services:
       - server-data:/data
 
 volumes:
-  mysql-data:
+  db-data:
   server-data:

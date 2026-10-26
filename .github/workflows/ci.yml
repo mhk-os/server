@@ -8,17 +8,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
     services:
-      mysql:
-        image: mysql:8.4
+      db:
+        image: mariadb:10.11
         env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: mhk
-          MYSQL_USER: mhk
-          MYSQL_PASSWORD: mhk
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: mhk
+          MARIADB_USER: mhk
+          MARIADB_PASSWORD: mhk
         ports:
           - 3306:3306
         options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -umhk -pmhk"
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30

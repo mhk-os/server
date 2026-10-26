@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly DB-IP Lite country database update for mhk-server
+
+[Timer]
+# DB-IP publishes at the start of the month; the restart ends running lobbies, so pick a quiet hour.
+OnCalendar=*-*-03 04:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

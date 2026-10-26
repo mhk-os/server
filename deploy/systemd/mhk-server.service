@@ -1,0 +1,33 @@
+[Unit]
+Description=Moorhuhn Kart: Open Source online server
+Documentation=https://github.com/mhk-os/server
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+User=mhk-server
+Group=mhk-server
+EnvironmentFile=/etc/mhk-server/env
+ExecStart=/usr/local/bin/mhk-server serve
+WorkingDirectory=/var/lib/mhk-server
+# SIGTERM: connected players are told the server restarts before it exits.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/mhk-server
+
+[Install]
+WantedBy=multi-user.target

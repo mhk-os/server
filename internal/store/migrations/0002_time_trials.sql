@@ -13,7 +13,7 @@ CREATE TABLE boards (
     created_at     DATETIME(3)      NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY boards_identity (track_id, engine_class, laps, sim_version, track_hash)
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- One uploaded ghost. The file itself lives in the blob store under blob_sha256; deleting a run (sysadmin only)
 -- removes the blob once no run references it. flags caches the number of counted run_reports rows.
@@ -54,7 +54,7 @@ CREATE TABLE runs (
     KEY runs_blob (blob_sha256),
     CONSTRAINT runs_board_fk FOREIGN KEY (board_id) REFERENCES boards (id),
     CONSTRAINT runs_account_fk FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- One report per account and run. counted is false for reports on one's own run and from cheat-kicked accounts.
 CREATE TABLE run_reports (
@@ -71,7 +71,7 @@ CREATE TABLE run_reports (
     KEY run_reports_reporter (reporter_id),
     CONSTRAINT run_reports_run_fk FOREIGN KEY (run_id) REFERENCES runs (id) ON DELETE CASCADE,
     CONSTRAINT run_reports_reporter_fk FOREIGN KEY (reporter_id) REFERENCES accounts (id) ON DELETE CASCADE
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- Accounts kicked from a race for cheating (filled by phase 3). Their run reports are stored but never counted.
 CREATE TABLE cheat_kicks (
@@ -85,4 +85,4 @@ CREATE TABLE cheat_kicks (
     PRIMARY KEY (id),
     KEY cheat_kicks_account (account_id),
     CONSTRAINT cheat_kicks_account_fk FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
