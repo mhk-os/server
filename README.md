@@ -1,9 +1,11 @@
 # mhk-server
 
 The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts, time-trial leaderboards with ghost
-upload and download, and in-game moderation; real-time races later. Clients speak a small binary protocol over one
-TCP (or TLS) connection, specified in [docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run
-reports and the moderation audit log live in MySQL 8.4; the ghost files themselves live in the data directory.
+upload and download, in-game moderation, and real-time multiplayer (public lobbies, private rooms, races over UDP).
+Clients speak a small binary protocol over one TCP (or TLS) connection plus UDP during races, specified in
+[docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run reports, content manifests and votes,
+content strikes, cheat kicks and the moderation audit log live in MySQL 8.4; the ghost files themselves live in the
+data directory. Lobbies and races live in the server's memory: a restart ends them.
 
 ## Quick start
 
@@ -30,6 +32,24 @@ MHK_TEST_DSN='mhk:mhk@tcp(localhost:3307)/mhk_test?parseTime=true' go test -race
 The compose MySQL creates the `mhk_test` database for the integration tests on first start
 (`deploy/mysql-init`). `internal/testclient` is a protocol client for tests, bots and load tests.
 
+### Bots
+
+`cmd/mhk-bot` joins a lobby and races by replaying a ghost, to test the game against remote karts:
+
+```sh
+go run ./cmd/mhk-bot dump-manifests -dsn "$MHK_DB_DSN" -sim 4 -out packs.json game mhk2 mhk3 mhke mhkt
+go run ./cmd/mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass kart-racer-2026 -join ABC234 -n 3
+```
+
+`dump-manifests` writes the pack manifests players reported most for that `simVersion` (the game must have
+announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` joins a public lobby instead of
+a room code, `-n` starts that many bots (`bot1` … `bot3`, registered when missing), `-character`/`-kart` default to
+the ghost's. Bots vote for the ghost's track (else Random), drive the ghost's path from GO, send `Finished` at its
+finish time and never use items. They cannot know the track data, so each sends a unique `RaceLoaded` hash: with
+one human (or bots only) nobody has a content majority and everybody races with the lowest grid slot's content
+(when that is a bot, the server knows no item boxes and denies the human's pickups); with two or more humans the
+bots leave as desync.
+
 ## Configuration
 
 Every `serve` flag falls back to an environment variable.
@@ -37,6 +57,7 @@ Every `serve` flag falls back to an environment variable.
 | Flag | Environment | Default | |
 |------|-------------|---------|-|
 | `-listen` | `MHK_LISTEN` | `:7350` | TCP listen address |
+| `-udp-listen` | `MHK_UDP_LISTEN` | `:7350` | UDP realtime listen address (races); its port is announced in `HelloOk` |
 | `-db` | `MHK_DB_DSN` | | MySQL DSN, e.g. `user:pass@tcp(host:3306)/mhk?parseTime=true` (time zone and charset are forced to UTC/utf8mb4) |
 | `-tls-cert`, `-tls-key` | `MHK_TLS_CERT`, `MHK_TLS_KEY` | | PEM certificate chain and key; reloaded when the files change |
 | `-acme-domain` | `MHK_ACME_DOMAIN` | | obtain a Let's Encrypt certificate for this domain instead |
@@ -81,6 +102,8 @@ mhk-server admin run delete <id> --yes                                          
 mhk-server admin run reports <id>
 mhk-server admin board list [--track T]
 mhk-server admin audit [--limit N]
+mhk-server admin content strikes [--account U] [--limit N]                       # copies differing from the majority
+mhk-server admin kicks [--account U] [--limit N]                                 # race kicks for cheating
 ```
 
 Usernames are matched case-insensitively. The disable reason is shown to the player, so write it for them.

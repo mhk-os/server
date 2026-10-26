@@ -41,15 +41,20 @@ func (h *Hub) bind(c *Conn, accountID uint64) {
 	h.mu.Unlock()
 }
 
-func (h *Hub) unbind(c *Conn, accountID uint64) {
+// unbind forgets c as a connection of accountID and reports whether it was the account's last one.
+func (h *Hub) unbind(c *Conn, accountID uint64) (last bool) {
 	h.mu.Lock()
-	if set := h.byAccount[accountID]; set != nil {
-		delete(set, c)
-		if len(set) == 0 {
-			delete(h.byAccount, accountID)
-		}
+	defer h.mu.Unlock()
+	set := h.byAccount[accountID]
+	if _, ok := set[c]; !ok {
+		return false
 	}
-	h.mu.Unlock()
+	delete(set, c)
+	if len(set) == 0 {
+		delete(h.byAccount, accountID)
+		return true
+	}
+	return false
 }
 
 // Conns returns a snapshot of all live connections.

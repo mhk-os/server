@@ -23,7 +23,10 @@ import (
 	"github.com/mhk-os/server/internal/admin"
 	"github.com/mhk-os/server/internal/auth"
 	"github.com/mhk-os/server/internal/blobs"
+	"github.com/mhk-os/server/internal/content"
 	"github.com/mhk-os/server/internal/geo"
+	"github.com/mhk-os/server/internal/lobby"
+	"github.com/mhk-os/server/internal/race"
 	"github.com/mhk-os/server/internal/server"
 	"github.com/mhk-os/server/internal/store"
 )
@@ -123,6 +126,7 @@ func newLogger(level string) (*slog.Logger, error) {
 func serve(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := fs.String("listen", env("MHK_LISTEN", ":7350"), "TCP listen address (MHK_LISTEN)")
+	udpListen := fs.String("udp-listen", env("MHK_UDP_LISTEN", ":7350"), "UDP realtime listen address (MHK_UDP_LISTEN)")
 	dsn := dbFlag(fs)
 	var ts tlsSettings
 	fs.StringVar(&ts.certFile, "tls-cert", env("MHK_TLS_CERT", ""), "TLS certificate chain PEM, reloaded on change (MHK_TLS_CERT)")
@@ -181,9 +185,20 @@ func serve(ctx context.Context, args []string) error {
 		log.Warn("serving plaintext on a non-loopback address; clients refuse plaintext except on local networks",
 			"addr", ln.Addr().String())
 	}
+	udpAddr, err := net.ResolveUDPAddr("udp", *udpListen)
+	if err != nil {
+		ln.Close()
+		return fmt.Errorf("udp listen address: %w", err)
+	}
+	udp, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	udpPort := uint16(udp.LocalAddr().(*net.UDPAddr).Port)
 
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), auth.DefaultLimits)
-	srv := server.New(server.Config{Version: version}, server.Deps{
+	srv := server.New(server.Config{Version: version, UDPPort: udpPort}, server.Deps{
 		Log:        log,
 		Auth:       svc,
 		Accounts:   st,
@@ -193,8 +208,17 @@ func serve(ctx context.Context, args []string) error {
 		Blobs:      ghosts,
 		Geo:        geoDB,
 	})
+	catalog := content.New(st, log)
+	catalog.Register(srv)
+	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})
+	defer races.Close()
+	races.Register(srv)
+	lobbies := lobby.New(lobby.Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Log: log})
+	defer lobbies.Close()
+	lobbies.Register(srv)
 	go pruneSessions(ctx, st, log)
-	log.Info("mhk-server listening", "version", version, "addr", ln.Addr().String(), "tls", tlsConfig != nil)
+	log.Info("mhk-server listening", "version", version, "addr", ln.Addr().String(), "tls", tlsConfig != nil,
+		"udp", udp.LocalAddr().String())
 	err = srv.Serve(ctx, ln)
 	log.Info("mhk-server stopped")
 	return err

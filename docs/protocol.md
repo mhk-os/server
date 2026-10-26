@@ -367,13 +367,17 @@ accounts. `reason` is shown to the affected player where applicable.
 Clients describe the gameplay content of every enabled mod pack as a **pack manifest**: `packId`, `commit`
 (`ContentPack.version`) and the sorted list of items `(kind, id, fingerprint)` the pack registers, where the
 fingerprint covers the item's gameplay-relevant data (visuals and sounds excluded) of the **effective** definition
-(after load-order overrides). Kinds: 1 track (definition data; geometry is hashed at race load), 2 kart, 3 character,
-4 powerup, 5 status effect, 6 cup. `manifestHash` = 32 hex chars, SHA-256/128 over the canonical item list.
+(after load-order overrides). Kinds: 1 race track (definition data; geometry is hashed at race load), 2 kart,
+3 character, 4 powerup, 5 status effect, 6 cup, 7 battle arena (a track with the arena layout). `manifestHash` = 32 hex
+chars, SHA-256/128 over the canonical item list. Votes for Random draw a random race track (race lobbies) or arena
+(battle lobbies) of the lobby's packs from the catalog-majority manifests.
 
 For each (`packId`, `commit`, `simVersion`) the server keeps which `manifestHash` each account reported; the
-**catalog majority** is the hash reported by the most distinct accounts. Nothing is decided by the first report. A
+**catalog majority** is the hash reported by the most distinct accounts (a tie means no majority: then each client's
+own manifest decides what it may select, without strikes). Nothing is decided by the first report. A
 client whose hash differs from a majority backed by ≥ 3 accounts gets a content strike (stored, shown to
 moderators) and cannot join anticheat lobbies with that pack ("your copy of <pack> differs from other players'").
+The built-in `game` pack is announced like any other pack; lobbies do not list it but its items are lobby content.
 
 A lobby's **content** = the items of its packs (plus the built-in `game` pack). Players may join a lobby if they have
 every pack of it enabled (extra packs are fine; their items are not selectable there). A client that has a mod
@@ -498,8 +502,10 @@ packs.
 
 `PackManifest`: `packId: string ≤ 64`, `commit: string ≤ 40`, `simVersion: i32`, `manifestHash: string ≤ 32`,
 `items: list<(kind: u8, id: string ≤ 96, fingerprint: string ≤ 32)> ≤ 4096`. The server recomputes the hash from
-the items (canonical form: for each item in (kind, id) ordinal order the UTF-8 text `<kind>\n<id lowercase>\n<fingerprint>\n`,
-SHA-256, first 16 bytes as lowercase hex) and rejects a mismatch with `BadRequest`.
+the items (canonical form: items sorted by kind ascending, then by the lowercased id (ASCII; ids are 1–96 characters
+of `[A-Za-z0-9_.-]`) in ordinal byte order; for each the UTF-8 text `<kind>\n<id lowercase>\n<fingerprint>\n`;
+SHA-256, first 16 bytes as lowercase hex; hashes compare case-insensitively) and rejects a mismatch, or two items with
+the same kind and lowercased id, with `BadRequest`.
 
 ContentHello must succeed (and any requested manifests be sent) before lobby requests; lobby requests before it
 answer `BadRequest` "content not announced". Needs login.
@@ -591,7 +597,7 @@ Client → server notifies (TCP, kind 3; the server ignores those for a race the
 | 530 | ItemUse | `raceId: u64`, `useId: u32`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8` |
 | 531 | HitTaken | `raceId: u64`, `attackerSlot: u8`, `useId: u32` (0 = track hazard/zone), `effectId: string ≤ 96`, `tick: u32` |
 | 532 | HitSeen | `raceId: u64`, `victimSlot: u8`, `attackerSlot: u8`, `useId: u32`, `effectId: string ≤ 96`, `tick: u32` |
-| 533 | Finished | `raceId: u64`, `finishMs: i32`, `lapMs: list<i32> ≤ 99`, `tick: u32` |
+| 533 | Finished | `raceId: u64`, `finishMs: i32`, `lapMs: list<i32> ≤ 99`, `tick: u32`, `position: u8` (solo races: the racer's place among all karts incl. AI; 0 otherwise) |
 | 534 | CheatReport | `raceId: u64`, `suspectSlot: u8`, `reason: u8` (FlagReason), `tick: u32`, `detail: string ≤ 256` |
 | 535 | UnknownContent | `raceId: u64`, `slot: u8`, `kind: u8`, `id: string ≤ 96` |
 | 536 | EliminatedSelf | `raceId: u64`, `attackerSlot: u8`, `tick: u32` |
@@ -636,7 +642,7 @@ datagrams (latest valid one wins).
 
 | Type | Direction | Payload |
 |------|-----------|---------|
-| 1 Ping | c → s | `clientTime: time` (sent 4×/s during loading and races; doubles as keepalive) |
+| 1 Ping | c → s | `clientTime: time`, `echoServerTime: time` (`serverTime` of the newest Pong received, 0 = none yet), `echoHoldMs: u16` (ms between receiving that Pong and sending this Ping, clamped to 65535). Sent 4×/s during loading and races; doubles as keepalive. The server's RTT sample = receive time − `echoServerTime` − `echoHoldMs` (ignored when the echo is 0, in the future or older than 5 s), smoothed with EWMA α = 1/8; it feeds `World.rttMs` and eligibility |
 | 2 Pong | s → c | `clientTime: time`, `serverTime: time` |
 | 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` |
 | 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other racer) |
@@ -691,5 +697,6 @@ round trip. A client must not use an item before its `ItemGranted` arrived.
 - **Kicks**: a cheating kick writes `cheat_kicks` (account, lobby, race, reason, reporters) and removes the racer from
   the race (outcome kicked: cheating); they stay in the lobby and may race again next race. Moderator kicks remove
   from race and lobby for 10 min and write the audit log.
-- **Solo races** (`solo`): nothing is arbitrated; the client sends `Finished`, the server records the result and ends
-  the race when it arrives (or on `EndRaceEarly`).
+- **Solo races** (`solo`): nothing is arbitrated; the client sends `Finished` with its `position` among the AI, the
+  server records that placement (AI rows are not reported) and ends the race when it arrives (or on `EndRaceEarly`:
+  DNF).

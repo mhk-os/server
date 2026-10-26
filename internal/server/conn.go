@@ -94,7 +94,7 @@ func (c *Conn) login(a *store.Account, hash store.TokenHash) {
 	c.account, c.session = a, hash
 	c.mu.Unlock()
 	if prev != nil && prev.ID != a.ID {
-		c.s.hub.unbind(c, prev.ID)
+		c.s.unbound(c, prev.ID)
 	}
 	c.s.hub.bind(c, a.ID)
 }
@@ -106,7 +106,7 @@ func (c *Conn) logout() {
 	c.account, c.session = nil, store.TokenHash{}
 	c.mu.Unlock()
 	if prev != nil {
-		c.s.hub.unbind(c, prev.ID)
+		c.s.unbound(c, prev.ID)
 	}
 }
 
@@ -182,6 +182,9 @@ func (c *Conn) serve(ctx context.Context) {
 		c.closeAfterFlush()
 		<-c.writerDone
 		c.s.hub.remove(c)
+		for _, fn := range c.s.closeHooks {
+			fn(c)
+		}
 	}()
 
 	r := bufio.NewReaderSize(c.nc, 4096)

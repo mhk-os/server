@@ -1,6 +1,7 @@
 // Package ghost parses and validates the game's .mhkghost files (game repo Runtime/Ghosts: GhostFile.cs,
 // GhostHeaderCodec.cs, GhostBodyCodec.cs, GhostChannelCodec.cs) and applies the upload checks of docs/protocol.md.
-// It decodes every byte the game would read, without keeping the frames: the server needs the summary only.
+// It decodes every byte the game would read; Parse keeps only the summary (all the server needs), ParseFrames
+// also the per-tick kart frames (bots replaying a ghost).
 package ghost
 
 import (
@@ -100,42 +101,56 @@ func fail(format string, args ...any) error { return &Error{Msg: fmt.Sprintf(for
 
 // Parse inflates, decodes and validates a complete .mhkghost file. Every error is an *Error.
 func Parse(file []byte) (*Summary, error) {
+	s, _, err := parse(file, false)
+	return s, err
+}
+
+// ParseFrames is Parse that also returns the decoded frames (tick i is race time i × TickSeconds).
+func ParseFrames(file []byte) (*Summary, []Frame, error) {
+	return parse(file, true)
+}
+
+func parse(file []byte, keepFrames bool) (*Summary, []Frame, error) {
 	if len(file) > MaxCompressed {
-		return nil, fail("file is larger than %d MiB", MaxCompressed>>20)
+		return nil, nil, fail("file is larger than %d MiB", MaxCompressed>>20)
 	}
 	data, err := inflate(file)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	r := &reader{b: data}
 	if m := r.bytes(len(magic)); r.err != nil || !bytes.Equal(m, magic) {
-		return nil, fail("not a ghost file")
+		return nil, nil, fail("not a ghost file")
 	}
 	if v := r.u16(); r.err != nil || v != FormatVersion {
-		return nil, fail("unsupported ghost format version %d (want %d)", v, FormatVersion)
+		return nil, nil, fail("unsupported ghost format version %d (want %d)", v, FormatVersion)
 	}
 	headerBlock, err := r.block("header")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	bodyBlock, err := r.block("body")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if r.remaining() != 0 {
-		return nil, fail("%d unexpected bytes after the body block", r.remaining())
+		return nil, nil, fail("%d unexpected bytes after the body block", r.remaining())
 	}
 	s := &Summary{}
 	if err := readHeader(&reader{b: headerBlock}, &s.Header); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := s.validateHeader(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := s.readBody(&reader{b: bodyBlock}); err != nil {
-		return nil, err
+	var frames []Frame
+	if keepFrames {
+		frames = make([]Frame, s.FrameCount)
 	}
-	return s, nil
+	if err := s.readBody(&reader{b: bodyBlock}, frames); err != nil {
+		return nil, nil, err
+	}
+	return s, frames, nil
 }
 
 func inflate(file []byte) ([]byte, error) {
@@ -447,7 +462,8 @@ func truncate(s string) string {
 	return s
 }
 
-func (s *Summary) readBody(r *reader) error {
+// readBody decodes the body block; frames, when non-nil (len FrameCount), receives the decoded frame values.
+func (s *Summary) readBody(r *reader, frames []Frame) error {
 	effects, err := readEffectTable(r)
 	if err != nil {
 		return err
@@ -457,9 +473,13 @@ func (s *Summary) readBody(r *reader) error {
 	for c := range PositionChannels {
 		axis := "xyz"[c]
 		if err := readChannel(r, n, 2, func(i int, q int64) error {
-			if v := float32(q) / PosScale; v < -MaxPosition || v > MaxPosition {
+			v := float32(q) / PosScale
+			if v < -MaxPosition || v > MaxPosition {
 				return fail("position %c at frame %d is %.0f m from the origin (at most %d km)", axis, i, v,
 					MaxPosition/1000)
+			}
+			if frames != nil {
+				frames[i].Pos[c] = v
 			}
 			return nil
 		}); err != nil {
@@ -467,14 +487,19 @@ func (s *Summary) readBody(r *reader) error {
 		}
 	}
 	for c := range RotationChannels {
-		if err := readChannel(r, n, 2, nil); err != nil {
+		if err := readChannel(r, n, 2, keepChannel(frames, func(f *Frame, q int64) {
+			f.Rot[c] = float32(q) / rotScale
+		})); err != nil {
 			return channelError(err, fmt.Sprintf("rotation channel %d", c))
 		}
 	}
 	for c := range FirstOrderChannels {
-		if err := readChannel(r, n, 1, nil); err != nil {
+		if err := readChannel(r, n, 1, keepChannel(frames, firstOrderSetter(c))); err != nil {
 			return channelError(err, fmt.Sprintf("channel %d", PositionChannels+RotationChannels+c))
 		}
+	}
+	for i := range frames {
+		frames[i].normaliseRotation()
 	}
 	events, err := s.readEvents(r, effects)
 	if err != nil {

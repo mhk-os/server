@@ -23,6 +23,8 @@ type Store interface {
 	store.Accounts
 	store.Moderation
 	store.Runs
+	ContentStrikes(ctx context.Context, accountID uint64, limit int) ([]store.ContentStrike, error)
+	CheatKicks(ctx context.Context, accountID uint64, limit int) ([]store.CheatKickView, error)
 }
 
 // Env is passed to every command.
@@ -50,10 +52,10 @@ func usageErr(format string, args ...any) error {
 	return &UsageError{Msg: fmt.Sprintf(format, args...)}
 }
 
-// Root is the command tree.
+// Root is the command tree. Lobbies live in the server's memory, so the CLI has no lobby commands.
 var Root = &Command{
 	Name: "admin",
-	Subs: []*Command{accountCommand, runCommand, boardCommand, auditCommand},
+	Subs: []*Command{accountCommand, runCommand, boardCommand, auditCommand, contentCommand, kicksCommand},
 }
 
 // Run executes args (without the leading "admin") against the tree.

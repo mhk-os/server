@@ -122,6 +122,9 @@ type Server struct {
 	connLimit *auth.Limiter
 	nextID    atomic.Uint64
 	wg        sync.WaitGroup
+
+	closeHooks []func(*Conn)
+	goneHooks  []func(accountID uint64)
 }
 
 // New returns a server with the connection, account, time-trial and moderation handlers registered.
@@ -164,6 +167,25 @@ func (s *Server) HandleNotify(typ proto.Type, needLogin bool, fn NotifyFunc) {
 
 // Hub returns the registry of live connections.
 func (s *Server) Hub() *Hub { return s.hub }
+
+// OnClose registers fn, called on the connection's goroutine after a connection closed (after OnAccountGone
+// hooks), so per-connection state elsewhere can be dropped. Register before Serve.
+func (s *Server) OnClose(fn func(c *Conn)) { s.closeHooks = append(s.closeHooks, fn) }
+
+// OnAccountGone registers fn, called when the last logged-in connection of an account stopped acting for it
+// (closed, logged out or logged in as another account): lobbies and races drop the player then. A player online
+// twice keeps their lobby while one connection survives. Register before Serve.
+func (s *Server) OnAccountGone(fn func(accountID uint64)) { s.goneHooks = append(s.goneHooks, fn) }
+
+// unbound runs the OnAccountGone hooks when c was the account's last connection.
+func (s *Server) unbound(c *Conn, accountID uint64) {
+	if !s.hub.unbind(c, accountID) {
+		return
+	}
+	for _, fn := range s.goneHooks {
+		fn(accountID)
+	}
+}
 
 // Serve accepts connections from ln until ctx is cancelled, then tells every client the server is restarting,
 // waits up to ShutdownGrace for them to flush and returns.
