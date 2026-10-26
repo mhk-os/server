@@ -730,7 +730,9 @@ func (m *Manager) openInstance(key instanceKey) *lobby {
 // join adds p to l (checks done) and leaves the previous lobby.
 func (m *Manager) join(l *lobby, p Player) *proto.LobbyState {
 	if old := m.byAccount[p.AccountID]; old != nil && old != l {
-		m.remove(old, p.AccountID, proto.LeftSelf, "", race.OutcomeLeft)
+		// No LobbyLeft: the player asked for the new lobby, and a push about the old one could reach the client
+		// after the join answer and be taken for the new one.
+		m.removeMember(old, p.AccountID, proto.LeftSelf, "", race.OutcomeLeft, false)
 	}
 	mem := &member{Player: p, joined: m.clock.Now().Truncate(time.Millisecond)}
 	l.members = append(l.members, mem)
@@ -758,6 +760,11 @@ func (m *Manager) join(l *lobby, p Player) *proto.LobbyState {
 
 // remove takes accountID out of l (and of its race, with outcome) and tells it why.
 func (m *Manager) remove(l *lobby, accountID uint64, reason uint8, message string, outcome race.Outcome) {
+	m.removeMember(l, accountID, reason, message, outcome, true)
+}
+
+// removeMember is remove with the LobbyLeft push optional.
+func (m *Manager) removeMember(l *lobby, accountID uint64, reason uint8, message string, outcome race.Outcome, notify bool) {
 	mem := l.member(accountID)
 	if mem == nil {
 		return
@@ -768,7 +775,9 @@ func (m *Manager) remove(l *lobby, accountID uint64, reason uint8, message strin
 	l.members = slices.DeleteFunc(l.members, func(x *member) bool { return x == mem })
 	delete(m.byAccount, accountID)
 	delete(l.votes, accountID)
-	m.cfg.Pusher.Push(accountID, proto.PushLobbyLeft, &proto.LobbyLeft{Reason: reason, Message: message})
+	if notify {
+		m.cfg.Pusher.Push(accountID, proto.PushLobbyLeft, &proto.LobbyLeft{Reason: reason, Message: message})
+	}
 
 	if !l.public {
 		if len(l.members) == 0 {

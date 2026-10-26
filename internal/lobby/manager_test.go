@@ -153,8 +153,8 @@ func TestOneLobbyPerAccount(t *testing.T) {
 	if e.lobbyOf(1).category != 2 {
 		t.Fatal("not moved")
 	}
-	left := e.push.of(1, proto.PushLobbyLeft)
-	if len(left) != 1 || left[0].(*proto.LobbyLeft).Reason != proto.LeftSelf {
+	// Switching is the player's own request: no LobbyLeft, which the client could mistake for the new lobby.
+	if left := e.push.of(1, proto.PushLobbyLeft); len(left) != 0 {
 		t.Fatalf("LobbyLeft %v", left)
 	}
 	if got := instances(e, 1, testSim); len(got) != 1 {

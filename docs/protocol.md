@@ -529,7 +529,8 @@ answer `BadRequest` "content not announced". Needs login.
 
 Join errors: `NotFound`, `Forbidden` (full, kicked from this lobby in the last 10 min, or a pack differs from the
 catalog majority in an anticheat lobby; message says which), `BadRequest` (missing packs: message lists them,
-simVersion differs: message says to update). A player is in at most one lobby; joining another leaves the first.
+simVersion differs: message says to update). A player is in at most one lobby; joining another leaves the first
+without a `LobbyLeft` push (the join answer replaces the state).
 
 ### Lobby pushes
 
