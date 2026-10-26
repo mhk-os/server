@@ -132,7 +132,8 @@ func TestRaceMessagesRoundTrip(t *testing.T) {
 	msgs := []struct{ in, out Message }{
 		{&RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "mhk2.egypt", Mode: 1, EngineClass: 2, Laps: 3, Items: true,
 			ItemOdds: []ItemOdds{{"mhk2.rocket", 50}}, Anticheat: true, AICount: 0, Seed: 99,
-			Grid:     []RaceSlot{{Slot: 0, AccountID: 5, Username: "a", Country: "DE", CharacterID: "c", KartID: "k"}},
+			Grid: []RaceSlot{{Slot: 0, AccountID: 5, Username: "a", Country: "DE", CharacterID: "c", KartID: "k",
+				Platform: PlatformLinux}},
 			YourSlot: 0, UDPPort: 7350, UDPToken: 42, UDPKey: bytes.Repeat([]byte{1}, 32), SetRace: 1, SetSize: 4},
 			&RaceSetup{}},
 		{&RaceGo{RaceID: 1, Go: time.UnixMilli(123456).UTC()}, &RaceGo{}},

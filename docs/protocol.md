@@ -476,6 +476,7 @@ packs.
 | pingMs | u16 | 0 = unknown |
 | setPoints | i32 | points in the current set |
 | joined | time | |
+| platform | u8 | the member's device, from the `platform` of its Hello: 0 unknown, 1 Windows, 2 macOS, 3 Linux, 4 Android, 5 iOS |
 
 `LobbyState` (push 256 and the answer of joins):
 
@@ -591,7 +592,11 @@ Server → client pushes:
 | setSize | u8 | |
 
 `RaceSlot`: `slot: u8`, `accountId: u64`, `username: string ≤ 20`, `country: string ≤ 2`,
-`characterId: string ≤ 96`, `kartId: string ≤ 96`.
+`characterId: string ≤ 96`, `kartId: string ≤ 96`, `platform: u8` (as `LobbyMember.platform`).
+
+Hello `platform` values the server maps (Unity `RuntimePlatform` names, editors included): `WindowsPlayer`,
+`WindowsEditor` → 1; `OSXPlayer`, `OSXEditor` → 2; `LinuxPlayer`, `LinuxEditor` → 3; `Android` → 4; `IPhonePlayer` → 5;
+anything else → 0.
 
 Client → server notifies (TCP, kind 3; the server ignores those for a race the sender is not in):
 

@@ -56,7 +56,7 @@ const (
 	manifestItemMinSize  = 1 + 1 + 1
 	packManifestMinSize  = 1 + 1 + 4 + 1 + 1
 	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4
-	lobbyMemberMinSize   = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 4 + 8
+	lobbyMemberMinSize   = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 4 + 8 + 1
 	lobbyVoteMinSize     = 8 + 1
 	raceResultRowMinSize = 1 + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1
 )
@@ -404,6 +404,7 @@ type LobbyMember struct {
 	PingMs      uint16
 	SetPoints   int32
 	Joined      time.Time
+	Platform    uint8 // Platform* constant of the member's device
 }
 
 func (m *LobbyMember) Encode(w *wire.Writer) {
@@ -419,6 +420,7 @@ func (m *LobbyMember) Encode(w *wire.Writer) {
 	w.U16(m.PingMs)
 	w.I32(m.SetPoints)
 	w.Time(m.Joined)
+	w.U8(m.Platform)
 }
 
 func (m *LobbyMember) Decode(r *wire.Reader) error {
@@ -434,6 +436,7 @@ func (m *LobbyMember) Decode(r *wire.Reader) error {
 	m.PingMs = r.U16()
 	m.SetPoints = r.I32()
 	m.Joined = r.Time()
+	m.Platform = r.U8()
 	return r.Err()
 }
 

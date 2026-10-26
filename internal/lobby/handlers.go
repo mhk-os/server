@@ -44,8 +44,8 @@ func (m *Manager) player(c *server.Conn) (Player, error) {
 		return Player{}, errNotAnnounced
 	}
 	country, _ := a.Country()
-	return Player{AccountID: a.ID, Username: a.Username, Country: country, Moderator: a.Role == proto.RoleModerator},
-		nil
+	return Player{AccountID: a.ID, Username: a.Username, Country: country, Moderator: a.Role == proto.RoleModerator,
+		Platform: proto.PlatformOf(c.Hello().Platform)}, nil
 }
 
 func (m *Manager) handleList(_ context.Context, p Player, r *wire.Reader) (proto.Message, error) {

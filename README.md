@@ -44,9 +44,11 @@ go run ./cmd/mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass k
 `dump-manifests` writes the pack manifests players reported most for that `simVersion` (the game must have
 announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` joins a public lobby instead of
 a room code, `-n` starts that many bots (`bot1` … `bot3`, registered when missing), `-character`/`-kart` default to
-the ghost's. Bots ping over TCP every 15 s (`-keepalive`) so the idle timeout never drops them during UDP-only
-races. They vote for the ghost's track (else Random), drive the ghost's path from GO, send `Finished` at its
-finish time and never use items. They cannot know the track data, so each sends a unique `RaceLoaded` hash: with
+the ghost's, and `-platform NAME` sets the Hello platform (a Unity `RuntimePlatform` name such as `Android` or
+`WindowsPlayer`; default `mhk-bot`, an unknown device) to test device icons. Bots ping over TCP every 15 s
+(`-keepalive`) so the idle timeout never drops them during UDP-only races. They vote for the ghost's track (else
+Random), drive the ghost's path from GO, send `Finished` at its finish time and never use items. They cannot know the
+track data, so each sends a unique `RaceLoaded` hash: with
 one human (or bots only) nobody has a content majority and everybody races with the lowest grid slot's content
 (when that is a bot, the server knows no item boxes and denies the human's pickups); with two or more humans the
 bots leave as desync.

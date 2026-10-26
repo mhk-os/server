@@ -100,6 +100,7 @@ type Player struct {
 	Username  string
 	Country   string
 	Moderator bool
+	Platform  uint8 // proto.Platform* of the connection that made the request (kept from the join)
 }
 
 type member struct {
@@ -361,7 +362,7 @@ func (m *Manager) state(l *lobby) *proto.LobbyState {
 			AccountID: mem.AccountID, Username: mem.Username, Country: mem.Country, CharacterID: mem.character,
 			KartID: mem.kart, Ready: mem.ready, Owner: !l.public && mem.AccountID == l.owner,
 			Moderator: mem.Moderator, InRace: mem.inRace, PingMs: mem.ping, SetPoints: mem.points,
-			Joined: mem.joined,
+			Joined: mem.joined, Platform: mem.Platform,
 		}
 		if t, ok := l.votes[mem.AccountID]; ok {
 			s.Votes = append(s.Votes, proto.LobbyVote{AccountID: mem.AccountID, TrackID: t})
@@ -556,7 +557,7 @@ func (m *Manager) startRace(l *lobby, track string, solo bool) error {
 	racers := make([]race.Racer, len(grid))
 	for i, mem := range grid {
 		racers[i] = race.Racer{AccountID: mem.AccountID, Username: mem.Username, Country: mem.Country,
-			CharacterID: mem.character, KartID: mem.kart}
+			CharacterID: mem.character, KartID: mem.kart, Platform: mem.Platform}
 	}
 	// Callbacks run on the race's goroutine and must not call back into the engine: hand them over.
 	id, err := m.cfg.Races.Start(spec, racers, race.Callbacks{

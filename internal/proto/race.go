@@ -50,7 +50,7 @@ const (
 	PoolWeights    = 11
 	NoSlot         = 255 // targetSlot / attackerSlot "none"
 
-	raceSlotMinSize = 1 + 8 + 1 + 1 + 1 + 1
+	raceSlotMinSize = 1 + 8 + 1 + 1 + 1 + 1 + 1
 	boxInfoMinSize  = 12 + 2 + 1
 	poolMinSize     = 1 + 1 + 1 + PoolWeights*4
 	specialMinSize  = 1 + 1
@@ -110,6 +110,7 @@ type RaceSlot struct {
 	Country     string
 	CharacterID string
 	KartID      string
+	Platform    uint8 // Platform* constant of the racer's device
 }
 
 func (m *RaceSlot) Encode(w *wire.Writer) {
@@ -119,6 +120,7 @@ func (m *RaceSlot) Encode(w *wire.Writer) {
 	w.String(m.Country)
 	w.String(m.CharacterID)
 	w.String(m.KartID)
+	w.U8(m.Platform)
 }
 
 func (m *RaceSlot) Decode(r *wire.Reader) error {
@@ -128,6 +130,7 @@ func (m *RaceSlot) Decode(r *wire.Reader) error {
 	m.Country = r.String(MaxCountry)
 	m.CharacterID = r.String(MaxContentID)
 	m.KartID = r.String(MaxContentID)
+	m.Platform = r.U8()
 	return r.Err()
 }
 

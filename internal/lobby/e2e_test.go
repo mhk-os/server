@@ -39,7 +39,8 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		if setup.TrackID != "mhk2.rome" || len(setup.Grid) != 2 || setup.Solo || setup.SetRace != 1 ||
-			setup.SetSize != 4 || setup.EngineClass != 2 || !setup.Anticheat || setup.UDPPort == 0 {
+			setup.SetSize != 4 || setup.EngineClass != 2 || !setup.Anticheat || setup.UDPPort == 0 ||
+			setup.Grid[0].Platform != proto.PlatformMacOS || setup.Grid[1].Platform != proto.PlatformMacOS {
 			t.Fatalf("RaceSetup %+v", setup)
 		}
 		setups[p] = &setup
@@ -94,7 +95,8 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 		t.Fatalf("lobby after the race %+v", st)
 	}
 	for _, m := range st.Members {
-		if m.InRace || (m.AccountID == b.id && m.SetPoints != 15) || (m.AccountID == a.id && m.SetPoints != 12) {
+		if m.InRace || (m.AccountID == b.id && m.SetPoints != 15) || (m.AccountID == a.id && m.SetPoints != 12) ||
+			m.Platform != proto.PlatformMacOS {
 			t.Fatalf("members %+v", st.Members)
 		}
 	}

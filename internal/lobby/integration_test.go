@@ -129,7 +129,7 @@ func (s *itServer) connect(t *testing.T, moderator bool) *itPlayer {
 		}
 		t.Cleanup(func() { c.Close() })
 		h := testclient.DefaultHello()
-		h.SimVersion = s.sim
+		h.SimVersion, h.Platform = s.sim, "OSXEditor" // LobbyMember/RaceSlot.platform 2
 		if _, err := c.Hello(ctx, h); err != nil {
 			t.Fatal(err)
 		}

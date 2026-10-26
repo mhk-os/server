@@ -65,6 +65,33 @@ func (m *Hello) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
+// Player devices (LobbyMember.platform, RaceSlot.platform).
+const (
+	PlatformUnknown uint8 = 0
+	PlatformWindows uint8 = 1
+	PlatformMacOS   uint8 = 2
+	PlatformLinux   uint8 = 3
+	PlatformAndroid uint8 = 4
+	PlatformIOS     uint8 = 5
+)
+
+// PlatformOf maps Hello.platform (a Unity RuntimePlatform name, editors included) to a Platform* constant.
+func PlatformOf(name string) uint8 {
+	switch name {
+	case "WindowsPlayer", "WindowsEditor":
+		return PlatformWindows
+	case "OSXPlayer", "OSXEditor":
+		return PlatformMacOS
+	case "LinuxPlayer", "LinuxEditor":
+		return PlatformLinux
+	case "Android":
+		return PlatformAndroid
+	case "IPhonePlayer":
+		return PlatformIOS
+	}
+	return PlatformUnknown
+}
+
 // HelloOk is the response to Hello.
 type HelloOk struct {
 	Protocol      uint16

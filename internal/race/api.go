@@ -31,6 +31,7 @@ type Racer struct {
 	Country     string
 	CharacterID string
 	KartID      string
+	Platform    uint8 // proto.Platform* of the racer's connection, shown in RaceSlot
 }
 
 // Spec is what the lobby decided for one race.

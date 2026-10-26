@@ -29,6 +29,7 @@ type botConfig struct {
 	replay    *replay
 	manifests *manifestFile
 	keepAlive time.Duration // TCP Ping interval
+	platform  string        // Hello.platform
 }
 
 // bot is one simulated player: lobby member and racer replaying the ghost.
@@ -82,7 +83,7 @@ func (b *bot) connect(ctx context.Context) error {
 	}
 	b.c = c
 	hello := testclient.DefaultHello()
-	hello.GameCommit, hello.Platform = "mhk-bot", "mhk-bot"
+	hello.GameCommit, hello.Platform = "mhk-bot", b.cfg.platform
 	hello.SimVersion = b.cfg.manifests.SimVersion
 	sent := time.Now()
 	ok, err := c.Hello(ctx, hello)

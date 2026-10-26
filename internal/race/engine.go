@@ -181,7 +181,7 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 	grid := make([]proto.RaceSlot, len(racers))
 	for i, r := range racers {
 		grid[i] = proto.RaceSlot{Slot: uint8(i), AccountID: r.AccountID, Username: r.Username, Country: r.Country,
-			CharacterID: r.CharacterID, KartID: r.KartID}
+			CharacterID: r.CharacterID, KartID: r.KartID, Platform: r.Platform}
 	}
 	raceSeed := binary.LittleEndian.Uint64(seed[:8]) ^ binary.LittleEndian.Uint64(seed[8:16])
 	for _, s := range seats {

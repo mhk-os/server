@@ -31,7 +31,7 @@ func lobbyMessages() []Message {
 		Phase: PhaseVoting, SimVersion: 7}
 	member := LobbyMember{AccountID: 1, Username: "Hans", Country: "DE", CharacterID: "mhk2.char.huhn",
 		KartID: "mhk2.kart.speedy", Ready: true, Owner: true, Moderator: true, InRace: true, PingMs: 48,
-		SetPoints: 37, Joined: when}
+		SetPoints: 37, Joined: when, Platform: PlatformMacOS}
 	return []Message{
 		&PackRef{PackID: "mhk2", Commit: "v1.2", ManifestHash: "00112233445566778899aabbccddeeff"},
 		&ContentHello{SimVersion: 7, Packs: []PackRef{{"game", "abc", "ff"}, {"mhk2", "", "00"}}},
@@ -89,18 +89,51 @@ func TestLobbyRoundTrips(t *testing.T) {
 // minimum item sizes used for count checks honest.
 func TestLobbyMemberBytes(t *testing.T) {
 	m := LobbyMember{AccountID: 1, Username: "a", Country: "DE", CharacterID: "c", KartID: "k", Ready: true,
-		Owner: false, Moderator: true, InRace: false, PingMs: 2, SetPoints: -3, Joined: time.UnixMilli(4).UTC()}
+		Owner: false, Moderator: true, InRace: false, PingMs: 2, SetPoints: -3, Joined: time.UnixMilli(4).UTC(),
+		Platform: PlatformAndroid}
 	le := binary.LittleEndian
 	want := le.AppendUint64(nil, 1)
 	want = append(want, 1, 'a', 2, 'D', 'E', 1, 'c', 1, 'k', 1, 0, 1, 0)
 	want = le.AppendUint16(want, 2)
 	want = le.AppendUint32(want, uint32(0xfffffffd))
 	want = le.AppendUint64(want, 4)
+	want = append(want, 4) // platform
 	if got := Encode(&m); !bytes.Equal(got, want) {
 		t.Fatalf("got  % x\nwant % x", got, want)
 	}
 	if lobbyMemberMinSize != len(want)-1-2-1-1 {
 		t.Fatalf("lobbyMemberMinSize out of date")
+	}
+}
+
+func TestRaceSlotBytes(t *testing.T) {
+	s := RaceSlot{Slot: 3, AccountID: 2, Username: "u", Country: "SK", CharacterID: "c", KartID: "k",
+		Platform: PlatformIOS}
+	want := []byte{3}
+	want = binary.LittleEndian.AppendUint64(want, 2)
+	want = append(want, 1, 'u', 2, 'S', 'K', 1, 'c', 1, 'k', 5)
+	if got := Encode(&s); !bytes.Equal(got, want) {
+		t.Fatalf("got  % x\nwant % x", got, want)
+	}
+	if raceSlotMinSize != len(want)-1-2-1-1 {
+		t.Fatalf("raceSlotMinSize out of date")
+	}
+	var back RaceSlot
+	if err := back.Decode(wire.NewReader(want)); err != nil || back != s {
+		t.Fatalf("decoded %+v, %v", back, err)
+	}
+}
+
+func TestPlatformOf(t *testing.T) {
+	for name, want := range map[string]uint8{
+		"WindowsPlayer": PlatformWindows, "WindowsEditor": PlatformWindows, "OSXPlayer": PlatformMacOS,
+		"OSXEditor": PlatformMacOS, "LinuxPlayer": PlatformLinux, "LinuxEditor": PlatformLinux,
+		"Android": PlatformAndroid, "IPhonePlayer": PlatformIOS, "": PlatformUnknown, "mhk-bot": PlatformUnknown,
+		"windowsplayer": PlatformUnknown, "WebGLPlayer": PlatformUnknown,
+	} {
+		if got := PlatformOf(name); got != want {
+			t.Errorf("PlatformOf(%q) = %d, want %d", name, got, want)
+		}
 	}
 }
 

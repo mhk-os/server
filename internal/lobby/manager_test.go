@@ -294,6 +294,29 @@ func TestVotingTimeoutAndRandom(t *testing.T) {
 	wantStatus(t, e.m.Vote(Player{AccountID: 1}, ""), proto.StatusBadRequest, "Voting is not open")
 }
 
+func TestPlatformCarried(t *testing.T) {
+	e := newEnv(t)
+	for id, platform := range map[uint64]uint8{1: proto.PlatformAndroid, 2: proto.PlatformWindows} {
+		p := e.player(id)
+		p.Platform = platform
+		e.ok(e.m.QuickJoin(p, 1))
+		must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
+	}
+	st := e.push.lastState(t, 1)
+	for _, m := range st.Members {
+		if want := map[uint64]uint8{1: proto.PlatformAndroid, 2: proto.PlatformWindows}[m.AccountID]; m.Platform != want {
+			t.Fatalf("member %d platform %d", m.AccountID, m.Platform)
+		}
+	}
+	must(t, e.m.Vote(Player{AccountID: 1}, ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	for _, r := range e.races.last().racers {
+		if want := map[uint64]uint8{1: proto.PlatformAndroid, 2: proto.PlatformWindows}[r.AccountID]; r.Platform != want {
+			t.Fatalf("racer %d platform %d", r.AccountID, r.Platform)
+		}
+	}
+}
+
 func TestBattleArenas(t *testing.T) {
 	e := newEnv(t)
 	for id := uint64(1); id <= 2; id++ {
