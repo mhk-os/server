@@ -22,6 +22,7 @@ import (
 
 	"github.com/mhk-os/server/internal/admin"
 	"github.com/mhk-os/server/internal/auth"
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/geo"
 	"github.com/mhk-os/server/internal/server"
 	"github.com/mhk-os/server/internal/store"
@@ -99,6 +100,11 @@ func dbFlag(fs *flag.FlagSet) *string {
 		"MySQL DSN, e.g. mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true (MHK_DB_DSN)")
 }
 
+func dataDirFlag(fs *flag.FlagSet) *string {
+	return fs.String("data-dir", env("MHK_DATA_DIR", "./data"),
+		"directory for server data; ghost files live in its ghosts/ (MHK_DATA_DIR)")
+}
+
 func openStore(ctx context.Context, dsn string) (*store.Store, error) {
 	if dsn == "" {
 		return nil, errors.New("no database configured: set MHK_DB_DSN or -db")
@@ -125,7 +131,7 @@ func serve(ctx context.Context, args []string) error {
 	fs.StringVar(&ts.acmeCache, "acme-cache", env("MHK_ACME_CACHE", ""), "directory for ACME account and certificates (MHK_ACME_CACHE)")
 	fs.StringVar(&ts.acmeHTTP, "acme-http", env("MHK_ACME_HTTP", ":80"), "HTTP-01 challenge listen address (MHK_ACME_HTTP)")
 	geoPath := fs.String("geoip", env("MHK_GEOIP", ""), "ISO country .mmdb database, optional (MHK_GEOIP)")
-	dataDir := fs.String("data-dir", env("MHK_DATA_DIR", "./data"), "directory for server data such as ghosts (MHK_DATA_DIR)")
+	dataDir := dataDirFlag(fs)
 	autoMigrate := fs.Bool("auto-migrate", envBool("MHK_AUTO_MIGRATE", true), "apply migrations at startup (MHK_AUTO_MIGRATE)")
 	logLevel := fs.String("log-level", env("MHK_LOG_LEVEL", "info"), "debug, info, warn or error (MHK_LOG_LEVEL)")
 	if err := fs.Parse(args); err != nil {
@@ -137,7 +143,8 @@ func serve(ctx context.Context, args []string) error {
 	}
 	slog.SetDefault(log)
 
-	if err := os.MkdirAll(*dataDir, 0o750); err != nil {
+	ghosts, err := blobs.Open(*dataDir)
+	if err != nil {
 		return fmt.Errorf("data dir: %w", err)
 	}
 	st, err := openStore(ctx, *dsn)
@@ -177,11 +184,14 @@ func serve(ctx context.Context, args []string) error {
 
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), auth.DefaultLimits)
 	srv := server.New(server.Config{Version: version}, server.Deps{
-		Log:      log,
-		Auth:     svc,
-		Accounts: st,
-		Sessions: st,
-		Geo:      geoDB,
+		Log:        log,
+		Auth:       svc,
+		Accounts:   st,
+		Sessions:   st,
+		Moderation: st,
+		Runs:       st,
+		Blobs:      ghosts,
+		Geo:        geoDB,
 	})
 	go pruneSessions(ctx, st, log)
 	log.Info("mhk-server listening", "version", version, "addr", ln.Addr().String(), "tls", tlsConfig != nil)
@@ -235,8 +245,9 @@ func migrate(ctx context.Context, args []string) error {
 func runAdmin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("admin", flag.ContinueOnError)
 	dsn := dbFlag(fs)
+	dataDir := dataDirFlag(fs)
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: mhk-server admin [-db DSN] <command> ...")
+		fmt.Fprintln(fs.Output(), "Usage: mhk-server admin [-db DSN] [-data-dir DIR] <command> ...")
 		fs.PrintDefaults()
 		admin.Root.PrintUsage(fs.Output(), "admin")
 	}
@@ -252,5 +263,9 @@ func runAdmin(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
-	return admin.Run(ctx, &admin.Env{Store: st, Out: os.Stdout}, fs.Args())
+	ghosts, err := blobs.Open(*dataDir)
+	if err != nil {
+		return fmt.Errorf("data dir: %w", err)
+	}
+	return admin.Run(ctx, &admin.Env{Store: st, Blobs: ghosts, Out: os.Stdout}, fs.Args())
 }

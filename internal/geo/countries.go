@@ -1,5 +1,7 @@
 package geo
 
+import "slices"
+
 // Continent codes as used by GeoIP databases; phase 2 leaderboards filter by them.
 const (
 	Africa       = "AF"
@@ -72,3 +74,20 @@ func ValidCountry(code string) bool {
 
 // Continent returns the continent code of a country, "" for unknown codes.
 func Continent(code string) string { return continents[code] }
+
+// CountriesIn returns the country codes of a continent (AF AN AS EU NA OC SA), sorted; nil for unknown codes.
+func CountriesIn(continent string) []string {
+	return byContinent[continent]
+}
+
+// byContinent inverts continents once at start-up.
+var byContinent = func() map[string][]string {
+	m := map[string][]string{}
+	for country, continent := range continents {
+		m[continent] = append(m[continent], country)
+	}
+	for _, list := range m {
+		slices.Sort(list)
+	}
+	return m
+}()

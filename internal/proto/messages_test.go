@@ -12,7 +12,7 @@ import (
 var when = time.UnixMilli(1_761_000_000_123).UTC()
 
 func messages() []Message {
-	return []Message{
+	list := []Message{
 		&Hello{Magic: Magic, Protocol: Version, GameCommit: "abc123", GameBuild: 42, SimVersion: 3, ModAPI: 1, Platform: "WindowsPlayer"},
 		&HelloOk{Protocol: Version, ServerVersion: "v1.0.0", UDPPort: 7350, ServerTime: when},
 		&Ping{ClientTime: when},
@@ -24,6 +24,7 @@ func messages() []Message {
 		&Session{Token: "t", Expires: when, Account: Account{ID: 1, Username: "abc", Created: when}},
 		&Disconnect{Status: StatusAccountDisabled, Message: "cheating"},
 	}
+	return append(list, timeTrialMessages()...)
 }
 
 func TestRoundTrips(t *testing.T) {

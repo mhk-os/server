@@ -198,11 +198,12 @@ func accountDelete(ctx context.Context, env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := env.Store.DeleteAccount(ctx, a.ID, sysadminAction(store.ActionDeleteAccount, a, *reason)); err != nil {
+	orphans, err := env.Store.DeleteAccount(ctx, a.ID, sysadminAction(store.ActionDeleteAccount, a, *reason))
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(env.Out, "%s (id %d) deleted\n", a.Username, a.ID)
-	return nil
+	fmt.Fprintf(env.Out, "%s (id %d) deleted with its runs and reports\n", a.Username, a.ID)
+	return removeBlobs(env, orphans)
 }
 
 func audit(ctx context.Context, env *Env, args []string) error {

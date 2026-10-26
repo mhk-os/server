@@ -45,4 +45,20 @@ func TestDispatchUsage(t *testing.T) {
 	if err := Run(context.Background(), env, []string{"account", "delete", "bob"}); !errors.As(err, &ue) {
 		t.Fatalf("delete without --yes: %v", err)
 	}
+	out.Reset()
+	Root.PrintUsage(&out, "admin")
+	for _, want := range []string{"admin run list [--account U] [--track T] [--limit N]", "admin run delete <id> --yes",
+		"admin run hide <id> --reason TEXT", "admin run reports <id>", "admin board list [--track T]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage lacks %q:\n%s", want, out.String())
+		}
+	}
+	for _, args := range [][]string{{"run", "show", "abc"}, {"run", "delete", "0", "--yes"}, {"run", "show"}} {
+		if err := Run(context.Background(), env, args); !errors.As(err, &ue) {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	if formatMs(96_252) != "1:36.252" || formatMs(5_007) != "0:05.007" {
+		t.Error("formatMs")
+	}
 }

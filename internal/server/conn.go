@@ -39,7 +39,9 @@ type Conn struct {
 	session store.TokenHash
 	hello   proto.Hello
 
-	malformed int
+	// malformed holds the times of recent BadRequest answers (read goroutine only), at most MalformedLimit.N:
+	// a session that lasts hours may make the odd mistake, a client stuck in a loop of bad requests is dropped.
+	malformed []time.Time
 }
 
 // IP returns the client address.
@@ -287,15 +289,26 @@ func (c *Conn) handleRequest(ctx context.Context, frame wire.Frame) bool {
 	}
 	status, msg := c.errorStatus(typ, err)
 	c.send(proto.KindResponse, typ, frame.ID, proto.EncodeError(status, msg))
-	if status == proto.StatusBadRequest {
-		c.malformed++
-		if c.malformed >= c.s.cfg.MaxMalformed {
-			c.log.Info("too many malformed requests")
-			c.Disconnect(proto.StatusBadRequest, "Too many invalid requests.")
-			return false
-		}
+	if status == proto.StatusBadRequest && c.tooManyMalformed(time.Now()) {
+		c.log.Info("too many malformed requests")
+		c.Disconnect(proto.StatusBadRequest, "Too many invalid requests.")
+		return false
 	}
 	return true
+}
+
+// tooManyMalformed records a BadRequest at now and reports whether the connection reached the limit within the
+// window.
+func (c *Conn) tooManyMalformed(now time.Time) bool {
+	limit := c.s.cfg.MalformedLimit
+	recent := c.malformed[:0]
+	for _, t := range c.malformed {
+		if now.Sub(t) < limit.Per {
+			recent = append(recent, t)
+		}
+	}
+	c.malformed = append(recent, now)
+	return len(c.malformed) >= limit.N
 }
 
 func (c *Conn) errorStatus(typ proto.Type, err error) (proto.Status, string) {

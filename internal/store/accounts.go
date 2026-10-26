@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/proto"
 )
 
@@ -186,15 +187,52 @@ func (s *Store) EnableAccount(ctx context.Context, id uint64, act Action) error 
 	})
 }
 
-// DeleteAccount removes the account permanently; sessions cascade, the audit log keeps the entry.
-func (s *Store) DeleteAccount(ctx context.Context, id uint64, act Action) error {
-	return s.inTx(ctx, func(tx *sql.Tx) error {
+// DeleteAccount removes the account permanently; its sessions, runs, reports and cheat kicks cascade, the audit log
+// keeps the entry. Runs the account reported get their flag counts recomputed. It returns the blobs of the deleted
+// runs that no other run references, for the caller to remove after the commit.
+func (s *Store) DeleteAccount(ctx context.Context, id uint64, act Action) ([]blobs.Hash, error) {
+	var orphans []blobs.Hash
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		if err := s.accountExists(ctx, tx, id); err != nil {
+			return err
+		}
+		hashes, err := accountBlobs(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		reported, err := countedReportsBy(ctx, tx, id)
+		if err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM accounts WHERE id = ?", id); err != nil {
 			return err
 		}
+		if err := recountFlags(ctx, tx, reported); err != nil {
+			return err
+		}
+		if orphans, err = unreferenced(ctx, tx, hashes); err != nil {
+			return err
+		}
 		return recordAction(ctx, tx, act)
 	})
+	return orphans, err
+}
+
+func accountBlobs(ctx context.Context, tx *sql.Tx, accountID uint64) ([]blobs.Hash, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT blob_sha256 FROM runs WHERE account_id = ?", accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []blobs.Hash
+	for rows.Next() {
+		var b []byte
+		if err := rows.Scan(&b); err != nil {
+			return nil, err
+		}
+		var h blobs.Hash
+		copy(h[:], b)
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }

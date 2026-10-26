@@ -2,6 +2,7 @@ package geo
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 )
 
@@ -40,5 +41,24 @@ func TestNilDB(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCountriesIn(t *testing.T) {
+	total := 0
+	for _, continent := range []string{Africa, Antarctica, Asia, Europe, NorthAmerica, Oceania, SouthAmerica} {
+		list := CountriesIn(continent)
+		if !slices.IsSorted(list) || len(list) == 0 {
+			t.Errorf("%s: %v", continent, list)
+		}
+		for _, c := range list {
+			if Continent(c) != continent {
+				t.Errorf("%s listed in %s", c, continent)
+			}
+		}
+		total += len(list)
+	}
+	if total != len(continents) || !slices.Contains(CountriesIn(Europe), "SK") || CountriesIn("XX") != nil {
+		t.Error("continent lists incomplete")
 	}
 }

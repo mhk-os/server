@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/store"
 )
@@ -21,11 +22,13 @@ import (
 type Store interface {
 	store.Accounts
 	store.Moderation
+	store.Runs
 }
 
 // Env is passed to every command.
 type Env struct {
 	Store Store
+	Blobs *blobs.Store // ghost files, removed when deletes leave them unreferenced
 	Out   io.Writer
 }
 
@@ -50,7 +53,7 @@ func usageErr(format string, args ...any) error {
 // Root is the command tree.
 var Root = &Command{
 	Name: "admin",
-	Subs: []*Command{accountCommand, auditCommand},
+	Subs: []*Command{accountCommand, runCommand, boardCommand, auditCommand},
 }
 
 // Run executes args (without the leading "admin") against the tree.

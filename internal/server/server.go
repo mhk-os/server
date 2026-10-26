@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mhk-os/server/internal/auth"
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/geo"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/store"
@@ -30,7 +31,8 @@ type Config struct {
 	RevalidateInterval time.Duration // how often live sessions are checked against the database
 	ShutdownGrace      time.Duration // how long shutdown waits for connections to flush
 	ConnLimit          auth.Rate     // new connections per IP
-	MaxMalformed       int           // malformed requests before a connection is dropped
+	MalformedLimit     auth.Rate     // malformed requests per connection within a sliding window before it is dropped
+	UploadLimit        auth.Rate     // stored run uploads per account
 }
 
 // DefaultConfig holds the values from docs/protocol.md.
@@ -42,7 +44,8 @@ var DefaultConfig = Config{
 	RevalidateInterval: 30 * time.Second,
 	ShutdownGrace:      5 * time.Second,
 	ConnLimit:          auth.Rate{N: 30, Per: time.Minute},
-	MaxMalformed:       10,
+	MalformedLimit:     auth.Rate{N: 10, Per: time.Minute},
+	UploadLimit:        auth.Rate{N: 30, Per: time.Hour},
 }
 
 func (c *Config) applyDefaults() {
@@ -68,18 +71,24 @@ func (c *Config) applyDefaults() {
 	if c.ConnLimit == (auth.Rate{}) {
 		c.ConnLimit = d.ConnLimit
 	}
-	if c.MaxMalformed <= 0 {
-		c.MaxMalformed = d.MaxMalformed
+	if c.MalformedLimit == (auth.Rate{}) {
+		c.MalformedLimit = d.MalformedLimit
+	}
+	if c.UploadLimit == (auth.Rate{}) {
+		c.UploadLimit = d.UploadLimit
 	}
 }
 
 // Deps are the services handlers use.
 type Deps struct {
-	Log      *slog.Logger
-	Auth     *auth.Service
-	Accounts store.Accounts
-	Sessions store.Sessions
-	Geo      *geo.DB // nil = no GeoIP database
+	Log        *slog.Logger
+	Auth       *auth.Service
+	Accounts   store.Accounts
+	Sessions   store.Sessions
+	Moderation store.Moderation
+	Runs       store.Runs
+	Blobs      *blobs.Store
+	Geo        *geo.DB // nil = no GeoIP database
 }
 
 // HandlerFunc handles one request. It decodes the body from r and returns the response payload (nil for an
@@ -115,7 +124,7 @@ type Server struct {
 	wg        sync.WaitGroup
 }
 
-// New returns a server with the phase 1 connection and account handlers registered.
+// New returns a server with the connection, account, time-trial and moderation handlers registered.
 func New(cfg Config, deps Deps) *Server {
 	cfg.applyDefaults()
 	if deps.Log == nil {
@@ -131,6 +140,8 @@ func New(cfg Config, deps Deps) *Server {
 		connLimit: auth.NewLimiter(cfg.ConnLimit),
 	}
 	s.registerConnection()
+	s.registerTimeTrials()
+	s.registerModeration()
 	s.registerAccounts()
 	return s
 }

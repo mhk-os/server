@@ -34,6 +34,21 @@ const (
 	TypeResume     Type = 18
 	TypeLogout     Type = 19
 	TypeSetCountry Type = 20
+
+	TypeModHideRun        Type = 64
+	TypeModUnhideRun      Type = 65
+	TypeModDisableAccount Type = 66
+	TypeModEnableAccount  Type = 67
+	TypeModListFlagged    Type = 68
+	TypeModRunReports     Type = 69
+	TypeModGetAccount     Type = 70
+
+	TypeListBoards     Type = 128
+	TypeGetLeaderboard Type = 129
+	TypeUploadRun      Type = 130
+	TypeDownloadRun    Type = 131
+	TypeReportRun      Type = 132
+	TypeMyRuns         Type = 133
 )
 
 // Push types.
@@ -119,4 +134,39 @@ func ParseRole(s string) (Role, error) {
 		return RoleModerator, nil
 	}
 	return 0, fmt.Errorf("unknown role %q (want player or moderator)", s)
+}
+
+// FlagReason is why a game client reported a run (ReportRun).
+type FlagReason uint8
+
+const (
+	FlagSpeed        FlagReason = 1
+	FlagAcceleration FlagReason = 2
+	FlagTeleport     FlagReason = 3
+	FlagWallClip     FlagReason = 4
+	FlagFlying       FlagReason = 5
+	FlagCheckpoints  FlagReason = 6
+	FlagLapTimes     FlagReason = 7
+	FlagDivergence   FlagReason = 8
+	FlagData         FlagReason = 9
+	FlagOther        FlagReason = 255
+)
+
+var flagReasonNames = map[FlagReason]string{
+	FlagSpeed: "Speed", FlagAcceleration: "Acceleration", FlagTeleport: "Teleport", FlagWallClip: "WallClip",
+	FlagFlying: "Flying", FlagCheckpoints: "Checkpoints", FlagLapTimes: "LapTimes", FlagDivergence: "Divergence",
+	FlagData: "Data", FlagOther: "Other",
+}
+
+// Valid reports whether r is one of the reasons docs/protocol.md defines.
+func (r FlagReason) Valid() bool {
+	_, ok := flagReasonNames[r]
+	return ok
+}
+
+func (r FlagReason) String() string {
+	if name, ok := flagReasonNames[r]; ok {
+		return name
+	}
+	return fmt.Sprintf("FlagReason(%d)", uint8(r))
 }

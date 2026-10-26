@@ -16,6 +16,7 @@ import (
 
 	"github.com/mhk-os/server/internal/admin"
 	"github.com/mhk-os/server/internal/auth"
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/server"
 	"github.com/mhk-os/server/internal/store"
@@ -35,10 +36,12 @@ var generous = auth.Limits{
 }
 
 type testServer struct {
-	addr string
-	st   *store.Store
-	stop context.CancelFunc
-	done chan error
+	addr  string
+	st    *store.Store
+	blobs *blobs.Store
+	srv   *server.Server
+	stop  context.CancelFunc
+	done  chan error
 }
 
 func openStore(t *testing.T) *store.Store {
@@ -71,13 +74,19 @@ func start(t *testing.T, cfg server.Config, limits auth.Limits) *testServer {
 	cfg.Version = "test"
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), limits)
-	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st})
+	ghosts, err := blobs.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
+		Blobs: ghosts})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ts := &testServer{addr: ln.Addr().String(), st: st, stop: cancel, done: make(chan error, 1)}
+	ts := &testServer{addr: ln.Addr().String(), st: st, blobs: ghosts, srv: srv, stop: cancel,
+		done: make(chan error, 1)}
 	go func() { ts.done <- srv.Serve(ctx, ln) }()
 	t.Cleanup(func() {
 		cancel()
@@ -124,10 +133,10 @@ func waitClosed(t *testing.T, c *testclient.Client) {
 	}
 }
 
-func runAdmin(t *testing.T, st *store.Store, args ...string) string {
+func runAdmin(t *testing.T, ts *testServer, args ...string) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := admin.Run(ctxT(t), &admin.Env{Store: st, Out: &out}, args); err != nil {
+	if err := admin.Run(ctxT(t), &admin.Env{Store: ts.st, Blobs: ts.blobs, Out: &out}, args); err != nil {
 		t.Fatalf("admin %v: %v\n%s", args, err, out.String())
 	}
 	return out.String()
@@ -328,7 +337,7 @@ func TestDisableByCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runAdmin(t, ts.st, "account", "disable", strings.ToLower(name), "--reason", "Cheating in races")
+	runAdmin(t, ts, "account", "disable", strings.ToLower(name), "--reason", "Cheating in races")
 	d, err := c.WaitDisconnect(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -345,22 +354,22 @@ func TestDisableByCLI(t *testing.T) {
 	wantStatus(t, err, proto.StatusAccountDisabled)
 	_, err = connect(t, ts).Resume(ctx, reg.Token)
 	wantStatus(t, err, proto.StatusSessionInvalid) // disabling revoked the session
-	out := runAdmin(t, ts.st, "account", "show", name)
+	out := runAdmin(t, ts, "account", "show", name)
 	if !strings.Contains(out, "disabled") || !strings.Contains(out, "Cheating in races") {
 		t.Fatalf("show:\n%s", out)
 	}
 
-	runAdmin(t, ts.st, "account", "enable", name)
+	runAdmin(t, ts, "account", "enable", name)
 	if _, err := connect(t, ts).Login(ctx, name, password); err != nil {
 		t.Fatalf("login after enable: %v", err)
 	}
 
-	runAdmin(t, ts.st, "account", "set-role", name, "moderator")
+	runAdmin(t, ts, "account", "set-role", name, "moderator")
 	l, err := connect(t, ts).Login(ctx, name, password)
 	if err != nil || l.Account.Role != proto.RoleModerator {
 		t.Fatalf("role after set-role: %+v %v", l, err)
 	}
-	if out := runAdmin(t, ts.st, "account", "list", "--role", "moderator"); !strings.Contains(out, name) {
+	if out := runAdmin(t, ts, "account", "list", "--role", "moderator"); !strings.Contains(out, name) {
 		t.Fatalf("moderator list:\n%s", out)
 	}
 
@@ -368,7 +377,7 @@ func TestDisableByCLI(t *testing.T) {
 	if _, err := live.Login(ctx, name, password); err != nil {
 		t.Fatal(err)
 	}
-	runAdmin(t, ts.st, "account", "delete", name, "--yes")
+	runAdmin(t, ts, "account", "delete", name, "--yes")
 	d, err = live.WaitDisconnect(ctx)
 	if err != nil || d.Status != proto.StatusSessionInvalid {
 		t.Fatalf("after delete: %+v %v", d, err)
@@ -376,7 +385,7 @@ func TestDisableByCLI(t *testing.T) {
 	_, err = connect(t, ts).Login(ctx, name, password)
 	wantStatus(t, err, proto.StatusInvalidCredentials)
 
-	audit := runAdmin(t, ts.st, "audit", "--limit", "200")
+	audit := runAdmin(t, ts, "audit", "--limit", "200")
 	for _, action := range []string{store.ActionDisableAccount, store.ActionEnableAccount, store.ActionSetRole,
 		store.ActionDeleteAccount} {
 		if !strings.Contains(audit, action) {
@@ -509,12 +518,12 @@ func TestFrameLimits(t *testing.T) {
 }
 
 func TestUnsupportedAndMalformed(t *testing.T) {
-	ts := start(t, server.Config{MaxMalformed: 3}, generous)
+	ts := start(t, server.Config{MalformedLimit: auth.Rate{N: 3, Per: time.Minute}}, generous)
 	ctx := ctxT(t)
 	c := connect(t, ts)
 	_, err := c.RequestRaw(ctx, 999, nil)
 	wantStatus(t, err, proto.StatusUnsupported)
-	_, err = c.RequestRaw(ctx, proto.RangeTimeTrials.First, nil)
+	_, err = c.RequestRaw(ctx, proto.RangeTimeTrials.Last, nil)
 	wantStatus(t, err, proto.StatusUnsupported)
 	if _, err := c.Ping(ctx); err != nil {
 		t.Fatalf("connection dropped after Unsupported: %v", err)
@@ -531,6 +540,32 @@ func TestUnsupportedAndMalformed(t *testing.T) {
 		t.Fatalf("after repeated malformed requests: %+v %v", d, err)
 	}
 	waitClosed(t, c)
+
+	t.Run("sliding window", func(t *testing.T) {
+		const window = 300 * time.Millisecond
+		ts := start(t, server.Config{MalformedLimit: auth.Rate{N: 2, Per: window}}, generous)
+		c := connect(t, ts)
+		bad := func() {
+			t.Helper()
+			_, err := c.RequestRaw(ctx, proto.TypePing, []byte{1})
+			wantStatus(t, err, proto.StatusBadRequest)
+		}
+		// Mistakes further apart than the window never add up.
+		for range 3 {
+			bad()
+			time.Sleep(window + 50*time.Millisecond)
+		}
+		if _, err := c.Ping(ctx); err != nil {
+			t.Fatalf("dropped for spaced-out malformed requests: %v", err)
+		}
+		bad()
+		bad()
+		d, err := c.WaitDisconnect(ctx)
+		if err != nil || d.Status != proto.StatusBadRequest {
+			t.Fatalf("after two malformed requests within the window: %+v %v", d, err)
+		}
+		waitClosed(t, c)
+	})
 }
 
 func TestShutdownNotifiesClients(t *testing.T) {

@@ -1,9 +1,9 @@
 # mhk-server
 
-The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts
-today; time-trial leaderboards with ghost exchange and real-time races later. Clients speak a small binary
-protocol over one TCP (or TLS) connection, specified in [docs/protocol.md](docs/protocol.md). Accounts, sessions
-and the moderation audit log live in MySQL 8.4.
+The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts, time-trial leaderboards with ghost
+upload and download, and in-game moderation; real-time races later. Clients speak a small binary protocol over one
+TCP (or TLS) connection, specified in [docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run
+reports and the moderation audit log live in MySQL 8.4; the ghost files themselves live in the data directory.
 
 ## Quick start
 
@@ -43,7 +43,7 @@ Every `serve` flag falls back to an environment variable.
 | `-acme-cache` | `MHK_ACME_CACHE` | | directory for ACME account and certificates (required with ACME) |
 | `-acme-http` | `MHK_ACME_HTTP` | `:80` | HTTP-01 challenge listener |
 | `-geoip` | `MHK_GEOIP` | | ISO country `.mmdb` (DB-IP Lite Country, GeoLite2-Country); without it countries are unknown until players pick one |
-| `-data-dir` | `MHK_DATA_DIR` | `./data` | server data (ghost files from phase 2) |
+| `-data-dir` | `MHK_DATA_DIR` | `./data` | server data: uploaded ghost files under `ghosts/` (the admin CLI needs it too, to delete files) |
 | `-auto-migrate` | `MHK_AUTO_MIGRATE` | `true` | apply migrations at startup |
 | `-log-level` | `MHK_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 
@@ -51,11 +51,19 @@ Without a certificate or ACME domain the server speaks plaintext and warns when 
 loopback. `mhk-server migrate` applies migrations without starting the server. The version label shown to
 clients is set at build time: `go build -ldflags "-X main.version=v1.2.3" ./cmd/mhk-server`.
 
+### Ghost files
+
+Every upload is parsed and validated completely (docs/protocol.md, "Upload validation") before it is stored as
+`<data dir>/ghosts/<first 2 hex>/<sha256>.mhkghost`, written atomically and shared by identical files. Accounts may
+upload 30 runs per hour. Only the sysadmin deletes files: `run delete` and `account delete` remove a file once no run
+references it any more. Back the data directory up together with the database.
+
 ## Administration
 
 The sysadmin works on the database directly; the server does not need to be stopped. Disabling an account or
 deleting it drops the player's live connections within 30 seconds (the server re-checks sessions periodically).
-Every mutating command is written to the moderation audit log with the sysadmin as actor.
+Every mutating command is written to the moderation audit log with the sysadmin as actor. Commands that delete runs
+need the data directory (`-data-dir` / `MHK_DATA_DIR`) to remove the ghost files.
 
 ```sh
 export MHK_DB_DSN='mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true'
@@ -64,12 +72,21 @@ mhk-server admin account show <username>
 mhk-server admin account set-role <username> player|moderator
 mhk-server admin account disable <username> --reason "Cheating in time trials"   # also revokes sessions
 mhk-server admin account enable <username>
-mhk-server admin account delete <username> --yes                                # permanent
+mhk-server admin account delete <username> --yes                                # permanent, with runs and reports
+mhk-server admin run list [--account U] [--track T] [--limit N]                 # newest first
+mhk-server admin run show <id>
+mhk-server admin run hide <id> --reason "Impossible lap"
+mhk-server admin run unhide <id>
+mhk-server admin run delete <id> --yes                                          # permanent, removes the ghost file
+mhk-server admin run reports <id>
+mhk-server admin board list [--track T]
 mhk-server admin audit [--limit N]
 ```
 
 Usernames are matched case-insensitively. The disable reason is shown to the player, so write it for them.
-Moderators (role `moderator`) act from inside the game once moderation lands in later phases.
+Moderators (role `moderator`) act from inside the game: they hide and unhide runs, disable and enable player
+accounts (not other moderators), and review flagged runs and their reports. Nothing a moderator does is permanent.
+Reports from game clients (`flags`) never hide anything by themselves.
 
 ## Deployment
 
@@ -80,8 +97,8 @@ Moderators (role `moderator`) act from inside the game once moderation lands in 
   for the HTTP-01 challenge. The protocol is raw TLS over TCP, so no HTTP reverse proxy or CDN in front.
 - **GeoIP**: download a country database (e.g. [DB-IP Lite Country](https://db-ip.com/db/download/ip-to-country-lite),
   CC BY 4.0, monthly updates) and set `MHK_GEOIP`. Restart to load a newer file.
-- **Database**: MySQL 8.4 with utf8mb4. Back it up; it holds all accounts.
-- **Container**: the image runs as a non-root user from a distroless base; mount a volume at `/data`.
+- **Database**: MySQL 8.4 with utf8mb4. Back it up; it holds all accounts and runs.
+- **Container**: the image runs as a non-root user from a distroless base; mount a volume at `/data` (ghost files).
 
 ## License
 

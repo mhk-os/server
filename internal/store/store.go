@@ -1,5 +1,6 @@
-// Package store keeps accounts, sessions and the moderation audit log in MySQL. Callers depend on the small
-// interfaces below rather than on *Store so later phases (and tests) can compose or replace them.
+// Package store keeps accounts, sessions, the moderation audit log and the time-trial boards, runs and reports in
+// MySQL. Callers depend on the small interfaces below rather than on *Store so later phases (and tests) can compose
+// or replace them.
 package store
 
 import (
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/mhk-os/server/internal/blobs"
 	"github.com/mhk-os/server/internal/proto"
 )
 
@@ -138,7 +140,8 @@ type Moderation interface {
 	SetRole(ctx context.Context, id uint64, role proto.Role, act Action) error
 	DisableAccount(ctx context.Context, id uint64, act Action) error
 	EnableAccount(ctx context.Context, id uint64, act Action) error
-	DeleteAccount(ctx context.Context, id uint64, act Action) error
+	// DeleteAccount returns the blobs of the account's runs that no other run references.
+	DeleteAccount(ctx context.Context, id uint64, act Action) ([]blobs.Hash, error)
 	AuditLog(ctx context.Context, limit int) ([]Action, error)
 	CountActiveSessions(ctx context.Context, accountID uint64, now time.Time) (int, error)
 }
