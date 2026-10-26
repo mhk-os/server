@@ -21,9 +21,10 @@ type seat struct {
 	rttUs atomic.Int64                   // EWMA of server-measured RTT in µs, 0 = no sample yet
 
 	// UDP reader goroutine only.
-	rxMac   *proto.UDPMac
-	pongMac *proto.UDPMac
-	replay  replayWindow
+	rxMac        *proto.UDPMac
+	pongMac      *proto.UDPMac
+	replay       replayWindow
+	badMacLogged bool
 
 	// Race goroutine only.
 	worldMac   *proto.UDPMac
@@ -47,6 +48,7 @@ type seat struct {
 	zeroHealthFrom time.Time // battles: first state with health 0 of the current streak
 
 	hasState bool
+	stateBad bool // the latest State datagram did not decode
 	state    proto.KartState
 	stateRaw []byte // the KartState bytes as received, relayed verbatim in World
 

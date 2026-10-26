@@ -2,8 +2,12 @@ package race
 
 import (
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"maps"
 	"math/rand/v2"
 	"net/netip"
@@ -125,9 +129,11 @@ type raceState struct {
 	elimCount   int
 
 	worldBuf []byte
+	log      *slog.Logger
 }
 
-func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, seed [32]byte, now time.Time) *raceState {
+func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *slog.Logger, seed [32]byte,
+	now time.Time) *raceState {
 	return &raceState{
 		id:        id,
 		spec:      spec,
@@ -143,8 +149,26 @@ func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, seed 
 		unknown:   map[uint8]*unknownClaim{},
 		bridges:   map[uint16]*bridge{},
 		worldBuf:  make([]byte, 0, proto.UDPMaxDatagram),
+		log:       log.With("race", id),
 	}
 }
+
+// debug logs a race event at Debug level with the racer's slot and account (s may be nil). Client developers
+// compare their side against these lines.
+func (rs *raceState) debug(msg string, s *seat, args ...any) {
+	if !rs.debugging() {
+		return
+	}
+	if s != nil {
+		args = append(args, "slot", s.slot, "account", s.racer.AccountID)
+	}
+	rs.log.Debug(msg, args...)
+}
+
+// debugging gates debug arguments that cost work to compute.
+func (rs *raceState) debugging() bool { return rs.log.Enabled(context.Background(), slog.LevelDebug) }
+
+func shortHash(h [32]byte) string { return hex.EncodeToString(h[:6]) }
 
 func (rs *raceState) seatOf(accountID uint64) *seat {
 	for _, s := range rs.seats {
@@ -220,6 +244,8 @@ func (rs *raceState) onLoaded(s *seat, m *proto.RaceLoaded, now time.Time) {
 		return
 	}
 	s.loaded, s.loadedHash = m, loadHash(m)
+	rs.debug("race loaded", s, "hash", shortHash(s.loadedHash), "trackHash", m.TrackHash, "laps", m.Laps,
+		"boxes", len(m.Boxes), "pool", len(m.Pool), "effects", len(m.Effects))
 	rs.maybeDecideLoad(now)
 }
 
@@ -279,6 +305,8 @@ func (rs *raceState) decideLoad(now time.Time) {
 			agreed = s
 		}
 	}
+	rs.debug("load agreement", agreed, "majority", ok, "loaded", len(loaded), "agreedHash", shortHash(best),
+		"trackHash", agreed.loaded.TrackHash)
 	rs.agreed = agreed.loaded
 	rs.isEffect = make(map[string]bool, len(rs.agreed.Effects))
 	for _, e := range rs.agreed.Effects {
@@ -294,6 +322,8 @@ func (rs *raceState) decideLoad(now time.Time) {
 	if rs.phase == phaseEnded {
 		return
 	}
+	rs.debug("GO scheduled", nil, "go", rs.goAt.UnixMilli(), "laps", rs.agreed.Laps, "boxes", len(rs.agreed.Boxes),
+		"pool", len(rs.agreed.Pool))
 	rs.pushAll(proto.PushRaceGo, &proto.RaceGo{RaceID: rs.id, Go: rs.goAt}, nil)
 	rs.env.going(rs.id)
 }
@@ -321,6 +351,7 @@ func (rs *raceState) dropDissenters(loaded []*seat, best [32]byte, now time.Time
 		}
 		// Same pack version but different content: the copy was modified (or broken), which moderators see.
 		if rs.cat != nil && majorityCommit != "" && rs.cat.PackCommit(s.racer.AccountID, pack) == majorityCommit {
+			rs.debug("content strike", s, "pack", pack, "commit", majorityCommit)
 			rs.cat.Strike(s.racer.AccountID, pack, "race content of "+rs.spec.TrackID+
 				" differs from other players with the same pack version")
 		}
@@ -344,6 +375,7 @@ func (rs *raceState) leave(s *seat, outcome Outcome, message string, now time.Ti
 	if s.out || rs.phase == phaseEnded {
 		return
 	}
+	rs.debug("racer left", s, "outcome", outcome, "message", message)
 	msg := &proto.PlayerLeftRace{RaceID: rs.id, Slot: s.slot, Outcome: uint8(outcome), Message: message}
 	rs.pushAll(proto.PushPlayerLeftRace, msg, nil)
 	s.out, s.outcome, s.outAt = true, outcome, now
@@ -369,6 +401,7 @@ func (rs *raceState) strike(s *seat, why string, now time.Time) {
 	}
 	s.strikes = append(s.strikes[:keep], now)
 	s.strikeWhy = append(s.strikeWhy[:keep], why)
+	rs.debug("strike", s, "why", why, "within30s", len(s.strikes))
 	if len(s.strikes) >= strikesToKick {
 		rs.kickCheater(s, "server strikes: "+strings.Join(s.strikeWhy, ", "), "server", now)
 	}
@@ -387,47 +420,56 @@ func (rs *raceState) kickCheater(s *seat, reason, reporters string, now time.Tim
 		Reporters: truncate(reporters, 1024),
 		CreatedAt: now,
 	})
+	rs.debug("cheat kick", s, "reason", reason, "reporters", reporters)
 	s.everKicked = true
 	rs.leave(s, OutcomeCheatKick, "Removed from the race: cheating detected.", now)
 }
 
 // --- items ---
 
-func (rs *raceState) deny(s *seat, box uint16, reason uint8) {
+func (rs *raceState) deny(s *seat, box uint16, reason uint8, why string, args ...any) {
+	rs.debug("item denied", s, append(args, "box", box, "reason", reason, "why", why)...)
 	rs.env.push(s.racer.AccountID, proto.PushItemDenied, &proto.ItemDenied{RaceID: rs.id, BoxID: box, Reason: reason})
 }
 
 func (rs *raceState) onPickup(s *seat, m *proto.ItemPickup, now time.Time) {
 	if !rs.arbitrated() || !rs.spec.Items {
+		rs.debug("item pickup ignored (solo, items off or not racing)", s, "box", m.BoxID)
 		return
 	}
 	if int(m.BoxID) >= len(rs.agreed.Boxes) || now.Before(rs.goAt) || s.eliminated {
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable)
+		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "unknown box, before GO or eliminated", "boxes",
+			len(rs.agreed.Boxes))
 		return
 	}
 	box := &rs.agreed.Boxes[m.BoxID]
 	if rs.isEffect[box.Fixed] || now.Before(rs.boxFreeAt[m.BoxID]) {
 		// Effect boxes are applied by each client and never arbitrated.
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable)
+		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "effect box or respawning", "fixed", box.Fixed)
 		return
 	}
 	if !rs.nearBox(s, box.Pos) {
-		rs.deny(s, m.BoxID, proto.DenyTooFar)
+		rs.deny(s, m.BoxID, proto.DenyTooFar, "too far", "hasState", s.hasState, "distance", dist(s.state.Pos, box.Pos),
+			"speed", s.state.Speed(), "rttMs", s.rttMs())
 		rs.strike(s, "item pickup too far from the box", now)
 		return
 	}
 	if s.charges > 0 && !rs.agreed.Rules.ReplacesHeld {
-		rs.deny(s, m.BoxID, proto.DenyCannotReceive)
+		rs.deny(s, m.BoxID, proto.DenyCannotReceive, "holds "+s.held)
 		return
 	}
 	id, charges := rs.roll(s, box.Fixed)
 	if id == "" {
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable)
+		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "nothing to roll (empty pool or odds)")
 		return
 	}
 	rs.boxFreeAt[m.BoxID] = now.Add(time.Duration(box.RespawnTenths) * 100 * time.Millisecond)
 	s.held, s.charges = id, charges
 	s.usableAt = now.Add(time.Duration(rs.agreed.Rules.RouletteMs)*time.Millisecond - rouletteSlack)
+	if rs.debugging() {
+		rs.debug("item granted", s, "box", m.BoxID, "powerup", id, "charges", charges, "tick", m.Tick,
+			"fixed", box.Fixed, "fraction", rs.positionFraction(s))
+	}
 	rs.env.push(s.racer.AccountID, proto.PushItemGranted, &proto.ItemGranted{RaceID: rs.id, BoxID: m.BoxID,
 		PowerupID: id, Charges: charges, Tick: m.Tick})
 	rs.pushAll(proto.PushItemBoxTaken, &proto.ItemBoxTaken{RaceID: rs.id, Slot: s.slot, BoxID: m.BoxID,
@@ -562,20 +604,30 @@ func drawPool(rng *rand.Rand, pool []proto.PoolEntry, odds []proto.ItemOdds, f f
 
 func (rs *raceState) onUse(s *seat, m *proto.ItemUse, now time.Time) {
 	if !rs.arbitrated() || s.eliminated {
+		rs.debug("item use ignored (solo, not racing or eliminated)", s, "use", m.UseID)
 		return
 	}
-	reject := func(reason uint8) {
+	reject := func(reason uint8, why string) {
+		rs.debug("item use rejected", s, "use", m.UseID, "reason", reason, "why", why, "held", s.held,
+			"charges", s.charges)
 		rs.env.push(s.racer.AccountID, proto.PushItemUseRejected,
 			&proto.ItemUseRejected{RaceID: rs.id, UseID: m.UseID, Reason: reason})
 	}
 	_, reused := rs.uses[m.UseID]
 	if m.UseID>>24 != uint32(s.slot)+1 || m.UseID&0xFFFFFF == 0 || reused || s.charges == 0 {
-		reject(proto.RejectNotHeld)
+		why := "nothing held"
+		switch {
+		case m.UseID>>24 != uint32(s.slot)+1 || m.UseID&0xFFFFFF == 0:
+			why = "use id not (slot+1)<<24|n"
+		case reused:
+			why = "use id reused"
+		}
+		reject(proto.RejectNotHeld, why)
 		rs.strike(s, "item use without holding it", now)
 		return
 	}
 	if now.Before(s.usableAt) {
-		reject(proto.RejectCooldown)
+		reject(proto.RejectCooldown, "before roulette end")
 		return
 	}
 	u := &use{owner: s.slot, powerupID: s.held}
@@ -586,6 +638,8 @@ func (rs *raceState) onUse(s *seat, m *proto.ItemUse, now time.Time) {
 	if s.charges == 0 {
 		s.held = ""
 	}
+	rs.debug("item used", s, "use", m.UseID, "powerup", u.powerupID, "chargesLeft", s.charges, "tick", m.Tick,
+		"target", m.TargetSlot)
 	rs.pushAll(proto.PushItemUsed, &proto.ItemUsed{RaceID: rs.id, Slot: s.slot, UseID: m.UseID, PowerupID: u.powerupID,
 		Tick: m.Tick, Pos: m.Pos, Rot: m.Rot, Backwards: m.Backwards, TargetSlot: m.TargetSlot}, s)
 }
@@ -607,6 +661,7 @@ func (rs *raceState) onHitTaken(s *seat, m *proto.HitTaken, now time.Time) {
 		rs.hitsTaken[k] = true
 		delete(rs.claims, k)
 	}
+	rs.debug("hit taken", s, "use", m.UseID, "attacker", m.AttackerSlot, "effect", m.EffectID, "tick", m.Tick)
 	rs.pushAll(proto.PushHitApplied, &proto.HitApplied{RaceID: rs.id, VictimSlot: s.slot, AttackerSlot: m.AttackerSlot,
 		UseID: m.UseID, EffectID: m.EffectID, Tick: m.Tick}, s)
 }
@@ -629,9 +684,12 @@ func (rs *raceState) onHitSeen(obs *seat, m *proto.HitSeen, now time.Time) {
 			decideAt: now.Add(victim.rttOr(maxEligibleRTT) + hitGrace)}
 		rs.claims[k] = c
 	}
-	if !c.forced && !now.After(c.decideAt) && rs.eligible(obs) {
+	counted := !c.forced && !now.After(c.decideAt) && rs.eligible(obs)
+	if counted {
 		c.claimers[obs.slot] = true
 	}
+	rs.debug("hit seen", obs, "victim", victim.slot, "use", m.UseID, "attacker", m.AttackerSlot, "effect", m.EffectID,
+		"counted", counted, "eligible", rs.eligible(obs), "claimers", len(c.claimers))
 }
 
 // tickHits forces hits enough eligible observers saw and strikes victims that ignore the force.
@@ -642,16 +700,21 @@ func (rs *raceState) tickHits(now time.Time) {
 		case victim.out:
 			delete(rs.claims, k)
 		case !c.forced && !now.Before(c.decideAt):
-			if len(c.claimers) < rs.observerThreshold(victim) {
+			if need := rs.observerThreshold(victim); len(c.claimers) < need {
+				rs.debug("hit claims below threshold", victim, "use", k.useID, "claimers", len(c.claimers),
+					"need", need)
 				delete(rs.claims, k)
 				continue
 			}
 			c.forced = true
 			c.confirmBy = now.Add(victim.rttOr(maxEligibleRTT) + hitGrace)
+			rs.debug("hit forced", victim, "use", k.useID, "attacker", c.attacker, "effect", c.effectID,
+				"claimers", len(c.claimers))
 			rs.env.push(victim.racer.AccountID, proto.PushHitForce, &proto.HitForce{RaceID: rs.id,
 				AttackerSlot: c.attacker, UseID: k.useID, EffectID: c.effectID})
 		case c.forced && !now.Before(c.confirmBy):
 			delete(rs.claims, k)
+			rs.debug("forced hit not confirmed", victim, "use", k.useID)
 			rs.strike(victim, "ignored a forced hit", now)
 		}
 	}
@@ -661,6 +724,7 @@ func (rs *raceState) tickHits(now time.Time) {
 
 func (rs *raceState) onFinished(s *seat, m *proto.Finished, now time.Time) {
 	if rs.phase != phaseRacing || s.finished || now.Before(rs.goAt) {
+		rs.debug("finish ignored (not racing, before GO or already finished)", s, "finishMs", m.FinishMs)
 		return
 	}
 	if rs.spec.Solo {
@@ -670,6 +734,7 @@ func (rs *raceState) onFinished(s *seat, m *proto.Finished, now time.Time) {
 			s.finishMs = int32(now.Sub(rs.goAt).Milliseconds())
 		}
 		s.soloPosition = clampPosition(m.Position, rs.spec.AICount)
+		rs.debug("solo finished", s, "finishMs", s.finishMs, "position", m.Position, "taken", s.soloPosition)
 		rs.end(now)
 		return
 	}
@@ -678,10 +743,13 @@ func (rs *raceState) onFinished(s *seat, m *proto.Finished, now time.Time) {
 	}
 	elapsed := now.Sub(rs.goAt)
 	s.finishMs = m.FinishMs
-	if !finishPlausible(m, elapsed, s.rttOr(0), rs.agreed.Laps) {
+	plausible := finishPlausible(m, elapsed, s.rttOr(0), rs.agreed.Laps)
+	if !plausible {
 		rs.strike(s, "finish time or laps disagree with the server", now)
 		s.finishMs = int32(elapsed.Milliseconds())
 	}
+	rs.debug("finished", s, "claimedMs", m.FinishMs, "serverMs", elapsed.Milliseconds(), "takenMs", s.finishMs,
+		"laps", len(m.LapMs), "raceLaps", rs.agreed.Laps, "plausible", plausible, "tick", m.Tick)
 	s.finished, s.finishAt, s.lapMs = true, now, m.LapMs
 	if rs.firstFinish.IsZero() {
 		rs.firstFinish = now
@@ -716,6 +784,7 @@ func (rs *raceState) eliminate(s *seat, attacker uint8, tick uint32, now time.Ti
 	rs.elimCount++
 	s.eliminated, s.elimOrder, s.elimAt = true, rs.elimCount, now
 	s.held, s.charges = "", 0
+	rs.debug("eliminated", s, "attacker", attacker, "tick", tick, "order", s.elimOrder)
 	rs.pushAll(proto.PushEliminated, &proto.Eliminated{RaceID: rs.id, Slot: s.slot, AttackerSlot: attacker,
 		Tick: tick}, nil)
 	rs.checkEnd(now)
@@ -735,6 +804,7 @@ func (rs *raceState) tickHealth(now time.Time) {
 		if s.zeroHealthFrom.IsZero() {
 			s.zeroHealthFrom = now
 		} else if now.Sub(s.zeroHealthFrom) >= zeroHealthLimit {
+			rs.debug("zero health without EliminatedSelf", s, "since", s.zeroHealthFrom.UnixMilli())
 			rs.strike(s, "did not report its elimination", now)
 			if !s.out {
 				rs.eliminate(s, proto.NoSlot, rs.raceTick(now), now)
@@ -751,6 +821,7 @@ func (rs *raceState) onBridgeTrigger(s *seat, m *proto.BridgeTrigger, now time.T
 	switch {
 	case b == nil:
 		// Collect briefly so the lowest tick wins, not the closest client.
+		rs.debug("bridge trigger", s, "bridge", m.BridgeID, "tick", m.Tick)
 		rs.bridges[m.BridgeID] = &bridge{tick: m.Tick, decideAt: now.Add(bridgeWindow)}
 	case !b.done && m.Tick < b.tick:
 		b.tick = m.Tick
@@ -761,6 +832,7 @@ func (rs *raceState) tickBridges(now time.Time) {
 	for id, b := range rs.bridges {
 		if !b.done && !now.Before(b.decideAt) {
 			b.done = true
+			rs.debug("bridge triggered", nil, "bridge", id, "tick", b.tick)
 			rs.pushAll(proto.PushBridgeTriggered, &proto.BridgeTriggered{RaceID: rs.id, BridgeID: id, Tick: b.tick}, nil)
 		}
 	}
@@ -770,10 +842,20 @@ func (rs *raceState) tickBridges(now time.Time) {
 
 func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Time) {
 	if !rs.spec.Anticheat || !rs.arbitrated() || !m.Reason.Valid() {
+		rs.debug("cheat report ignored (anticheat off, not racing or bad reason)", rep, "suspect", m.SuspectSlot,
+			"reason", uint8(m.Reason))
 		return
 	}
 	suspect := rs.seatAt(m.SuspectSlot)
 	if suspect == nil || suspect == rep || suspect.out || !rs.eligible(rep) || !rs.rttOK(suspect) {
+		if rs.debugging() {
+			args := []any{"suspect", m.SuspectSlot, "reporterEligible", rs.eligible(rep), "reporterRttMs", rep.rttMs(),
+				"everKicked", rep.everKicked}
+			if suspect != nil {
+				args = append(args, "suspectRttMs", suspect.rttMs(), "suspectOut", suspect.out)
+			}
+			rs.debug("cheat report not counted", rep, args...)
+		}
 		return
 	}
 	votes := rs.reports[suspect.slot]
@@ -793,7 +875,10 @@ func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Tim
 		reporters = append(reporters, formatID(r.racer.AccountID))
 		reasons[v.reason.String()] = true
 	}
-	if len(reporters) < rs.observerThreshold(suspect) {
+	need := rs.observerThreshold(suspect)
+	rs.debug("cheat report", rep, "suspect", suspect.slot, "reason", m.Reason.String(), "detail", m.Detail,
+		"reporters", len(reporters), "need", need)
+	if len(reporters) < need {
 		return
 	}
 	slices.Sort(reporters)
@@ -808,6 +893,7 @@ func (rs *raceState) onUnknownContent(rep *seat, m *proto.UnknownContent, now ti
 	}
 	x := rs.seatAt(m.Slot)
 	if x == nil || x == rep || x.out {
+		rs.debug("unknown content ignored", rep, "about", m.Slot, "id", m.ID)
 		return
 	}
 	c := rs.unknown[x.slot]
@@ -816,6 +902,7 @@ func (rs *raceState) onUnknownContent(rep *seat, m *proto.UnknownContent, now ti
 		rs.unknown[x.slot] = c
 	}
 	c.reporters[rep.slot] = true
+	rs.debug("unknown content", rep, "about", x.slot, "kind", m.Kind, "id", m.ID, "reporters", len(c.reporters))
 	if len(c.reporters) < 2 {
 		return
 	}
@@ -839,6 +926,7 @@ func (rs *raceState) tickUnknown(now time.Time) {
 			continue
 		}
 		delete(rs.unknown, slot)
+		rs.debug("unknown content window closed", rs.seats[slot], "reporters", len(c.reporters), "firstBy", c.firstBy)
 		// Only one racer misses x's content: the reporter's copy is the odd one.
 		if rep := rs.seats[c.firstBy]; len(c.reporters) == 1 && !rep.out {
 			rs.leave(rep, OutcomeDesync, "Your game is missing content the other players have.", now)
@@ -854,11 +942,17 @@ func (rs *raceState) onState(s *seat, payload []byte, now time.Time) {
 		return
 	}
 	r := wire.NewReader(payload)
-	if s.state.Decode(r) != nil {
-		s.hasState = false
+	if err := s.state.Decode(r); err != nil {
+		if !s.stateBad { // logged on transitions only: states arrive at 30 Hz
+			rs.debug("malformed kart state", s, "err", err, "len", len(payload))
+		}
+		s.stateBad, s.hasState = true, false
 		return
 	}
-	s.hasState = true
+	if !s.hasState {
+		rs.debug("kart states arriving", s, "tick", s.state.Tick, "pos", s.state.Pos, "lap", s.state.Lap)
+	}
+	s.stateBad, s.hasState = false, true
 	s.stateRaw = append(s.stateRaw[:0], payload[:len(payload)-r.Remaining()]...)
 	if !rs.arbitrated() || r.Remaining() == 0 {
 		return
@@ -993,7 +1087,15 @@ func (rs *raceState) end(now time.Time) {
 			rs.env.dropSeat(s)
 		}
 	}
-	rs.env.finished(rs.id, rs.placements(now))
+	placements := rs.placements(now)
+	if rs.debugging() {
+		rows := make([]string, len(placements))
+		for i, p := range placements {
+			rows[i] = fmt.Sprintf("%d:slot%d:acc%d:%dms:outcome%d", p.Position, p.Slot, p.AccountID, p.FinishMs, p.Outcome)
+		}
+		rs.debug("race ended", nil, "placements", strings.Join(rows, " "))
+	}
+	rs.env.finished(rs.id, placements)
 }
 
 // placements orders every racer: race mode finishers by time, then DNF by distance; battles survivors by health,

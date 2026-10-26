@@ -1,6 +1,8 @@
 package race
 
 import (
+	"io"
+	"log/slog"
 	"math"
 	"math/rand/v2"
 	"net/netip"
@@ -87,7 +89,9 @@ func newTestRace(n int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
 	if spec.TrackID == "" {
 		spec.TrackID = "mhk2.egypt"
 	}
-	return newRaceState(7, spec, seats, env, cat, [32]byte{1}, t0), env, cat
+	// A discarding debug logger still evaluates every debug line, so the tests cover them.
+	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return newRaceState(7, spec, seats, env, cat, log, [32]byte{1}, t0), env, cat
 }
 
 func testLoaded() *proto.RaceLoaded {

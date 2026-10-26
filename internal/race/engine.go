@@ -163,7 +163,7 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 			rxMac: proto.NewUDPMac(key), pongMac: proto.NewUDPMac(key), worldMac: proto.NewUDPMac(key)}
 	}
 	id := e.nextID.Add(1)
-	run.rs = newRaceState(id, spec, seats, run, e.cfg.Catalog, seed, time.Now())
+	run.rs = newRaceState(id, spec, seats, run, e.cfg.Catalog, e.log, seed, time.Now())
 
 	e.mu.Lock()
 	for _, s := range seats {
@@ -191,6 +191,10 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 			AICount: spec.AICount, Seed: raceSeed, Grid: grid, YourSlot: s.slot, UDPPort: e.udpPort,
 			UDPToken: s.token, UDPKey: s.key, SetRace: spec.SetRace, SetSize: spec.SetSize,
 		})
+		e.log.Debug("race setup", "race", id, "slot", s.slot, "account", s.racer.AccountID, "user", s.racer.Username,
+			"character", s.racer.CharacterID, "kart", s.racer.KartID, "track", spec.TrackID, "mode", spec.Mode,
+			"laps", spec.Laps, "items", spec.Items, "anticheat", spec.Anticheat, "solo", spec.Solo,
+			"everKicked", s.everKicked, "udpPort", e.udpPort)
 	}
 	e.wg.Go(run.loop)
 	e.log.Info("race started", "race", id, "lobby", spec.LobbyID, "track", spec.TrackID, "racers", len(racers),
@@ -302,7 +306,15 @@ func (e *Engine) readUDP() {
 		ref := e.tokens[h.Token]
 		e.mu.RUnlock()
 		s := ref.seat
-		if s == nil || !s.rxMac.Verify(buf[:n]) {
+		if s == nil {
+			continue
+		}
+		if !s.rxMac.Verify(buf[:n]) {
+			if !s.badMacLogged { // once per seat: a client with a wrong key would flood the log at 30 Hz
+				s.badMacLogged = true
+				e.log.Debug("udp datagram with a bad MAC", "race", ref.run.rs.id, "slot", s.slot,
+					"account", s.racer.AccountID, "type", h.Type, "len", n, "from", addr.String())
+			}
 			continue
 		}
 		switch h.Type {
@@ -311,7 +323,7 @@ func (e *Engine) readUDP() {
 			if !s.replay.accept(h.Seq, false) || p.Decode(wire.NewReader(payload)) != nil {
 				continue
 			}
-			learnAddr(s, addr)
+			e.learnAddr(ref, addr)
 			if echo := p.EchoServerTime; !echo.IsZero() && !echo.After(now) && now.Sub(echo) <= maxEchoAge {
 				if d := now.Sub(echo) - time.Duration(p.EchoHoldMs)*time.Millisecond; d >= 0 {
 					s.addRTTSample(d)
@@ -327,7 +339,7 @@ func (e *Engine) readUDP() {
 			if !s.replay.accept(h.Seq, true) {
 				continue
 			}
-			learnAddr(s, addr)
+			e.learnAddr(ref, addr)
 			select {
 			case ref.run.states <- stateIn{seat: s, payload: bytes.Clone(payload), at: now}:
 			default: // the race is behind; a newer state follows within 33 ms
@@ -336,9 +348,13 @@ func (e *Engine) readUDP() {
 	}
 }
 
-func learnAddr(s *seat, addr netip.AddrPort) {
+// learnAddr records the client's address; a change (first datagram, NAT rebinding) is logged.
+func (e *Engine) learnAddr(ref seatRef, addr netip.AddrPort) {
+	s := ref.seat
 	if old := s.addr.Load(); old == nil || *old != addr {
 		s.addr.Store(&addr)
+		e.log.Debug("udp address learned", "race", ref.run.rs.id, "slot", s.slot, "account", s.racer.AccountID,
+			"addr", addr.String())
 	}
 }
 

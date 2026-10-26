@@ -1,6 +1,7 @@
 package race
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"strconv"
@@ -43,7 +44,9 @@ func (rs *raceState) onProjectileGone(s *seat, m *proto.ProjectileGone, now time
 	}
 	p := u.proj
 	p.gone[s.slot] = true
-	if s.slot == u.owner || 2*len(p.gone) > len(p.reporters) {
+	ended := s.slot == u.owner || 2*len(p.gone) > len(p.reporters)
+	rs.debug("projectile gone", s, "use", m.UseID, "gone", len(p.gone), "reporters", len(p.reporters), "ended", ended)
+	if ended {
 		u.proj = nil
 	}
 }
@@ -63,6 +66,11 @@ func (rs *raceState) tickProjectiles(now time.Time) {
 		}
 		clear(p.pending)
 		res := judgeProjectile(reports)
+		if rs.debugging() {
+			rs.debug("projectile judged", nil, "use", useID, "reports", len(reports), "slots", fmt.Sprint(slots),
+				"tick", res.tick,
+				"median", res.pos, "vel", res.vel, "corrected", res.correct, "outliers", len(res.outliers))
+		}
 		if res.correct {
 			rs.pushAll(proto.PushProjectileCorrect, &proto.ProjectileCorrect{RaceID: rs.id, UseID: useID,
 				Tick: res.tick, Pos: res.pos, Vel: res.vel}, nil)
@@ -70,6 +78,7 @@ func (rs *raceState) tickProjectiles(now time.Time) {
 		for _, i := range res.outliers {
 			if s := rs.seats[slots[i]]; !p.struck[s.slot] {
 				p.struck[s.slot] = true
+				rs.debug("projectile outlier", s, "use", useID, "pos", reports[i].Pos, "tick", reports[i].Tick)
 				rs.strike(s, "projectile report far from the others", now)
 			}
 		}
