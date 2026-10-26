@@ -459,6 +459,9 @@ packs.
 | maxPlayers | u8 | |
 | phase | u8 | 0 Waiting, 1 Voting, 2 Loading, 3 Countdown, 4 Racing, 5 Results, 6 SetResults |
 | simVersion | i32 | |
+| engineClass | u8 | 0–2 |
+| setRace | u8 | as `LobbyState.setRace` |
+| setSize | u8 | as `LobbyState.setSize` |
 
 `LobbyMember`:
 

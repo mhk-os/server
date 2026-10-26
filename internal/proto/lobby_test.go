@@ -28,7 +28,7 @@ func sampleRow(slot uint8) RaceResultRow {
 func lobbyMessages() []Message {
 	summary := LobbySummary{LobbyID: 4, Kind: LobbyPublic, Category: 3, Instance: 2, Name: "Races #2",
 		Mode: RoomRaceSet, Anticheat: true, Packs: []string{"mhk2", "mhk3"}, Players: 3, MaxPlayers: 10,
-		Phase: PhaseVoting, SimVersion: 7}
+		Phase: PhaseVoting, SimVersion: 7, EngineClass: 2, SetRace: 3, SetSize: 4}
 	member := LobbyMember{AccountID: 1, Username: "Hans", Country: "DE", CharacterID: "mhk2.char.huhn",
 		KartID: "mhk2.kart.speedy", Ready: true, Owner: true, Moderator: true, InRace: true, PingMs: 48,
 		SetPoints: 37, Joined: when, Platform: PlatformMacOS}
@@ -103,6 +103,25 @@ func TestLobbyMemberBytes(t *testing.T) {
 	}
 	if lobbyMemberMinSize != len(want)-1-2-1-1 {
 		t.Fatalf("lobbyMemberMinSize out of date")
+	}
+}
+
+func TestLobbySummaryBytes(t *testing.T) {
+	s := LobbySummary{LobbyID: 1, Kind: LobbyPrivate, Category: 0, Instance: 2, Name: "n", Mode: RoomBattleSet,
+		Anticheat: true, Packs: []string{"p"}, Players: 3, MaxPlayers: 4, Phase: PhaseResults, SimVersion: -5,
+		EngineClass: 1, SetRace: 2, SetSize: 16}
+	le := binary.LittleEndian
+	want := le.AppendUint64(nil, 1)
+	want = append(want, 1, 0)
+	want = le.AppendUint16(want, 2)
+	want = append(want, 1, 'n', 1, 1, 1, 1, 'p', 3, 4, 5)
+	want = le.AppendUint32(want, uint32(0xfffffffb))
+	want = append(want, 1, 2, 16) // engineClass, setRace, setSize
+	if got := Encode(&s); !bytes.Equal(got, want) {
+		t.Fatalf("got  % x\nwant % x", got, want)
+	}
+	if lobbySummaryMinSize != len(want)-1-2 { // name "n" (+1), packs ["p"] (+2) beyond the empty minimum
+		t.Fatalf("lobbySummaryMinSize out of date")
 	}
 }
 

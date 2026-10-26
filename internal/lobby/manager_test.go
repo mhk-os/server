@@ -34,7 +34,8 @@ func TestListOpensOneInstancePerCategory(t *testing.T) {
 		c := categories[i+1]
 		if s.Category != uint8(i+1) || s.Instance != 1 || s.Kind != proto.LobbyPublic || s.SimVersion != testSim ||
 			s.MaxPlayers != 10 || s.Mode != c.mode || s.Anticheat != c.anticheat || !slices.Equal(s.Packs, c.packs) ||
-			s.Phase != proto.PhaseWaiting || s.Name != c.name+" #1" {
+			s.Phase != proto.PhaseWaiting || s.Name != c.name+" #1" || s.EngineClass != 2 || s.SetRace != 0 ||
+			s.SetSize != 4 {
 			t.Fatalf("summary %d: %+v", i, s)
 		}
 	}
@@ -232,7 +233,8 @@ func TestPublicSet(t *testing.T) {
 			t.Fatalf("race %d results %+v", n, res)
 		}
 		st := e.push.lastState(t, 2)
-		if st.RaceID != 0 || st.SetRace != n || len(st.LastResults) != 2 || st.Members[0].InRace {
+		if st.RaceID != 0 || st.SetRace != n || len(st.LastResults) != 2 || st.Members[0].InRace ||
+			st.Summary.SetRace != n || st.Summary.SetSize != 4 || st.Summary.EngineClass != 2 {
 			t.Fatalf("state after race %d: %+v", n, st)
 		}
 		if n < 4 {

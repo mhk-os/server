@@ -339,6 +339,7 @@ func (m *Manager) summary(l *lobby) proto.LobbySummary {
 		LobbyID: l.id, Kind: proto.LobbyPrivate, Name: l.settings.Name, Mode: l.settings.Mode,
 		Anticheat: l.settings.Anticheat, Packs: l.settings.Packs, Players: uint8(len(l.members)),
 		MaxPlayers: l.settings.MaxPlayers, Phase: l.phase, SimVersion: l.sim,
+		EngineClass: l.settings.EngineClass, SetRace: l.setRace, SetSize: l.setSize(),
 	}
 	if l.public {
 		s.Kind, s.Category, s.Instance = proto.LobbyPublic, l.category, l.instance

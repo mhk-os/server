@@ -55,7 +55,7 @@ const (
 	strikeMinSize        = 1 + 1
 	manifestItemMinSize  = 1 + 1 + 1
 	packManifestMinSize  = 1 + 1 + 4 + 1 + 1
-	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4
+	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 1
 	lobbyMemberMinSize   = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 4 + 8 + 1
 	lobbyVoteMinSize     = 8 + 1
 	raceResultRowMinSize = 1 + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1
@@ -325,18 +325,21 @@ func (m *RoomSettings) Decode(r *wire.Reader) error {
 
 // LobbySummary is one lobby in ListLobbies and the head of LobbyState.
 type LobbySummary struct {
-	LobbyID    uint64
-	Kind       uint8
-	Category   uint8
-	Instance   uint16
-	Name       string
-	Mode       uint8
-	Anticheat  bool
-	Packs      []string
-	Players    uint8
-	MaxPlayers uint8
-	Phase      uint8
-	SimVersion int32
+	LobbyID     uint64
+	Kind        uint8
+	Category    uint8
+	Instance    uint16
+	Name        string
+	Mode        uint8
+	Anticheat   bool
+	Packs       []string
+	Players     uint8
+	MaxPlayers  uint8
+	Phase       uint8
+	SimVersion  int32
+	EngineClass uint8
+	SetRace     uint8 // as LobbyState.SetRace
+	SetSize     uint8
 }
 
 func (m *LobbySummary) Encode(w *wire.Writer) {
@@ -352,6 +355,9 @@ func (m *LobbySummary) Encode(w *wire.Writer) {
 	w.U8(m.MaxPlayers)
 	w.U8(m.Phase)
 	w.I32(m.SimVersion)
+	w.U8(m.EngineClass)
+	w.U8(m.SetRace)
+	w.U8(m.SetSize)
 }
 
 func (m *LobbySummary) Decode(r *wire.Reader) error {
@@ -367,6 +373,9 @@ func (m *LobbySummary) Decode(r *wire.Reader) error {
 	m.MaxPlayers = r.U8()
 	m.Phase = r.U8()
 	m.SimVersion = r.I32()
+	m.EngineClass = r.U8()
+	m.SetRace = r.U8()
+	m.SetSize = r.U8()
 	return r.Err()
 }
 
