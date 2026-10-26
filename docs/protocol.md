@@ -37,7 +37,7 @@ Bodies are **append-only**: newer protocol revisions only add fields at the end,
 ## Primitive encoding
 
 | Type | Encoding |
-|------|----------|
+| ------ | ---------- |
 | `u8 u16 u32 u64 i32 i64` | fixed width, little-endian, two's complement for signed |
 | `f32` | IEEE 754 binary32, little-endian; NaN and ±Inf are invalid unless a field says otherwise |
 | `bool` | u8, 0 or 1 (anything else is invalid) |
@@ -53,7 +53,7 @@ A malformed body (truncated, over a limit, invalid value) is answered with `BadR
 ## Status codes (u16)
 
 | Code | Name | Meaning |
-|------|------|---------|
+| ------ | ------ | --------- |
 | 0 | `Ok` | |
 | 1 | `BadRequest` | malformed or invalid request |
 | 2 | `NotLoggedIn` | the request needs a logged-in account |
@@ -74,7 +74,7 @@ A malformed body (truncated, over a limit, invalid value) is answered with `BadR
 ## Message type ranges
 
 | Range | Area |
-|-------|------|
+| ------- | ------ |
 | 1–15 | connection |
 | 16–63 | accounts |
 | 64–127 | moderation (phase 2/3) |
@@ -91,7 +91,7 @@ Push types use their own numbering in the same ranges (kind distinguishes them).
 Must be the first request of a connection; anything else first closes the connection.
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | magic | u32 | `0x4F4B484D` (bytes `M H K O`) |
 | protocol | u16 | **1** |
 | gameCommit | string ≤ 40 | `BuildInfo.Commit` |
@@ -103,7 +103,7 @@ Must be the first request of a connection; anything else first closes the connec
 Response `HelloOk`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | protocol | u16 | server protocol |
 | serverVersion | string ≤ 64 | build label of the server |
 | udpPort | u16 | realtime port, 0 = none |
@@ -139,7 +139,7 @@ Rules (server-enforced, clients pre-check for messages):
 `Account`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | id | u64 | |
 | username | string ≤ 20 | |
 | country | string ≤ 2 | effective country, `""` = unknown |
@@ -150,7 +150,7 @@ Rules (server-enforced, clients pre-check for messages):
 `Session`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | token | string ≤ 128 | opaque; the client stores it and sends it with `Resume` |
 | expires | time | sliding: every `Resume` extends it to now + 90 days |
 | account | Account | |
@@ -226,7 +226,7 @@ Rejected with `BadRequest` and a message naming the problem when any check fails
 `BoardInfo`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | boardId | u64 | |
 | trackId | string ≤ 96 | |
 | engineClass | u8 | |
@@ -240,7 +240,7 @@ Rejected with `BadRequest` and a message naming the problem when any check fails
 `RunEntry`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | runId | u64 | |
 | rank | u32 | rank in the requested (filtered) list, 0 when not ranked (hidden, or not the account's best) |
 | accountId | u64 | |
@@ -265,7 +265,7 @@ Rejected with `BadRequest` and a message naming the problem when any check fails
 `LeaderboardFilter`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | username | string ≤ 20 | case-insensitive substring, `""` = any |
 | country | string ≤ 2 | `""` = any |
 | continent | string ≤ 2 | `AF AN AS EU NA OC SA`, `""` = any |
@@ -317,7 +317,7 @@ All need a moderator account (`Forbidden` otherwise) and write the audit log. Mo
 accounts. `reason` is shown to the affected player where applicable.
 
 | Type | Name | Request | Response |
-|------|------|---------|----------|
+| ------ | ------ | --------- | ---------- |
 | 64 | ModHideRun | `runId: u64`, `reason: string ≤ 256` | empty |
 | 65 | ModUnhideRun | `runId: u64` | empty |
 | 66 | ModDisableAccount | `accountId: u64`, `reason: string ≤ 256` | empty (revokes the account's sessions, connected clients get push `Disconnect(AccountDisabled, reason)`) |
@@ -353,7 +353,7 @@ accounts. `reason` is shown to the affected player where applicable.
 ### Eligibility and thresholds
 
 | Rule | Value |
-|------|-------|
+| ------ | ------- |
 | observer and observed RTT (UDP, server-measured) for a check or report to count | ≤ 200 ms each |
 | client: report a kart after | 3 strikes within 10 s from its own checks |
 | server: kick a racer for cheating when within 15 s | distinct eligible reporters ≥ max(2, ⌈eligible observers / 2⌉) |
@@ -386,7 +386,7 @@ overriding an id of a lobby pack must disable it for that lobby (the client chec
 ### Public lobby categories (u8)
 
 | # | Mode | Packs | Anticheat |
-|---|------|-------|-----------|
+| --- | ------ | ------- | ----------- |
 | 1 | Races | mhk2, mhk3, mhke, mhkt | on |
 | 2 | Races | mhk2, mhk3, mhke, mhkt | off |
 | 3 | Races | mhk2, mhk3, mhke, mhkt, tincan | on |
@@ -428,7 +428,7 @@ packs.
 `RoomSettings`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | name | string ≤ 32 | |
 | mode | u8 | 0 race set, 1 battle set, 2 championship (cup) |
 | packs | list<string ≤ 64> ≤ 32 | content packs of the room |
@@ -446,7 +446,7 @@ packs.
 `LobbySummary`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | lobbyId | u64 | |
 | kind | u8 | 0 public, 1 private |
 | category | u8 | public category, 0 for private |
@@ -466,7 +466,7 @@ packs.
 `LobbyMember`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | accountId | u64 | |
 | username | string ≤ 20 | |
 | country | string ≤ 2 | |
@@ -484,7 +484,7 @@ packs.
 `LobbyState` (push 256 and the answer of joins):
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | summary | LobbySummary | |
 | code | string ≤ 8 | private rooms (members only), else `""` |
 | settings | RoomSettings | effective settings (public lobbies too) |
@@ -521,7 +521,7 @@ answer `BadRequest` "content not announced". Needs login.
 ### Lobby messages (requests, need login)
 
 | Type | Name | Request | Response |
-|------|------|---------|----------|
+| ------ | ------ | --------- | ---------- |
 | 258 | ListLobbies | empty (uses the connection's simVersion) | `list<LobbySummary> ≤ 500` (public instances of every category, joinable private rooms are not listed) |
 | 259 | JoinLobby | `lobbyId: u64`, `code: string ≤ 8` (one of them; code wins when non-empty) | `LobbyState` |
 | 260 | QuickJoin | `category: u8` | `LobbyState` (the fullest public instance with room) |
@@ -543,7 +543,7 @@ without a `LobbyLeft` push (the join answer replaces the state).
 ### Lobby pushes
 
 | Type | Name | Body |
-|------|------|------|
+| ------ | ------ | ------ |
 | 256 | LobbyState | `LobbyState` (after every change) |
 | 257 | LobbyLeft | `reason: u8` (0 left, 1 kicked by owner, 2 kicked by moderator, 3 lobby closed), `message: string ≤ 256` |
 | 258 | SoloRaceJoinWaiting | `username: string ≤ 20` (someone waits while you race alone against AI) |
@@ -553,7 +553,7 @@ without a `LobbyLeft` push (the join answer replaces the state).
 Server → client pushes:
 
 | Type | Name | Body |
-|------|------|------|
+| ------ | ------ | ------ |
 | 512 | RaceSetup | `RaceSetup` |
 | 513 | RaceGo | `raceId: u64`, `go: time` (server clock instant of GO; the countdown shows the 3 s before it) |
 | 514 | ItemGranted | `raceId: u64`, `boxId: u16`, `powerupId: string ≤ 96`, `charges: u8`, `tick: u32` (only to the picker) |
@@ -573,7 +573,7 @@ Server → client pushes:
 `RaceSetup`:
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | raceId | u64 | |
 | lobbyId | u64 | |
 | trackId | string ≤ 96 | |
@@ -604,7 +604,7 @@ anything else → 0.
 Client → server notifies (TCP, kind 3; the server ignores those for a race the sender is not in):
 
 | Type | Name | Body |
-|------|------|------|
+| ------ | ------ | ------ |
 | 528 | RaceLoaded | `RaceLoaded` |
 | 529 | ItemPickup | `raceId: u64`, `boxId: u16`, `tick: u32`, `pos: vec3` |
 | 530 | ItemUse | `raceId: u64`, `useId: u32`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8` |
@@ -643,7 +643,7 @@ draw when it has none).
 All datagrams (≤ 1200 bytes):
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | type | u8 | |
 | token | u64 | `udpToken` of the sender's race seat (server → client: the receiver's token) |
 | seq | u32 | per-direction, per-token increasing; receivers drop packets not newer than the newest seen (except type 1/2) |
@@ -654,7 +654,7 @@ Datagrams with an unknown token or a bad MAC are dropped silently. The server le
 datagrams (latest valid one wins).
 
 | Type | Direction | Payload |
-|------|-----------|---------|
+| ------ | ----------- | --------- |
 | 1 Ping | c → s | `clientTime: time`, `echoServerTime: time` (`serverTime` of the newest Pong received, 0 = none yet), `echoHoldMs: u16` (ms between receiving that Pong and sending this Ping, clamped to 65535). Sent 4×/s during loading and races; doubles as keepalive. The server's RTT sample = receive time − `echoServerTime` − `echoHoldMs` (ignored when the echo is 0, in the future or older than 5 s), smoothed with EWMA α = 1/8; it feeds `World.rttMs` and eligibility |
 | 2 Pong | s → c | `clientTime: time`, `serverTime: time` |
 | 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` |
@@ -663,7 +663,7 @@ datagrams (latest valid one wins).
 `KartState` (sent at 30 Hz):
 
 | Field | Type | |
-|-------|------|-|
+| ------- | ------ | - |
 | tick | u32 | race tick (physics steps since GO; 0 before GO) |
 | pos | vec3 | |
 | rot | 4 × i16 | quaternion components × 32767, renormalised by the receiver |
