@@ -311,8 +311,10 @@ func TestBattleArenas(t *testing.T) {
 func TestNoLoadoutsVotesAgain(t *testing.T) {
 	e := newEnv(t)
 	e.ok(e.m.QuickJoin(e.player(1), 1))
+	e.ok(e.m.QuickJoin(e.player(2), 1))
 	l := e.lobbyOf(1)
 	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
 	if e.races.startCount() != 0 || e.phase(l) != proto.PhaseVoting {
 		t.Fatal("a race started without loadouts")
 	}
@@ -323,50 +325,131 @@ func TestNoLoadoutsVotesAgain(t *testing.T) {
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
 	e.races.fail = errors.New("boom")
 	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
 	if e.phase(l) != proto.PhaseVoting {
 		t.Fatal("engine failure not handled")
+	}
+}
+
+func TestPublicNeedsTwoHumans(t *testing.T) {
+	e := newEnv(t)
+	s := e.ok(e.m.QuickJoin(e.player(1), 1))
+	l := e.lobbyOf(1)
+	if s.Summary.Phase != proto.PhaseWaiting || !s.PhaseEnds.IsZero() {
+		t.Fatalf("lone player %+v", s.Summary)
+	}
+	e.clock.Advance(time.Hour)
+	if e.races.startCount() != 0 || e.phase(l) != proto.PhaseWaiting {
+		t.Fatal("something started by itself")
+	}
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, ""), proto.StatusBadRequest, "Voting is not open")
+
+	// The second human starts the voting; dropping back to one during it returns to Waiting.
+	e.ok(e.m.QuickJoin(e.player(2), 1))
+	if e.phase(l) != proto.PhaseVoting {
+		t.Fatal("two humans do not vote")
+	}
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+	e.m.Leave(2)
+	st := e.push.lastState(t, 1)
+	if st.Summary.Phase != proto.PhaseWaiting || len(st.Votes) != 0 || !st.PhaseEnds.IsZero() {
+		t.Fatalf("after dropping to one: %+v", st)
+	}
+	e.clock.Advance(time.Minute)
+	if e.races.startCount() != 0 {
+		t.Fatal("the stopped voting started a race")
+	}
+
+	// Dropping to one during a race: the race ends normally (with points), then the lobby waits.
+	e.ok(e.m.QuickJoin(e.player(2), 1))
+	for _, id := range []uint64{1, 2} {
+		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
+		must(t, e.m.Vote(Player{AccountID: id}, ""))
+	}
+	call := e.races.last()
+	e.m.Leave(2)
+	if e.phase(l) != proto.PhaseLoading {
+		t.Fatal("race abandoned")
+	}
+	finish(t, e, l, call, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}}, proto.PhaseResults)
+	if st := e.push.lastState(t, 1); st.Members[0].SetPoints != 15 || st.SetRace != 1 {
+		t.Fatalf("race not counted: %+v", st)
+	}
+	e.clock.Advance(10 * time.Second)
+	if e.phase(l) != proto.PhaseWaiting {
+		t.Fatal("lone player after results not waiting")
 	}
 }
 
 func TestSoloRace(t *testing.T) {
 	e := newEnv(t)
 	e.ok(e.m.QuickJoin(e.player(1), 1))
-	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
 	l := e.lobbyOf(1)
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.alps"))
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps"), proto.StatusBadRequest, "character")
+	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"), proto.StatusBadRequest, "not a track")
+	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps"))
 	call := e.races.last()
-	if !call.spec.Solo || call.spec.AICount != 6 || len(call.racers) != 1 {
+	if !call.spec.Solo || call.spec.AICount != 6 || len(call.racers) != 1 || call.spec.TrackID != "mhk2.alps" ||
+		call.spec.SetRace != 0 || call.spec.SetSize != 0 {
 		t.Fatalf("solo spec %+v", call.spec)
 	}
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, ""), proto.StatusBadRequest, "waits")
 	call.cb.Going(call.id)
 	e.waitPhase(t, l, proto.PhaseCountdown)
 
-	// Someone joins the solo race: they wait, the racer hears about it.
+	// Someone joins the solo race: they wait, the racer hears about it, nobody votes yet.
 	s := e.ok(e.m.QuickJoin(e.player(2), 1))
-	if s.Members[1].InRace || !s.Members[0].InRace {
-		t.Fatalf("members %+v", s.Members)
+	if s.Members[1].InRace || !s.Members[0].InRace || s.Summary.Phase != proto.PhaseCountdown {
+		t.Fatalf("members %+v", s)
 	}
 	waiting := e.push.of(1, proto.PushSoloRaceJoinWaiting)
 	if len(waiting) != 1 || waiting[0].(*proto.SoloRaceJoinWaiting).Username != "p2" {
 		t.Fatalf("SoloRaceJoinWaiting %v", waiting)
 	}
+	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, ""), proto.StatusForbidden, "voting")
 	wantStatus(t, e.m.EndRaceEarly(Player{AccountID: 2}), proto.StatusBadRequest, "alone")
 	must(t, e.m.EndRaceEarly(Player{AccountID: 1}))
 	if !slices.Equal(e.races.ended, []uint64{call.id}) {
 		t.Fatalf("EndEarly calls %v", e.races.ended)
 	}
 	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 3, Outcome: race.OutcomeDNF}})
-	e.waitPhase(t, l, proto.PhaseResults)
-	e.clock.Advance(10 * time.Second)
+	// No results phase, no points, the set untouched: straight to Voting with both humans.
+	e.waitPhase(t, l, proto.PhaseVoting)
+	st := e.push.lastState(t, 2)
+	if st.SetRace != 0 || st.Members[0].SetPoints != 0 || st.Members[0].InRace || len(st.LastResults) != 1 {
+		t.Fatalf("after the solo race %+v", st)
+	}
+	res := e.push.of(2, proto.PushRaceResults)
+	if len(res) != 1 || res[0].(*proto.RaceResults).Rows[0].Points != 0 || res[0].(*proto.RaceResults).SetDone {
+		t.Fatalf("solo results %+v", res)
+	}
 
-	// The next race starts with the humans only.
+	// The next race starts with the humans only and is race 1 of the set.
 	must(t, e.m.SetLoadout(Player{AccountID: 2}, "game.huhn", "game.kart"))
 	must(t, e.m.Vote(Player{AccountID: 1}, ""))
 	must(t, e.m.Vote(Player{AccountID: 2}, ""))
-	if call := e.races.last(); call.spec.Solo || call.spec.AICount != 0 || len(call.racers) != 2 {
+	if call := e.races.last(); call.spec.Solo || call.spec.AICount != 0 || len(call.racers) != 2 ||
+		call.spec.SetRace != 1 || call.spec.SetSize != 4 {
 		t.Fatalf("second race %+v", call.spec)
 	}
 	wantStatus(t, e.m.EndRaceEarly(Player{AccountID: 1}), proto.StatusBadRequest, "alone")
+}
+
+func TestSoloRaceAloneAgain(t *testing.T) {
+	e := newEnv(t)
+	e.ok(e.m.QuickJoin(e.player(1), 5)) // battles
+	l := e.lobbyOf(1)
+	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
+	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
+	call := e.races.last()
+	if call.spec.TrackID != "mhk2.arena" || call.spec.Mode != race.ModeBattle || !call.spec.Solo {
+		t.Fatalf("solo battle %+v", call.spec)
+	}
+	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}})
+	// Still alone: waiting at once, ready for another solo race.
+	e.waitPhase(t, l, proto.PhaseWaiting)
+	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"))
 }
 
 func TestLeaveDuringRace(t *testing.T) {
@@ -501,13 +584,27 @@ func TestRoomValidation(t *testing.T) {
 	if st.Settings.CupID != "mhk2.cup" {
 		t.Fatal("cup lost")
 	}
-	// Championships need the next track from the owner.
+	// With company, championships need the next track from the owner.
 	must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
+	e.ok(e.m.Join(e.player(2), 0, st.Code))
 	wantStatus(t, e.m.StartRace(p, ""), proto.StatusBadRequest, "cup")
-	// Alone with aiWhenAlone: AI fills the room.
-	must(t, e.m.StartRace(p, "mhk2.alps"))
-	if call := e.races.last(); !call.spec.Solo || call.spec.AICount != 3 {
+	// Alone (even in a championship, any pick mode): a solo race, AI fills the room, the set does not advance.
+	e.m.Leave(2)
+	must(t, e.m.StartRace(p, ""))
+	call := e.races.last()
+	if !call.spec.Solo || call.spec.AICount != 3 || call.spec.SetRace != 0 || call.spec.SetSize != 0 ||
+		!slices.Contains([]string{"mhk2.rome", "mhk2.alps"}, call.spec.TrackID) {
 		t.Fatalf("private solo %+v", call.spec)
+	}
+	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}})
+	l := e.lobbyOf(1)
+	e.waitPhase(t, l, proto.PhaseWaiting)
+	if st := e.push.lastState(t, 1); st.SetRace != 0 || st.Members[0].SetPoints != 0 {
+		t.Fatalf("solo race counted: %+v", st)
+	}
+	res := e.push.of(1, proto.PushRaceResults)[0].(*proto.RaceResults)
+	if res.SetDone || res.Rows[0].Points != 0 {
+		t.Fatalf("solo results %+v", res)
 	}
 }
 

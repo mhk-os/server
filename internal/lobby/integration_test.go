@@ -266,15 +266,36 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 	if err != nil || len(list) != maxCategory {
 		t.Fatalf("ListLobbies %d %v", len(list), err)
 	}
+	// Alone: the lobby waits; a solo AI race only on request, no points, back to Waiting.
 	stA, err := a.QuickJoin(ctx, 1)
-	if err != nil || stA.Summary.Phase != proto.PhaseVoting || len(stA.Members) != 1 {
+	if err != nil || stA.Summary.Phase != proto.PhaseWaiting || len(stA.Members) != 1 {
 		t.Fatalf("QuickJoin %+v %v", stA, err)
 	}
+	if err := a.SetLoadout(ctx, "game.huhn", "mhk2.speedy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartRace(ctx, "mhk2.rome"); err != nil {
+		t.Fatal(err)
+	}
+	solo := s.waitStart(t, 1)
+	if !solo.spec.Solo || solo.spec.AICount != 6 || solo.spec.TrackID != "mhk2.rome" {
+		t.Fatalf("solo race %+v", solo.spec)
+	}
+	solo.cb.Finished(solo.id, []race.Placement{{AccountID: a.id, Username: a.name, Position: 2, FinishMs: 80_000}})
+	var soloRes proto.RaceResults
+	if err := a.WaitPushMsg(ctx, proto.PushRaceResults, &soloRes); err != nil || soloRes.Rows[0].Points != 0 {
+		t.Fatalf("solo results %+v %v", soloRes, err)
+	}
+	a.waitState(t, func(st *proto.LobbyState) bool { return st.Summary.Phase == proto.PhaseWaiting && st.RaceID == 0 })
+
+	// The second human starts the voting.
 	stB, err := b.QuickJoin(ctx, 1)
-	if err != nil || stB.Summary.LobbyID != stA.Summary.LobbyID || len(stB.Members) != 2 {
+	if err != nil || stB.Summary.LobbyID != stA.Summary.LobbyID || len(stB.Members) != 2 ||
+		stB.Summary.Phase != proto.PhaseVoting {
 		t.Fatalf("second QuickJoin %+v %v", stB, err)
 	}
 	a.waitState(t, func(st *proto.LobbyState) bool { return len(st.Members) == 2 })
+	itStatus(t, a.StartRace(ctx, ""), proto.StatusForbidden, "voting")
 
 	// Missing packs are refused with a list.
 	c := s.connect(t, false)
@@ -297,7 +318,7 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 	if err := b.Vote(ctx, "mhk2.alps"); err != nil {
 		t.Fatal(err)
 	}
-	call := s.waitStart(t, 1)
+	call := s.waitStart(t, 2)
 	if call.spec.TrackID != "mhk2.alps" || len(call.racers) != 2 || call.spec.LobbyID != stA.Summary.LobbyID {
 		t.Fatalf("race %+v", call.spec)
 	}

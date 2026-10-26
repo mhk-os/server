@@ -400,15 +400,19 @@ overriding an id of a lobby pack must disable it for that lobby (the client chec
 
 Instances exist per (category, `simVersion`): there is always one instance with a free slot; when all are full a
 new one opens; an empty instance closes while another one of its category has room. Public lobbies race at
-**150cc** (engine class 2), track laps, items on with default odds. Flow: **Voting** (20 s or until everyone voted:
-each player votes a track/arena or Random; one vote is drawn at random) → Loading → Countdown → Racing → Results
-(10 s) → after **4 races** SetResults (15 s, points reset) → Voting. Players joining during a race wait for the next
-one. Points per race by position: 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 (DNF 0); battles rank survivors by health, then
-eliminated players by reverse elimination order.
+**150cc** (engine class 2), track laps, items on with default odds. Flow, while at least **two humans** are in the
+lobby: **Voting** (20 s or until everyone voted: each player votes a track/arena or Random; one vote is drawn at
+random) → Loading → Countdown → Racing → Results (10 s) → after **4 races** SetResults (15 s, points reset) → Voting.
+With one human the lobby waits (phase Waiting, nothing starts by itself). Players joining during a race wait for the
+next one. Points per race by position: 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 (DNF 0); battles rank survivors by health,
+then eliminated players by reverse elimination order.
 
-**AI** only when exactly one human is in the lobby when a race starts: that client races against AI it simulates
-itself (no item/anticheat arbitration): 6 AI opponents in public lobbies, `maxPlayers − 1` in private rooms with `aiWhenAlone`. If someone joins during such a race, the server tells that player
-(`SoloRaceJoinWaiting`) and they may end the race early (`EndRaceEarly`); the next race starts with the humans only.
+**AI** only on request while a player is alone: the lone member of a public lobby, or the owner of a private room who
+is alone, may start a race (`StartRace`, own track pick or `""` = random lobby track) against AI their own client
+simulates (no item/anticheat arbitration): 6 AI opponents in public lobbies, `maxPlayers − 1` in private rooms with
+`aiWhenAlone` (none without). Such solo races award no points and do not count towards a set. If someone joins during
+one, the server tells the solo racer (`SoloRaceJoinWaiting`) and they may end it early (`EndRaceEarly`); afterwards a
+public lobby starts Voting with the humans only, a private room waits for its owner.
 
 ### Private rooms
 
@@ -523,7 +527,7 @@ answer `BadRequest` "content not announced". Needs login.
 | 264 | SetLoadout | `characterId: string ≤ 96`, `kartId: string ≤ 96` | empty (must be lobby content) |
 | 265 | SetReady | `ready: bool` | empty |
 | 266 | Vote | `trackId: string ≤ 96` (`""` = Random) | empty (Voting phase, lobby content) |
-| 267 | StartRace | `trackId: string ≤ 96` (owner pick mode; else `""`) | empty (owner, private rooms) |
+| 267 | StartRace | `trackId: string ≤ 96` (alone: a solo AI race on that track, `""` = random lobby track; with others: the track in owner-pick rooms, `""` in vote rooms) | empty (owner of a private room; the lone member of a public lobby while it waits) |
 | 268 | EndRaceEarly | empty | empty (the solo racer of an AI race) |
 | 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty (room owner within their private room; moderators anywhere, also out of a race; audit-logged) |
 

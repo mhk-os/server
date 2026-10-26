@@ -416,16 +416,17 @@ func (m *Manager) idle(l *lobby) {
 	l.setRace, l.results, l.track, l.votes = 0, nil, "", nil
 }
 
-// between moves to what follows a race or the results: Voting in public lobbies, Waiting in private rooms.
+// between moves to what follows a race or the results: Voting in public lobbies with at least two humans (the
+// automatic cycle), otherwise Waiting (a lone player, or a private room's owner, starts the next race).
 func (m *Manager) between(l *lobby) {
 	switch {
 	case len(l.members) == 0:
 		m.idle(l)
-	case l.public:
+	case l.public && len(l.members) >= 2:
 		m.startVoting(l)
 	default:
 		m.setPhase(l, proto.PhaseWaiting, 0, nil)
-		l.track = ""
+		l.track, l.votes = "", nil
 	}
 }
 
@@ -465,13 +466,13 @@ func (m *Manager) endVoting(l *lobby) {
 	}
 	err := errNoLoadouts
 	if track != "" {
-		err = m.startRace(l, track)
+		err = m.startRace(l, track, false)
 	}
 	if err == nil {
 		return
 	}
 	m.log.Info("lobby race not started", "lobby", l.id, "err", err)
-	if l.public {
+	if l.public && len(l.members) >= 2 {
 		m.startVoting(l)
 	} else {
 		m.setPhase(l, proto.PhaseWaiting, 0, nil)
@@ -518,8 +519,9 @@ func (m *Manager) randomTrack(l *lobby) string {
 	return common[keys[m.rng.IntN(len(keys))]]
 }
 
-// startRace starts a race on track with every member that has a loadout, in join order shuffled.
-func (m *Manager) startRace(l *lobby, track string) error {
+// startRace starts a race on track. A solo race has the lone member against AI, outside the set (no points, the set
+// does not advance); otherwise every member with a loadout races, in join order shuffled.
+func (m *Manager) startRace(l *lobby, track string, solo bool) error {
 	var grid []*member
 	for _, mem := range l.members {
 		if mem.hasLoadout() {
@@ -541,9 +543,9 @@ func (m *Manager) startRace(l *lobby, track string) error {
 	if s.Mode == proto.RoomBattleSet {
 		spec.Mode = race.ModeBattle
 	}
-	// AI only when exactly one human is in the lobby; a private owner without aiWhenAlone races alone.
-	if len(l.members) == 1 {
-		spec.Solo = true
+	if solo {
+		// Not part of the set: RaceSetup announces 0/0.
+		spec.Solo, spec.SetRace, spec.SetSize = true, 0, 0
 		switch {
 		case l.public:
 			spec.AICount = publicAICount
@@ -564,8 +566,10 @@ func (m *Manager) startRace(l *lobby, track string) error {
 	if err != nil {
 		return fmt.Errorf("starting race: %w", err)
 	}
-	l.raceID, l.track, l.solo, l.votes = id, track, spec.Solo, nil
-	l.setRace++
+	l.raceID, l.track, l.solo, l.votes = id, track, solo, nil
+	if !solo {
+		l.setRace++
+	}
 	for _, mem := range l.members {
 		mem.ready = false
 	}
@@ -602,10 +606,14 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 	if m.stopped || l.closed || l.raceID != raceID {
 		return
 	}
+	solo := l.solo
 	rows := make([]proto.RaceResultRow, 0, len(placements))
 	for _, p := range placements {
 		row := proto.RaceResultRow{Slot: p.Slot, AccountID: p.AccountID, Username: p.Username, Position: p.Position,
-			FinishMs: p.FinishMs, Points: points(p), Outcome: uint8(p.Outcome), AI: p.AI}
+			FinishMs: p.FinishMs, Outcome: uint8(p.Outcome), AI: p.AI}
+		if !solo {
+			row.Points = points(p)
+		}
 		if mem := l.member(p.AccountID); mem != nil && !p.AI {
 			mem.points += row.Points
 			row.SetPoints = mem.points
@@ -615,7 +623,7 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 	if len(rows) > proto.MaxRaceRows {
 		rows = rows[:proto.MaxRaceRows]
 	}
-	setDone := l.setRace >= l.setSize()
+	setDone := !solo && l.setRace >= l.setSize()
 	l.raceID, l.solo = 0, false
 	for _, mem := range l.members {
 		mem.inRace = false
@@ -635,6 +643,10 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 			m.rebalance(instanceKey{l.category, l.sim})
 		}
 		return
+	case solo:
+		// Solo races have no results phase: the player may start the next one at once, and players who waited
+		// for the race to end get the next race (or its voting) straight away.
+		m.between(l)
 	case setDone:
 		m.setPhase(l, proto.PhaseSetResults, m.timing.SetResults, func() {
 			for _, mem := range l.members {
@@ -749,7 +761,8 @@ func (m *Manager) join(l *lobby, p Player) *proto.LobbyState {
 		}
 	}
 	if l.public {
-		if l.phase == proto.PhaseWaiting {
+		// The second human starts the automatic cycle; during a race or its results the cycle continues later.
+		if l.phase == proto.PhaseWaiting && len(l.members) >= 2 {
 			m.startVoting(l)
 		}
 		m.rebalance(instanceKey{l.category, l.sim})
@@ -791,7 +804,12 @@ func (m *Manager) removeMember(l *lobby, accountID uint64, reason uint8, message
 	if len(l.members) == 0 && !l.racing() {
 		m.idle(l)
 	}
-	if l.phase == proto.PhaseVoting && m.allVoted(l) {
+	switch {
+	case l.phase == proto.PhaseVoting && len(l.members) < 2:
+		// Races by vote need two humans (in private rooms too); a lone player waits and may start a solo race.
+		m.setPhase(l, proto.PhaseWaiting, 0, nil)
+		l.votes = nil
+	case l.phase == proto.PhaseVoting && m.allVoted(l):
 		m.endVoting(l)
 	}
 	if l.public {
@@ -1088,9 +1106,10 @@ func (m *Manager) Vote(p Player, track string) error {
 	return nil
 }
 
-// StartRace is the owner starting the next race of a private room: on the given track when the owner picks (""
-// draws a random one, except in championships, which follow the cup order the owner's client sends), or by opening
-// the voting.
+// StartRace starts a race on request. A player alone (the lone member of a waiting public lobby, or a private room's
+// owner without company) gets a solo race against AI on track ("" = a random lobby track of the right kind). With
+// others in a private room the owner starts the next race: on track when the owner picks ("" draws a random one,
+// except in championships, which follow the cup order the owner's client sends), or by opening the voting.
 func (m *Manager) StartRace(p Player, track string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1098,15 +1117,18 @@ func (m *Manager) StartRace(p Player, track string) error {
 	switch {
 	case l == nil:
 		return errNotInLobby
-	case l.public || l.owner != p.AccountID:
+	case l.public && len(l.members) > 1:
+		return errorf(proto.StatusForbidden, "Public lobbies start races by voting while others are here.")
+	case !l.public && l.owner != p.AccountID:
 		return errorf(proto.StatusForbidden, "Only the room owner can start races.")
 	case l.phase != proto.PhaseWaiting:
-		return errorf(proto.StatusBadRequest, "A race can only start while the room waits.")
+		return errorf(proto.StatusBadRequest, "A race can only start while the lobby waits.")
 	}
+	solo := len(l.members) == 1
 	if !slices.ContainsFunc(l.members, (*member).hasLoadout) {
 		return errNoLoadouts
 	}
-	if l.settings.TrackPick == proto.PickVote {
+	if !solo && l.settings.TrackPick == proto.PickVote {
 		if track != "" {
 			return errorf(proto.StatusBadRequest, "This room votes on tracks.")
 		}
@@ -1115,16 +1137,16 @@ func (m *Manager) StartRace(p Player, track string) error {
 		return nil
 	}
 	switch {
-	case track == "" && l.settings.Mode == proto.RoomChampionship:
+	case track == "" && !solo && l.settings.Mode == proto.RoomChampionship:
 		return errorf(proto.StatusBadRequest, "Choose the next track of the cup.")
 	case track == "":
 		if track = m.randomTrack(l); track == "" {
-			return errorf(proto.StatusBadRequest, "The room's packs have no track all racers know.")
+			return errorf(proto.StatusBadRequest, "The lobby's packs have no track all racers know.")
 		}
 	case !m.isContent(l.settings.Packs, p.AccountID, l.trackKind(), track):
-		return errorf(proto.StatusBadRequest, "%s is not a track of this room.", track)
+		return errorf(proto.StatusBadRequest, "%s is not a track of this lobby.", track)
 	}
-	if err := m.startRace(l, track); err != nil {
+	if err := m.startRace(l, track, solo); err != nil {
 		m.log.Error("starting race", "lobby", l.id, "err", err)
 		return errorf(proto.StatusServerError, "The race could not start.")
 	}
