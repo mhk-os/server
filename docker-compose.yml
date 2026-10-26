@@ -1,0 +1,40 @@
+# Local development: `docker compose up -d mysql` and run the server with `go run`, or `docker compose up -d` for both.
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: mhk
+      MYSQL_USER: mhk
+      MYSQL_PASSWORD: mhk
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./deploy/mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-umhk", "-pmhk"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  server:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MHK_DB_DSN: "mhk:mhk@tcp(mysql:3306)/mhk?parseTime=true"
+      MHK_LISTEN: ":7350"
+      MHK_DATA_DIR: /data
+    ports:
+      - "7350:7350/tcp"
+      - "7350:7350/udp"
+    volumes:
+      - server-data:/data
+
+volumes:
+  mysql-data:
+  server-data:
