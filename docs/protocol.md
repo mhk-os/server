@@ -435,8 +435,8 @@ packs.
 | itemOdds | list<(powerupId: string ≤ 96, percent: f32)> ≤ 64 | empty = default odds |
 | aiWhenAlone | bool | AI opponents while the owner is alone |
 | maxPlayers | u8 | 2–10 |
-| trackPick | u8 | 0 owner picks, 1 vote |
-| racesPerSet | u8 | 1–16 (ignored for championship: the cup's tracks) |
+| trackPick | u8 | 0 owner picks, 1 vote (championship rooms are always 0: the owner's client starts each cup track in order) |
+| racesPerSet | u8 | 1–16 (championship: the cup's track count) |
 | cupId | string ≤ 96 | championship only |
 
 `LobbySummary`:
