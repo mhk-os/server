@@ -199,6 +199,11 @@ func TestPlayerDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !got[0].Online {
+			// A profile reads the last activity before the online flag; the close records the activity before it
+			// drops the flag, so the next read has it.
+			if got, err = mod.c.GetProfiles(ctx, newest.acct.ID); err != nil {
+				t.Fatal(err)
+			}
 			if !got[0].LastActive.After(before[0].LastActive) || !before[0].Online {
 				t.Fatalf("last active %v before %+v", got[0].LastActive, before[0])
 			}
