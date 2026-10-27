@@ -9,6 +9,7 @@ import (
 	"github.com/mhk-os/server/internal/auth"
 	"github.com/mhk-os/server/internal/geo"
 	"github.com/mhk-os/server/internal/proto"
+	"github.com/mhk-os/server/internal/store"
 	"github.com/mhk-os/server/internal/wire"
 )
 
@@ -88,10 +89,14 @@ func (s *Server) registerAccounts() {
 	s.Handle(proto.TypeSetCountry, true, s.handleSetCountry)
 }
 
-func (s *Server) loggedIn(c *Conn, l *auth.Login, how string) proto.Message {
+// loggedIn binds c to the session and records the account's activity.
+func (s *Server) loggedIn(ctx context.Context, c *Conn, l *auth.Login, how string) (proto.Message, error) {
+	if err := s.deps.Accounts.TouchActive(ctx, l.Account.ID, store.Now()); err != nil {
+		return nil, err
+	}
 	c.login(l.Account, l.Hash)
 	c.log.Info(how, "account", l.Account.ID, "username", l.Account.Username)
-	return &proto.Session{Token: l.Token, Expires: l.Expires, Account: l.Account.Proto()}
+	return &proto.Session{Token: l.Token, Expires: l.Expires, Account: l.Account.Proto()}, nil
 }
 
 func (s *Server) handleRegister(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
@@ -103,7 +108,7 @@ func (s *Server) handleRegister(ctx context.Context, c *Conn, r *wire.Reader) (p
 	if err != nil {
 		return nil, authError(err)
 	}
-	return s.loggedIn(c, l, "registered"), nil
+	return s.loggedIn(ctx, c, l, "registered")
 }
 
 func (s *Server) handleLogin(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
@@ -115,7 +120,7 @@ func (s *Server) handleLogin(ctx context.Context, c *Conn, r *wire.Reader) (prot
 	if err != nil {
 		return nil, authError(err)
 	}
-	return s.loggedIn(c, l, "logged in"), nil
+	return s.loggedIn(ctx, c, l, "logged in")
 }
 
 func (s *Server) handleResume(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
@@ -127,7 +132,7 @@ func (s *Server) handleResume(ctx context.Context, c *Conn, r *wire.Reader) (pro
 	if err != nil {
 		return nil, authError(err)
 	}
-	return s.loggedIn(c, l, "resumed"), nil
+	return s.loggedIn(ctx, c, l, "resumed")
 }
 
 func (s *Server) handleLogout(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {

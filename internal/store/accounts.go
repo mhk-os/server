@@ -85,6 +85,11 @@ func (s *Store) TouchLogin(ctx context.Context, id uint64, at time.Time) error {
 	return s.execOne(ctx, "UPDATE accounts SET last_login_at = ? WHERE id = ?", at, id)
 }
 
+// TouchActive sets the account's last activity (login, resume, end of a logged-in connection).
+func (s *Store) TouchActive(ctx context.Context, id uint64, at time.Time) error {
+	return s.execOne(ctx, "UPDATE accounts SET last_active_at = ? WHERE id = ?", at, id)
+}
+
 // execOne runs a statement that must match exactly one row (Open enables ClientFoundRows, so unchanged rows count).
 func (s *Store) execOne(ctx context.Context, query string, args ...any) error {
 	res, err := s.db.ExecContext(ctx, query, args...)

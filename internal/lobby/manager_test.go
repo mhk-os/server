@@ -477,6 +477,41 @@ func TestSoloRaceAloneAgain(t *testing.T) {
 	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"))
 }
 
+func TestRaceScores(t *testing.T) {
+	e := newEnv(t)
+	e.ok(e.m.QuickJoin(e.player(1), 1))
+	l := e.lobbyOf(1)
+	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "mhk2.speedy"))
+	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
+	// A solo race against AI scores nothing.
+	e.races.last().cb.Finished(e.races.last().id, []race.Placement{
+		{AccountID: 0, Username: "AI", Position: 1, FinishMs: 59_000, AI: true},
+		{Slot: 0, AccountID: 1, Username: "p1", Position: 2, FinishMs: 60_000}})
+	e.waitPhase(t, l, proto.PhaseWaiting)
+
+	e.ok(e.m.QuickJoin(e.player(2), 1))
+	e.ok(e.m.QuickJoin(e.player(3), 1))
+	for id := uint64(2); id <= 3; id++ {
+		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "mhk2.speedy"))
+	}
+	for id := uint64(1); id <= 3; id++ {
+		must(t, e.m.Vote(Player{AccountID: id}, ""))
+	}
+	finish(t, e, l, e.races.last(), []race.Placement{
+		{Slot: 2, AccountID: 3, Username: "p3", Position: 1, FinishMs: 60_000},
+		{Slot: 0, AccountID: 1, Username: "p1", Position: 2, FinishMs: 61_000},
+		{Slot: 1, AccountID: 2, Username: "p2", Position: 3, Outcome: race.OutcomeModKick}}, proto.PhaseResults)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(e.scores.recorded()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	want := []store.RaceResult{{AccountID: 3, Points: 15, Win: true, Podium: true},
+		{AccountID: 1, Points: 12, Podium: true}, {AccountID: 2}}
+	if got := e.scores.recorded(); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Fatalf("recorded %+v", got)
+	}
+}
+
 func TestLeaveDuringRace(t *testing.T) {
 	e := newEnv(t)
 	l := joinTwo(t, e)
@@ -677,6 +712,22 @@ func TestOwnerKick(t *testing.T) {
 	// Owners cannot kick in public lobbies or in other rooms.
 	e.ok(e.m.QuickJoin(e.player(4), 1))
 	wantStatus(t, e.m.Kick(ctx, owner, 4, "x"), proto.StatusForbidden, "owner")
+}
+
+func TestOwnerKickDuringRace(t *testing.T) {
+	e := newEnv(t)
+	owner := e.player(1)
+	s := e.ok(e.m.CreateRoom(owner, room()))
+	e.ok(e.m.Join(e.player(2), 0, s.Code))
+	for id := uint64(1); id <= 2; id++ {
+		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
+	}
+	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	call := e.races.last()
+	must(t, e.m.Kick(context.Background(), owner, 2, "rude"))
+	if len(e.races.removes) != 1 || e.races.removes[0] != (removeCall{call.id, 2, race.OutcomeLeft, "rude"}) {
+		t.Fatalf("removes %+v", e.races.removes)
+	}
 }
 
 func TestModeratorKick(t *testing.T) {

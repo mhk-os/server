@@ -35,6 +35,12 @@ const (
 	TypeLogout     Type = 19
 	TypeSetCountry Type = 20
 
+	TypeSetProfileListed Type = 21
+	TypeListPlayers      Type = 22
+	TypeGetProfiles      Type = 23
+	TypeGetProfile       Type = 24
+	TypeScoreLeaderboard Type = 25
+
 	TypeModHideRun        Type = 64
 	TypeModUnhideRun      Type = 65
 	TypeModDisableAccount Type = 66
@@ -42,6 +48,7 @@ const (
 	TypeModListFlagged    Type = 68
 	TypeModRunReports     Type = 69
 	TypeModGetAccount     Type = 70
+	TypeModListHidden     Type = 71
 
 	TypeListBoards     Type = 128
 	TypeGetLeaderboard Type = 129
@@ -49,6 +56,7 @@ const (
 	TypeDownloadRun    Type = 131
 	TypeReportRun      Type = 132
 	TypeMyRuns         Type = 133
+	TypePlayerRuns     Type = 134
 )
 
 // Push types.

@@ -60,7 +60,8 @@ func startHarness(t *testing.T) *harness {
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), limits)
 	srv := server.New(server.Config{Version: "test", UDPPort: uint16(udp.LocalAddr().(*net.UDPAddr).Port),
 		ConnLimit: auth.Rate{N: 1000, Per: time.Minute}},
-		server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st, Blobs: ghosts})
+		server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st, Profiles: st,
+			Blobs: ghosts})
 	eng := NewEngine(Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp})
 	eng.Register(srv)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -35,6 +35,7 @@ func (s *Server) registerTimeTrials() {
 	s.Handle(proto.TypeDownloadRun, false, s.handleDownloadRun)
 	s.Handle(proto.TypeReportRun, true, s.handleReportRun)
 	s.Handle(proto.TypeMyRuns, true, s.handleMyRuns)
+	s.Handle(proto.TypePlayerRuns, false, s.handlePlayerRuns)
 }
 
 // isModerator reports whether the connection is logged in as a moderator.
@@ -43,8 +44,9 @@ func isModerator(c *Conn) bool {
 	return a != nil && a.Role == proto.RoleModerator
 }
 
-func runEntry(v *store.RunView) proto.RunEntry {
-	return proto.RunEntry{
+// runEntry is what a client sees of a run: flags only for moderators.
+func runEntry(v *store.RunView, moderator bool) proto.RunEntry {
+	e := proto.RunEntry{
 		RunID:         v.ID,
 		Rank:          v.Rank,
 		AccountID:     v.AccountID,
@@ -58,7 +60,6 @@ func runEntry(v *store.RunView) proto.RunEntry {
 		GhostID:       v.GhostID,
 		Recorded:      v.RecordedAt,
 		Uploaded:      v.UploadedAt,
-		Flags:         v.Flags,
 		SetupMismatch: v.SetupMismatch,
 		Hidden:        v.Hidden(),
 		FileSize:      v.FileSize,
@@ -66,12 +67,16 @@ func runEntry(v *store.RunView) proto.RunEntry {
 		TrackID:       v.BoardTrackID,
 		EngineClass:   v.EngineClass,
 	}
+	if moderator {
+		e.Flags = v.Flags
+	}
+	return e
 }
 
-func runEntries(views []store.RunView) []proto.RunEntry {
+func runEntries(views []store.RunView, moderator bool) []proto.RunEntry {
 	out := make([]proto.RunEntry, len(views))
 	for i := range views {
-		out[i] = runEntry(&views[i])
+		out[i] = runEntry(&views[i], moderator)
 	}
 	return out
 }
@@ -142,9 +147,10 @@ func (s *Server) handleGetLeaderboard(ctx context.Context, c *Conn, r *wire.Read
 	if err != nil {
 		return nil, err
 	}
-	out := &proto.Leaderboard{Total: clampU32(page.Total), Entries: runEntries(page.Entries)}
+	mod := isModerator(c)
+	out := &proto.Leaderboard{Total: clampU32(page.Total), Entries: runEntries(page.Entries, mod)}
 	if page.Mine != nil {
-		e := runEntry(page.Mine)
+		e := runEntry(page.Mine, mod)
 		out.Mine = &e
 	}
 	return out, nil
@@ -183,7 +189,7 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 		c.log.Info("ghost rejected", "err", err)
 		return nil, Errorf(proto.StatusBadRequest, "%s%s.", msgInvalidGhost, err)
 	}
-	if res, err := s.existingUpload(ctx, acct.ID, sum.ID); res != nil || err != nil {
+	if res, err := s.existingUpload(ctx, acct, sum.ID); res != nil || err != nil {
 		return res, err
 	}
 	hash, err := s.deps.Blobs.Put(req.File)
@@ -200,7 +206,7 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	}
 	if err := s.deps.Runs.CreateRun(ctx, run); errors.Is(err, store.ErrGhostExists) {
 		// Uploaded concurrently (two connections of one player, or a thief racing the owner).
-		res, err := s.existingUpload(ctx, acct.ID, sum.ID)
+		res, err := s.existingUpload(ctx, acct, sum.ID)
 		if res == nil && err == nil {
 			err = errors.New("ghost reported as existing but not found")
 		}
@@ -214,12 +220,12 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	}
 	c.log.Info("run uploaded", "run", run.ID, "board", run.BoardID, "track", run.TrackID, "finish_ms", run.FinishMs,
 		"rank", v.Rank)
-	return &proto.UploadResult{Run: runEntry(v), PersonalBest: v.Rank > 0}, nil
+	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.Rank > 0}, nil
 }
 
 // existingUpload answers an upload of a ghost id that is already stored: the owner gets the run back as a
 // duplicate, anybody else Forbidden. It returns nil, nil when the ghost is new.
-func (s *Server) existingUpload(ctx context.Context, accountID uint64, ghostID string) (proto.Message, error) {
+func (s *Server) existingUpload(ctx context.Context, acct *store.Account, ghostID string) (proto.Message, error) {
 	v, err := s.deps.Runs.RunByGhostID(ctx, ghostID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
@@ -227,10 +233,11 @@ func (s *Server) existingUpload(ctx context.Context, accountID uint64, ghostID s
 	if err != nil {
 		return nil, err
 	}
-	if v.AccountID != accountID {
+	if v.AccountID != acct.ID {
 		return nil, Errorf(proto.StatusForbidden, msgGhostTaken)
 	}
-	return &proto.UploadResult{Run: runEntry(v), PersonalBest: v.Rank > 0, Duplicate: true}, nil
+	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.Rank > 0,
+		Duplicate: true}, nil
 }
 
 func (s *Server) handleDownloadRun(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
@@ -246,7 +253,7 @@ func (s *Server) handleDownloadRun(ctx context.Context, c *Conn, r *wire.Reader)
 	if err != nil {
 		return nil, err
 	}
-	return &proto.DownloadResult{Run: runEntry(v), File: file}, nil
+	return &proto.DownloadResult{Run: runEntry(v, isModerator(c)), File: file}, nil
 }
 
 func (s *Server) handleReportRun(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
@@ -276,6 +283,9 @@ func (s *Server) handleReportRun(ctx context.Context, c *Conn, r *wire.Reader) (
 		c.log.Info("run reported", "run", req.RunID, "reason", req.Reason, "at", req.AtSeconds, "counted", rep.Counted,
 			"flags", flags)
 	}
+	if !isModerator(c) {
+		flags = 0
+	}
 	return &proto.ReportResult{Flags: flags}, nil
 }
 
@@ -289,5 +299,24 @@ func (s *Server) handleMyRuns(ctx context.Context, c *Conn, r *wire.Reader) (pro
 	if err != nil {
 		return nil, err
 	}
-	return &proto.RunList{Runs: runEntries(runs)}, nil
+	return &proto.RunList{Runs: runEntries(runs, isModerator(c))}, nil
+}
+
+func (s *Server) handlePlayerRuns(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
+	var req proto.PlayerRuns
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	if req.Limit < 1 || req.Limit > proto.MaxPage {
+		return nil, Errorf(proto.StatusBadRequest, msgBadLimit)
+	}
+	mod := isModerator(c)
+	if _, err := s.profileAccount(ctx, req.AccountID, mod); err != nil {
+		return nil, err
+	}
+	total, runs, err := s.deps.Runs.PlayerRuns(ctx, req.AccountID, int(req.Offset), int(req.Limit), mod)
+	if err != nil {
+		return nil, err
+	}
+	return &proto.RunPage{Total: clampU32(total), Runs: runEntries(runs, mod)}, nil
 }

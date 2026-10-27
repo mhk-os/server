@@ -23,6 +23,7 @@ type Store interface {
 	store.Accounts
 	store.Moderation
 	store.Runs
+	store.Profiles
 	ContentStrikes(ctx context.Context, accountID uint64, limit int) ([]store.ContentStrike, error)
 	CheatKicks(ctx context.Context, accountID uint64, limit int) ([]store.CheatKickView, error)
 }

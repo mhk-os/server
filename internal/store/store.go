@@ -121,6 +121,7 @@ type Accounts interface {
 	AccountByUsername(ctx context.Context, username string) (*Account, error)
 	SetCountryUser(ctx context.Context, id uint64, country *string) error
 	TouchLogin(ctx context.Context, id uint64, at time.Time) error
+	TouchActive(ctx context.Context, id uint64, at time.Time) error
 }
 
 // Sessions persists login sessions.

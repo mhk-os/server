@@ -298,14 +298,34 @@ func (a *fakeAudit) RecordAction(_ context.Context, act store.Action) error {
 	return nil
 }
 
+// fakeScores records RecordRace calls; races finish on their own goroutine, so tests wait for them.
+type fakeScores struct {
+	mu    sync.Mutex
+	races [][]store.RaceResult
+}
+
+func (s *fakeScores) RecordRace(_ context.Context, results []store.RaceResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.races = append(s.races, results)
+	return nil
+}
+
+func (s *fakeScores) recorded() [][]store.RaceResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.races)
+}
+
 type env struct {
-	t     *testing.T
-	m     *Manager
-	clock *fakeClock
-	races *fakeRaces
-	cat   *fakeCatalog
-	push  *fakePusher
-	audit *fakeAudit
+	t      *testing.T
+	m      *Manager
+	clock  *fakeClock
+	races  *fakeRaces
+	cat    *fakeCatalog
+	push   *fakePusher
+	audit  *fakeAudit
+	scores *fakeScores
 }
 
 const testSim = 7
@@ -313,16 +333,17 @@ const testSim = 7
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{
-		t:     t,
-		clock: &fakeClock{now: time.UnixMilli(1_800_000_000_000).UTC()},
-		races: &fakeRaces{rtt: map[uint64]uint16{}},
-		cat:   newFakeCatalog(),
-		push:  &fakePusher{},
-		audit: &fakeAudit{},
+		t:      t,
+		clock:  &fakeClock{now: time.UnixMilli(1_800_000_000_000).UTC()},
+		races:  &fakeRaces{rtt: map[uint64]uint16{}},
+		cat:    newFakeCatalog(),
+		push:   &fakePusher{},
+		audit:  &fakeAudit{},
+		scores: &fakeScores{},
 	}
 	var seed [32]byte
 	binary.LittleEndian.PutUint64(seed[:], 42)
-	e.m = New(Config{Races: e.races, Catalog: e.cat, Pusher: e.push, Audit: e.audit, Clock: e.clock,
+	e.m = New(Config{Races: e.races, Catalog: e.cat, Pusher: e.push, Audit: e.audit, Scores: e.scores, Clock: e.clock,
 		Rand: rand.New(rand.NewChaCha8(seed))})
 	t.Cleanup(e.m.Close)
 	return e

@@ -79,7 +79,7 @@ func start(t *testing.T, cfg server.Config, limits auth.Limits) *testServer {
 		t.Fatal(err)
 	}
 	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
-		Blobs: ghosts})
+		Profiles: st, Blobs: ghosts})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

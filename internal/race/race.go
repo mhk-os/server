@@ -45,6 +45,7 @@ const (
 	rouletteSlack     = 100 * time.Millisecond
 	ticksPerSecond    = 60
 	specialBox        = "@special"
+	gamePack          = "game" // the built-in pack: content of every lobby
 )
 
 // env is how a race acts on the world; the Engine implements it, unit tests record it.
@@ -239,10 +240,21 @@ func loadHash(m *proto.RaceLoaded) [32]byte {
 	return sha256.Sum256(w.Bytes())
 }
 
+// lobbySpecials drops the specials whose powerup is not content of the lobby: a client with more packs installed
+// resolves cross-pack specials that the others lack, and nobody may hold a powerup outside the lobby's packs.
+func (rs *raceState) lobbySpecials(m *proto.RaceLoaded) {
+	m.Specials = slices.DeleteFunc(m.Specials, func(sp proto.Special) bool {
+		pack := packOf(sp.PowerupID)
+		return !strings.EqualFold(pack, gamePack) &&
+			!slices.ContainsFunc(rs.spec.Packs, func(p string) bool { return strings.EqualFold(p, pack) })
+	})
+}
+
 func (rs *raceState) onLoaded(s *seat, m *proto.RaceLoaded, now time.Time) {
 	if rs.phase != phaseLoading || s.loaded != nil {
 		return
 	}
+	rs.lobbySpecials(m)
 	s.loaded, s.loadedHash = m, loadHash(m)
 	rs.debug("race loaded", s, "hash", shortHash(s.loadedHash), "trackHash", m.TrackHash, "laps", m.Laps,
 		"boxes", len(m.Boxes), "pool", len(m.Pool), "effects", len(m.Effects))

@@ -178,6 +178,62 @@ Empty → empty. Revokes the session of this connection; the connection stays op
 
 `country: string ≤ 2` (`""` or two letters A–Z of a known ISO 3166-1 code) → `Account`. Needs login.
 
+## Profiles and score
+
+Every account has a public mini-profile. **Score** grows with online races (race sets, battle sets, championship
+rooms): after each race the server adds the race's points (the position points of `RaceResultRow.points`: 15, 12,
+10, 8, 7, 6, 5, 4, 3, 2, DNF 0) to the score of every human racer. Solo races against AI award nothing, kicked racers
+get nothing. The same race also counts `races` (every human who raced it, whatever the outcome), `wins` (position 1,
+finished) and `podiums` (position 1–3, finished). **Rank** = 1 + the number of accounts with a higher score, among
+accounts with score > 0 that are not disabled (equal scores share a rank); 0 = unranked (score 0 or disabled).
+**Last active** is the last login, resume or end of a logged-in connection; `online` is true while the account has a
+logged-in connection. A player may take their profile off the players list (`ListPlayers`, default: listed); it stays
+reachable everywhere their name appears (lobbies, leaderboards, rankings). Disabled accounts appear in no list and
+are `NotFound` for everyone except moderators.
+
+`PlayerSummary`:
+
+| Field | Type | |
+| ------- | ------ | - |
+| accountId | u64 | |
+| username | string ≤ 20 | |
+| country | string ≤ 2 | |
+| role | u8 | 0 = player, 1 = moderator |
+| created | time | registration |
+| lastActive | time | 0 = never |
+| online | bool | |
+| score | u32 | |
+| rank | u32 | 0 = unranked |
+
+`PlayerProfile`:
+
+| Field | Type | |
+| ------- | ------ | - |
+| player | PlayerSummary | |
+| listed | bool | shown in `ListPlayers` |
+| races | u32 | online races raced |
+| wins | u32 | |
+| podiums | u32 | |
+| ttRuns | u32 | visible uploaded time-trial runs |
+| ttBoards | u32 | boards with a visible run |
+| ttBestRank | u32 | best leaderboard rank on any board, 0 = none |
+| disabled | bool | moderators only, else false |
+| disabledReason | string ≤ 256 | moderators only, else `""` |
+| cheatKicks | u32 | moderators only, else 0 |
+| contentStrikes | u32 | moderators only, else 0 |
+| hiddenRuns | u32 | moderators only, else 0 |
+| flaggedRuns | u32 | runs with flags ≥ 1; moderators only, else 0 |
+
+| Type | Name | Request | Response |
+| ------ | ------ | --------- | ---------- |
+| 21 | SetProfileListed | `listed: bool` | empty. Needs login |
+| 22 | ListPlayers | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` (case-insensitive username substring, `""` = all), `sort: u8` (0 newest registration first, 1 username A–Z) | `total: u32`, `list<PlayerSummary>`: listed accounts only |
+| 23 | GetProfiles | `list<u64> ≤ 100` (account ids) | `list<PlayerSummary>` of the ids that exist (any order; unknown and, for non-moderators, disabled ids are left out). For names shown in lists (rank next to the name) |
+| 24 | GetProfile | `accountId: u64` | `PlayerProfile` (`NotFound` when unknown, or disabled for a non-moderator) |
+| 25 | ScoreLeaderboard | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` | `total: u32` (rows after the search), `list<PlayerSummary>` ranked (rank, then username), `hasMine: bool`, then `mine: PlayerSummary` when `hasMine` (the logged-in account, when ranked) |
+
+None but `SetProfileListed` needs login.
+
 ## Time trials (phase 2)
 
 ### Concepts
@@ -199,10 +255,11 @@ Empty → empty. Revokes the session of this connection; the connection stays op
   `setupMismatch`. Display only; never hides anything.
 - **Flags**: game clients validate ghosts while they play back and report what they detect (`ReportRun`). `flags` =
   number of distinct accounts that reported the run. Reports from accounts that were ever kicked from a race for
-  cheating, and reports on one's own run, are accepted and ignored. Nothing is hidden automatically.
+  cheating, and reports on one's own run, are accepted and ignored. Nothing is hidden automatically. **Only
+  moderators see flags**: every `RunEntry` and `ReportRun` answer carries `flags` 0 for anybody else.
 - **Hidden**: a moderator hid the run (or the owner's account is disabled). Hidden runs are excluded for everyone
-  except moderators (who see them with `hidden` set when they ask for `includeHidden`). Nothing a moderator does is
-  permanent; only the sysadmin CLI deletes.
+  except moderators, who list them with `ModListHidden` (the game's Hidden tab) or see them with `hidden` set when they
+  ask for `includeHidden`. Nothing a moderator does is permanent; only the sysadmin CLI deletes.
 
 ### Upload validation (server)
 
@@ -254,7 +311,7 @@ Rejected with `BadRequest` and a message naming the problem when any check fails
 | ghostId | string ≤ 32 | header `id` |
 | recorded | time | header date |
 | uploaded | time | |
-| flags | u32 | distinct reporters |
+| flags | u32 | distinct reporters; 0 unless the asking account is a moderator |
 | setupMismatch | bool | |
 | hidden | bool | only ever true for moderators |
 | fileSize | u32 | compressed bytes |
@@ -311,6 +368,13 @@ from the recorded inputs ends elsewhere), 9 `Data` (inconsistent data), 255 `Oth
 `trackId: string ≤ 96` → `list<RunEntry> ≤ 500`: every run of the logged-in account on that track (all boards,
 hidden ones included with `hidden` set), so the client can mark local ghosts as uploaded. Needs login.
 
+### PlayerRuns (request 134)
+
+`accountId: u64`, `offset: u32`, `limit: u16` (1–100) → `total: u32`, `list<RunEntry>`: the account's visible runs
+on every board (moderators: hidden ones too, with `hidden` set), newest upload first; `rank` is the board rank of
+the account's best run there, 0 for its other runs. `NotFound` when the account is unknown, or disabled for a
+non-moderator. No login needed.
+
 ## Moderation (phase 2)
 
 All need a moderator account (`Forbidden` otherwise) and write the audit log. Moderators cannot disable moderator
@@ -325,6 +389,7 @@ accounts. `reason` is shown to the affected player where applicable.
 | 68 | ModListFlagged | `offset: u32`, `limit: u16` (1–100), `includeHidden: bool` | `total: u32`, `list<RunEntry>` (flags ≥ 1, most flags first, then newest) |
 | 69 | ModRunReports | `runId: u64` | `list<RunReport> ≤ 500` |
 | 70 | ModGetAccount | `accountId: u64` | `ModAccountInfo` |
+| 71 | ModListHidden | `boardId: u64` (0 = every board), `offset: u32`, `limit: u16` (1–100) | `total: u32`, `list<RunEntry>` (hidden runs, `hidden` set, most recently hidden first; runs of disabled accounts included) |
 
 `RunReport`: `reporter: string ≤ 20`, `reason: u8`, `atSeconds: f32`, `detail: string ≤ 512`, `created: time`,
 `counted: bool` (false when the reporter's reports are ignored).
@@ -369,8 +434,10 @@ Clients describe the gameplay content of every enabled mod pack as a **pack mani
 fingerprint covers the item's gameplay-relevant data (visuals and sounds excluded) of the **effective** definition
 (after load-order overrides). Kinds: 1 race track (definition data; geometry is hashed at race load), 2 kart,
 3 character, 4 powerup, 5 status effect, 6 cup, 7 battle arena (a track with the arena layout). `manifestHash` = 32 hex
-chars, SHA-256/128 over the canonical item list. Votes for Random draw a random race track (race lobbies) or arena
-(battle lobbies) of the lobby's packs from the catalog-majority manifests.
+chars, SHA-256/128 over the canonical item list. A fingerprint names referenced content (a character's special
+powerup and default kart, a cup's tracks) by its declared id, also when that content's pack is not installed, so a
+pack's manifest does not depend on which other packs are installed. Votes for Random draw a random race track (race
+lobbies) or arena (battle lobbies) of the lobby's packs from the catalog-majority manifests.
 
 For each (`packId`, `commit`, `simVersion`) the server keeps which `manifestHash` each account reported; the
 **catalog majority** is the hash reported by the most distinct accounts (a tie means no majority: then each client's
@@ -533,7 +600,7 @@ answer `BadRequest` "content not announced". Needs login.
 | 266 | Vote | `trackId: string ≤ 96` (`""` = Random) | empty (Voting phase, lobby content) |
 | 267 | StartRace | `trackId: string ≤ 96` (alone: a solo AI race on that track, `""` = random lobby track; with others: the track in owner-pick rooms, `""` in vote rooms) | empty (owner of a private room; the lone member of a public lobby while it waits) |
 | 268 | EndRaceEarly | empty | empty (the solo racer of an AI race) |
-| 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty (room owner within their private room; moderators anywhere, also out of a race; audit-logged) |
+| 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty. Both kicks remove the member from the lobby for 10 min and, during a race, from the race (`PlayerLeftRace`). Room owners kick within their private room (outcome left); moderators kick anywhere (outcome kicked: moderator; audit-logged) |
 
 Join errors: `NotFound`, `Forbidden` (full, kicked from this lobby in the last 10 min, or a pack differs from the
 catalog majority in an anticheat lobby; message says which), `BadRequest` (missing packs: message lists them,
@@ -618,8 +685,10 @@ Client → server notifies (TCP, kind 3; the server ignores those for a race the
 | 538 | ProjectileGone | `raceId: u64`, `useId: u32`, `tick: u32` |
 
 `RaceLoaded`: `raceId: u64`, `trackHash: string ≤ 32`, `laps: u8` (laps of this race, resolved from the track default when `RaceSetup.laps` is 0), `boxes: list<ItemBoxInfo> ≤ 512`,
-`pool: list<PoolEntry> ≤ 128`, `specials: list<(slot: u8, powerupId: string ≤ 96)> ≤ 10`,
-`rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024` (status effect ids, the index table of UDP states).
+`pool: list<PoolEntry> ≤ 128`, `specials: list<(slot: u8, powerupId: string ≤ 96)> ≤ 10` (the special powerup of
+each racer's character that is lobby content; a special of another pack, e.g. a cross-pack reference resolved only
+where that pack is installed, is left out), `rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024` (status effect
+ids, the index table of UDP states).
 
 - `ItemBoxInfo`: `pos: vec3`, `respawnTenths: u16` (respawn time in 0.1 s), `fixed: string ≤ 96` (`""` random,
   a powerup id, `@special`, or a status effect id: boxes that apply an effect are not arbitrated). Box ids are the
@@ -628,7 +697,9 @@ Client → server notifies (TCP, kind 3; the server ignores those for a race the
   position fraction 0, 0.1, … 1; 0 = leader, 1 = last).
 - `ItemRules`: `replacesHeld: bool`, `rouletteMs: u16`.
 
-The server takes the majority of `trackHash`, `laps`, `boxes`, `pool`, `specials`, `rules`, `effects` (compared as
+The server first drops every `specials` entry whose powerup id's pack (the part before the first `.`) is neither
+one of the lobby's packs nor `game`, so clients with more packs installed agree with the others. It then takes the
+majority of `trackHash`, `laps`, `boxes`, `pool`, `specials`, `rules`, `effects` (compared as
 canonical hashes) among the racers; racers that differ leave the race (`PlayerLeftRace`, outcome desync) and, when
 their pack commit equals the majority's, get a content strike. A racer that did not send `RaceLoaded` within 45 s
 leaves the race. The server then sends `RaceGo` with GO = now + 3.5 s.

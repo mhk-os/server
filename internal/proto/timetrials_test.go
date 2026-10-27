@@ -44,7 +44,7 @@ func timeTrialMessages() []Message {
 		&ModDisableAccount{AccountID: 6, Reason: "cheating"},
 		&AccountID{AccountID: 6},
 		&ModListFlagged{Offset: 0, Limit: 100, IncludeHidden: true},
-		&FlaggedRuns{Total: 30, Runs: []RunEntry{sampleRun(3)}},
+		&RunPage{Total: 30, Runs: []RunEntry{sampleRun(3)}},
 		&RunReport{Reporter: "Kurt", Reason: FlagOther, AtSeconds: -1, Detail: "odd", Created: when, Counted: true},
 		&RunReports{Reports: []RunReport{{Reporter: "a", Reason: FlagSpeed, Created: when}}},
 		&ModAccountInfo{Account: Account{ID: 2, Username: "Hans", Created: when}, Disabled: true,
@@ -136,7 +136,7 @@ func TestTimeTrialLimits(t *testing.T) {
 	w = wire.NewWriter(16)
 	w.U32(1)
 	w.VarUint(MaxPage)
-	decodeFails("count beyond the body", &FlaggedRuns{}, w.Bytes())
+	decodeFails("count beyond the body", &RunPage{}, w.Bytes())
 
 	b := Encode(&UploadResult{Run: sampleRun(1)})
 	b[len(b)-1] = 7
@@ -154,7 +154,7 @@ func TestHostileBodies(t *testing.T) {
 		seed = seed*1664525 + 1013904223
 		return byte(seed >> 24)
 	}
-	for _, m := range timeTrialMessages() {
+	for _, m := range messages() {
 		for range 200 {
 			b := make([]byte, int(next())%64)
 			for i := range b {

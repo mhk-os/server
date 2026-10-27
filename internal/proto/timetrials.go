@@ -17,7 +17,7 @@ const (
 	MaxReportDetail  = 512
 	MaxModReason     = 256
 	MaxBoards        = 200
-	MaxPage          = 100 // GetLeaderboard and ModListFlagged limit
+	MaxPage          = 100 // limit of every paged request (leaderboards, run pages, player lists)
 	MaxMyRuns        = 500
 	MaxRunReports    = 500
 	AnyEngineClass   = 255
@@ -393,6 +393,26 @@ type RunList struct {
 func (m *RunList) Encode(w *wire.Writer)       { encodeRuns(w, m.Runs) }
 func (m *RunList) Decode(r *wire.Reader) error { m.Runs = decodeRuns(r, MaxMyRuns); return r.Err() }
 
+// PlayerRuns is request 134.
+type PlayerRuns struct {
+	AccountID uint64
+	Offset    uint32
+	Limit     uint16
+}
+
+func (m *PlayerRuns) Encode(w *wire.Writer) {
+	w.U64(m.AccountID)
+	w.U32(m.Offset)
+	w.U16(m.Limit)
+}
+
+func (m *PlayerRuns) Decode(r *wire.Reader) error {
+	m.AccountID = r.U64()
+	m.Offset = r.U32()
+	m.Limit = r.U16()
+	return r.Err()
+}
+
 // ModHideRun is request 64.
 type ModHideRun struct {
 	RunID  uint64
@@ -455,18 +475,38 @@ func (m *ModListFlagged) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// FlaggedRuns is the response to ModListFlagged.
-type FlaggedRuns struct {
+// ModListHidden is request 71; BoardID 0 lists every board.
+type ModListHidden struct {
+	BoardID uint64
+	Offset  uint32
+	Limit   uint16
+}
+
+func (m *ModListHidden) Encode(w *wire.Writer) {
+	w.U64(m.BoardID)
+	w.U32(m.Offset)
+	w.U16(m.Limit)
+}
+
+func (m *ModListHidden) Decode(r *wire.Reader) error {
+	m.BoardID = r.U64()
+	m.Offset = r.U32()
+	m.Limit = r.U16()
+	return r.Err()
+}
+
+// RunPage is one page of runs and the total: the response to ModListFlagged, ModListHidden and PlayerRuns.
+type RunPage struct {
 	Total uint32
 	Runs  []RunEntry
 }
 
-func (m *FlaggedRuns) Encode(w *wire.Writer) {
+func (m *RunPage) Encode(w *wire.Writer) {
 	w.U32(m.Total)
 	encodeRuns(w, m.Runs)
 }
 
-func (m *FlaggedRuns) Decode(r *wire.Reader) error {
+func (m *RunPage) Decode(r *wire.Reader) error {
 	m.Total = r.U32()
 	m.Runs = decodeRuns(r, MaxPage)
 	return r.Err()

@@ -87,6 +87,7 @@ type Deps struct {
 	Sessions   store.Sessions
 	Moderation store.Moderation
 	Runs       store.Runs
+	Profiles   store.Profiles
 	Blobs      *blobs.Store
 	Geo        *geo.DB // nil = no GeoIP database
 }
@@ -146,6 +147,7 @@ func New(cfg Config, deps Deps) *Server {
 	s.registerTimeTrials()
 	s.registerModeration()
 	s.registerAccounts()
+	s.registerProfiles()
 	return s
 }
 
@@ -177,8 +179,15 @@ func (s *Server) OnClose(fn func(c *Conn)) { s.closeHooks = append(s.closeHooks,
 // twice keeps their lobby while one connection survives. Register before Serve.
 func (s *Server) OnAccountGone(fn func(accountID uint64)) { s.goneHooks = append(s.goneHooks, fn) }
 
-// unbound runs the OnAccountGone hooks when c was the account's last connection.
+// unbound records the end of c's activity for accountID and runs the OnAccountGone hooks when c was the account's
+// last connection.
 func (s *Server) unbound(c *Conn, accountID uint64) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.RequestTimeout)
+	if err := s.deps.Accounts.TouchActive(ctx, accountID, store.Now()); err != nil &&
+		!errors.Is(err, store.ErrNotFound) {
+		c.log.Warn("recording last activity", "account", accountID, "err", err)
+	}
+	cancel()
 	if !s.hub.unbind(c, accountID) {
 		return
 	}

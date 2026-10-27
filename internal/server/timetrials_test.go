@@ -405,13 +405,19 @@ func TestReports(t *testing.T) {
 	}
 	res := upload(t, owner, run(track, kart, 30, 30, 30))
 	id := res.Run.RunID
+	mod := newModerator(t, ts)
+	// Only moderators see flags: a player's answer carries 0, the moderator's download the count.
 	report := func(p *player, reason proto.FlagReason, detail string) uint32 {
 		t.Helper()
 		flags, err := p.c.ReportRun(ctx, &proto.ReportRun{RunID: id, Reason: reason, AtSeconds: 12.5, Detail: detail})
+		if err != nil || flags != 0 {
+			t.Fatalf("report by %s: flags %d, %v", p.name, flags, err)
+		}
+		dl, err := mod.c.DownloadRun(ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return flags
+		return dl.Run.Flags
 	}
 	if f := report(r1, proto.FlagTeleport, "jumped 40 m"); f != 1 {
 		t.Fatalf("first report: %d", f)
@@ -435,12 +441,27 @@ func TestReports(t *testing.T) {
 	_, err = connect(t, ts).ReportRun(ctx, &proto.ReportRun{RunID: id, Reason: proto.FlagData})
 	wantStatus(t, err, proto.StatusNotLoggedIn)
 
-	dl, err := r1.c.DownloadRun(ctx, id)
-	if err != nil || dl.Run.Flags != 2 {
-		t.Fatalf("flags on the entry %+v %v", dl.Run.Flags, err)
+	if dl, err := r1.c.DownloadRun(ctx, id); err != nil || dl.Run.Flags != 0 {
+		t.Fatalf("flags for a player %+v %v", dl.Run.Flags, err)
+	}
+	for _, p := range []*player{r1, mod} {
+		want := uint32(0)
+		if p == mod {
+			want = 2
+		}
+		lb := board(t, p, res.Run.BoardID, proto.LeaderboardFilter{})
+		if lb.Entries[0].Flags != want {
+			t.Fatalf("leaderboard flags for %s: %d", p.name, lb.Entries[0].Flags)
+		}
+		page, err := p.c.PlayerRuns(ctx, owner.acct.ID, 0, 10)
+		if err != nil || page.Runs[0].Flags != want {
+			t.Fatalf("player runs flags for %s: %+v %v", p.name, page.Runs, err)
+		}
+	}
+	if mine, _ := owner.c.MyRuns(ctx, track); mine[0].Flags != 0 {
+		t.Fatalf("own run flags %d", mine[0].Flags)
 	}
 
-	mod := newModerator(t, ts)
 	reports, err := mod.c.ModRunReports(ctx, id)
 	if err != nil || len(reports) != 4 {
 		t.Fatalf("reports %+v %v", reports, err)
@@ -468,8 +489,12 @@ func TestReports(t *testing.T) {
 	if err := ts.st.AddCheatKick(ctx, &store.CheatKick{AccountID: r2.acct.ID, CreatedAt: store.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if dl, _ := r1.c.DownloadRun(ctx, id); dl.Run.Flags != 1 {
+	if dl, _ := mod.c.DownloadRun(ctx, id); dl.Run.Flags != 1 {
 		t.Fatalf("flags after kicking a reporter: %d", dl.Run.Flags)
+	}
+	if flags, err := mod.c.ReportRun(ctx, &proto.ReportRun{RunID: id, Reason: proto.FlagSpeed}); err != nil ||
+		flags != 2 {
+		t.Fatalf("moderator's report answer: %d %v", flags, err)
 	}
 	info, err := mod.c.ModGetAccount(ctx, r2.acct.ID)
 	if err != nil || info.CheatKicks != 1 {
@@ -672,8 +697,8 @@ func TestCLIRuns(t *testing.T) {
 	wantStatus(t, err, proto.StatusNotFound)
 
 	// Account delete removes the account's runs, blobs and reports (the report on the other run stops counting).
-	if dl, _ := reporter.c.DownloadRun(ctx, other.Run.RunID); dl.Run.Flags != 1 {
-		t.Fatalf("flags before delete: %d", dl.Run.Flags)
+	if v, _ := ts.st.RunByID(ctx, other.Run.RunID); v.Flags != 1 {
+		t.Fatalf("flags before delete: %d", v.Flags)
 	}
 	again := upload(t, p, run(track, kart, 29, 29, 29))
 	view, err = ts.st.RunByID(ctx, again.Run.RunID)
@@ -690,8 +715,8 @@ func TestCLIRuns(t *testing.T) {
 	if _, err := ts.st.RunByID(ctx, again.Run.RunID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("run of deleted account: %v", err)
 	}
-	if dl, _ := reporter.c.DownloadRun(ctx, other.Run.RunID); dl.Run.Flags != 0 {
-		t.Fatalf("flags after the reporter was deleted: %d", dl.Run.Flags)
+	if v, _ := ts.st.RunByID(ctx, other.Run.RunID); v.Flags != 0 {
+		t.Fatalf("flags after the reporter was deleted: %d", v.Flags)
 	}
 	audit := runAdmin(t, ts, "audit", "--limit", "500")
 	for _, action := range []string{store.ActionHideRun, store.ActionUnhideRun, store.ActionDeleteRun} {

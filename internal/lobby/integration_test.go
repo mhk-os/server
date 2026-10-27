@@ -67,7 +67,7 @@ func startServer(t *testing.T, realRaces bool) *itServer {
 		cfg.UDPPort = uint16(udp.LocalAddr().(*net.UDPAddr).Port)
 	}
 	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
-		Blobs: ghosts})
+		Profiles: st, Blobs: ghosts})
 	catalog := content.New(st, log)
 	catalog.Register(srv)
 	its := &itServer{st: st}
@@ -81,7 +81,7 @@ func startServer(t *testing.T, realRaces bool) *itServer {
 		its.races = &fakeRaces{rtt: map[uint64]uint16{}}
 		races = its.races
 	}
-	m := New(Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Log: log})
+	m := New(Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Scores: st, Log: log})
 	m.Register(srv)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

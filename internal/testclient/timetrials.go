@@ -65,10 +65,24 @@ func (c *Client) ModEnableAccount(ctx context.Context, accountID uint64) error {
 	return c.Request(ctx, proto.TypeModEnableAccount, &proto.AccountID{AccountID: accountID}, nil)
 }
 
-func (c *Client) ModListFlagged(ctx context.Context, offset uint32, limit uint16, includeHidden bool) (*proto.FlaggedRuns, error) {
-	var resp proto.FlaggedRuns
+func (c *Client) ModListFlagged(ctx context.Context, offset uint32, limit uint16, includeHidden bool) (*proto.RunPage, error) {
+	var resp proto.RunPage
 	err := c.Request(ctx, proto.TypeModListFlagged,
 		&proto.ModListFlagged{Offset: offset, Limit: limit, IncludeHidden: includeHidden}, &resp)
+	return &resp, err
+}
+
+func (c *Client) ModListHidden(ctx context.Context, boardID uint64, offset uint32, limit uint16) (*proto.RunPage, error) {
+	var resp proto.RunPage
+	err := c.Request(ctx, proto.TypeModListHidden,
+		&proto.ModListHidden{BoardID: boardID, Offset: offset, Limit: limit}, &resp)
+	return &resp, err
+}
+
+func (c *Client) PlayerRuns(ctx context.Context, accountID uint64, offset uint32, limit uint16) (*proto.RunPage, error) {
+	var resp proto.RunPage
+	err := c.Request(ctx, proto.TypePlayerRuns,
+		&proto.PlayerRuns{AccountID: accountID, Offset: offset, Limit: limit}, &resp)
 	return &resp, err
 }
 

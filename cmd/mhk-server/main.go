@@ -205,6 +205,7 @@ func serve(ctx context.Context, args []string) error {
 		Sessions:   st,
 		Moderation: st,
 		Runs:       st,
+		Profiles:   st,
 		Blobs:      ghosts,
 		Geo:        geoDB,
 	})
@@ -213,7 +214,8 @@ func serve(ctx context.Context, args []string) error {
 	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})
 	defer races.Close()
 	races.Register(srv)
-	lobbies := lobby.New(lobby.Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Log: log})
+	lobbies := lobby.New(lobby.Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Scores: st,
+		Log: log})
 	defer lobbies.Close()
 	lobbies.Register(srv)
 	go pruneSessions(ctx, st, log)

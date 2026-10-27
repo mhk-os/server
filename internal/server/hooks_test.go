@@ -25,7 +25,8 @@ func TestConnectionHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := server.New(server.Config{Version: "test", ConnLimit: auth.Rate{N: 1000, Per: time.Minute}},
-		server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st, Blobs: ghosts})
+		server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st, Profiles: st,
+			Blobs: ghosts})
 	var (
 		mu     sync.Mutex
 		gone   []uint64

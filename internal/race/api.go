@@ -43,6 +43,7 @@ type Spec struct {
 	Laps        uint8 // 0 = the track's default (the clients resolve it and report it in RaceLoaded)
 	Items       bool
 	ItemOdds    []proto.ItemOdds
+	Packs       []string // the lobby's packs; specials of other packs (except "game") are dropped from RaceLoaded
 	Anticheat   bool
 	Solo        bool  // exactly one human: AI opponents simulated by that client, nothing arbitrated
 	AICount     uint8 // AI opponents of a solo race

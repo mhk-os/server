@@ -92,7 +92,7 @@ need the data directory (`-data-dir` / `MHK_DATA_DIR`) to remove the ghost files
 ```sh
 export MHK_DB_DSN='mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true'
 mhk-server admin account list [--role moderator] [--limit N]
-mhk-server admin account show <username>
+mhk-server admin account show <username>                                         # with score, rank, races, last active
 mhk-server admin account set-role <username> player|moderator
 mhk-server admin account disable <username> --reason "Cheating in time trials"   # also revokes sessions
 mhk-server admin account enable <username>

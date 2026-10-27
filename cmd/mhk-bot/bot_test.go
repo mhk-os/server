@@ -178,12 +178,13 @@ func startStack(t *testing.T, idle time.Duration) *stack {
 	srv := server.New(server.Config{Version: "test", UDPPort: uint16(udp.LocalAddr().(*net.UDPAddr).Port),
 		ConnLimit: auth.Rate{N: 1000, Per: time.Minute}, IdleTimeout: idle},
 		server.Deps{Log: log, Auth: auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, 2), limits),
-			Accounts: st, Sessions: st, Moderation: st, Runs: st, Blobs: ghosts})
+			Accounts: st, Sessions: st, Moderation: st, Runs: st, Profiles: st, Blobs: ghosts})
 	catalog := content.New(st, log)
 	catalog.Register(srv)
 	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})
 	races.Register(srv)
-	lobbies := lobby.New(lobby.Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Log: log})
+	lobbies := lobby.New(lobby.Config{Races: races, Catalog: catalog, Pusher: srv.Hub(), Audit: st, Scores: st,
+		Log: log})
 	lobbies.Register(srv)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

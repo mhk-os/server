@@ -89,6 +89,9 @@ func newTestRace(n int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
 	if spec.TrackID == "" {
 		spec.TrackID = "mhk2.egypt"
 	}
+	if spec.Packs == nil {
+		spec.Packs = []string{"mhk2"}
+	}
 	// A discarding debug logger still evaluates every debug line, so the tests cover them.
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	return newRaceState(7, spec, seats, env, cat, log, [32]byte{1}, t0), env, cat
@@ -234,6 +237,34 @@ func TestLoadAgreementTieKeepsEveryone(t *testing.T) {
 	}
 	if rs.agreed.TrackHash != testLoaded().TrackHash {
 		t.Fatal("tie did not use the lowest slot's content")
+	}
+}
+
+// An MHK 2 lobby: one client resolves slot 1's cross-pack special, the other dropped it. Both agree, slot 1's
+// special box draws from the pool, slot 0 still gets its in-lobby special.
+func TestLoadDropsSpecialsOutsideLobby(t *testing.T) {
+	rs, env, _ := newTestRace(2, Spec{Items: true})
+	full := testLoaded()
+	full.Specials = append(full.Specials, proto.Special{Slot: 1, PowerupID: "mhkt.wings"})
+	rs.onLoaded(rs.seats[0], full, t0)
+	rs.onLoaded(rs.seats[1], testLoaded(), t0)
+	if rs.seats[0].loadedHash != rs.seats[1].loadedHash {
+		t.Fatal("a special outside the lobby changed the load hash")
+	}
+	if rs.phase != phaseRacing || rs.seats[0].out || rs.seats[1].out {
+		t.Fatal("racer dropped")
+	}
+	now := rs.goAt.Add(time.Second)
+	s0, s1 := rs.seats[0], rs.seats[1]
+	setState(rs, s1, proto.KartState{Pos: proto.Vec3{100, 0, 0}})
+	rs.onPickup(s1, &proto.ItemPickup{BoxID: 1}, now)
+	if g := env.of(acc(1), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.rocket" {
+		t.Fatalf("dropped special: grant %v", g)
+	}
+	setState(rs, s0, proto.KartState{Pos: proto.Vec3{100, 0, 0}})
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1}, now.Add(4*time.Second))
+	if g := env.of(acc(0), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.super" {
+		t.Fatalf("in-lobby special grant %v", g)
 	}
 }
 

@@ -79,6 +79,10 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	p, err := env.Store.Profile(ctx, a.ID)
+	if err != nil {
+		return err
+	}
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", a.ID)
 	fmt.Fprintf(tw, "Username\t%s\n", a.Username)
@@ -88,7 +92,12 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "Registration IP\t%s\n", a.RegistrationIP)
 	fmt.Fprintf(tw, "Created\t%s\n", formatTime(&a.CreatedAt))
 	fmt.Fprintf(tw, "Last login\t%s\n", formatTime(a.LastLoginAt))
+	fmt.Fprintf(tw, "Last active\t%s\n", formatTime(p.LastActive))
 	fmt.Fprintf(tw, "Active sessions\t%d\n", sessions)
+	fmt.Fprintf(tw, "Listed\t%t\n", p.Listed)
+	fmt.Fprintf(tw, "Score\t%d\n", p.Score)
+	fmt.Fprintf(tw, "Rank\t%s\n", rankLabel(p.Rank))
+	fmt.Fprintf(tw, "Races\t%d (%d wins, %d podiums)\n", p.Races, p.Wins, p.Podiums)
 	fmt.Fprintf(tw, "Status\t%s\n", status(a))
 	if a.Disabled() {
 		by := "sysadmin"
@@ -100,6 +109,13 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 		fmt.Fprintf(tw, "Reason\t%s\n", a.DisabledReason)
 	}
 	return tw.Flush()
+}
+
+func rankLabel(rank uint32) string {
+	if rank == 0 {
+		return "unranked"
+	}
+	return fmt.Sprintf("%d", rank)
 }
 
 func accountSetRole(ctx context.Context, env *Env, args []string) error {

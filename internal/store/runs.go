@@ -152,6 +152,10 @@ type Runs interface {
 	Leaderboard(ctx context.Context, q LeaderboardQuery) (*LeaderboardPage, error)
 	ListRuns(ctx context.Context, f RunFilter) ([]RunView, error)
 	FlaggedRuns(ctx context.Context, offset, limit int, includeHidden bool) (total int, runs []RunView, err error)
+	PlayerRuns(ctx context.Context, accountID uint64, offset, limit int, includeHidden bool) (total int,
+		runs []RunView, err error)
+	// ListHiddenRuns pages the runs players do not see; boardID 0 = every board.
+	ListHiddenRuns(ctx context.Context, boardID uint64, offset, limit int) (total int, runs []RunView, err error)
 	ReportRun(ctx context.Context, rep *Report) (flags uint32, inserted bool, err error)
 	RunReports(ctx context.Context, runID uint64, limit int) ([]Report, error)
 	HideRun(ctx context.Context, runID uint64, act Action) error
@@ -696,13 +700,41 @@ func (s *Store) FlaggedRuns(ctx context.Context, offset, limit int, includeHidde
 	if !includeHidden {
 		where += " AND " + visible
 	}
+	return s.runPage(ctx, where, "r.flags DESC, r.uploaded_at DESC, r.id DESC", offset, limit)
+}
+
+// PlayerRuns lists the account's visible runs (all of them with includeHidden), newest upload first, with board
+// ranks: only the account's best run on a board has one.
+func (s *Store) PlayerRuns(ctx context.Context, accountID uint64, offset, limit int, includeHidden bool) (int,
+	[]RunView, error) {
+	where := " WHERE r.account_id = ?"
+	if !includeHidden {
+		where += " AND " + visible
+	}
+	return s.runPage(ctx, where, "r.uploaded_at DESC, r.id DESC", offset, limit, accountID)
+}
+
+// ListHiddenRuns lists hidden runs (by a moderator or because the owner is disabled), most recently hidden first.
+func (s *Store) ListHiddenRuns(ctx context.Context, boardID uint64, offset, limit int) (int, []RunView, error) {
+	where := " WHERE (r.hidden_at IS NOT NULL OR a.disabled_at IS NOT NULL)"
+	var args []any
+	if boardID != 0 {
+		where += " AND r.board_id = ?"
+		args = append(args, boardID)
+	}
+	return s.runPage(ctx, where, "COALESCE(r.hidden_at, a.disabled_at) DESC, r.id DESC", offset, limit, args...)
+}
+
+// runPage counts the runs matching where (aliases r, a) and returns the requested page in order, decorated.
+func (s *Store) runPage(ctx context.Context, where, order string, offset, limit int, args ...any) (int, []RunView,
+	error) {
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs r JOIN accounts a ON a.id = r.account_id`+
-		where).Scan(&total); err != nil {
+		where, args...).Scan(&total); err != nil {
 		return 0, nil, err
 	}
-	views, err := s.queryRuns(ctx, runSelect+where+" ORDER BY r.flags DESC, r.uploaded_at DESC, r.id DESC LIMIT ? OFFSET ?",
-		limit, offset)
+	views, err := s.queryRuns(ctx, runSelect+where+" ORDER BY "+order+" LIMIT ? OFFSET ?",
+		append(args, limit, offset)...)
 	if err != nil {
 		return 0, nil, err
 	}

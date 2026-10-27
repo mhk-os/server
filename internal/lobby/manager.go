@@ -28,6 +28,9 @@ import (
 // Points per race by position (1st…10th); everything else scores 0.
 var positionPoints = [...]int32{15, 12, 10, 8, 7, 6, 5, 4, 3, 2}
 
+// recordTimeout bounds writing a race's results to the racers' profiles.
+const recordTimeout = 15 * time.Second
+
 // gamePack is the built-in pack: its items are content of every lobby.
 const gamePack = "game"
 
@@ -77,6 +80,11 @@ type Auditor interface {
 	RecordAction(ctx context.Context, a store.Action) error
 }
 
+// Scores adds online races to the racers' profiles (store.Store).
+type Scores interface {
+	RecordRace(ctx context.Context, results []store.RaceResult) error
+}
+
 // RTTSource is implemented by race engines that measure players' round trip times; pings stay 0 without one.
 type RTTSource interface {
 	RTT(accountID uint64) (ms uint16, ok bool)
@@ -88,6 +96,7 @@ type Config struct {
 	Catalog Catalog
 	Pusher  Pusher
 	Audit   Auditor
+	Scores  Scores
 	Log     *slog.Logger
 	Clock   Clock      // nil = real time
 	Rand    *rand.Rand // nil = randomly seeded
@@ -540,7 +549,8 @@ func (m *Manager) startRace(l *lobby, track string, solo bool) error {
 	s := l.settings
 	spec := race.Spec{
 		LobbyID: l.id, TrackID: track, Mode: race.ModeRace, EngineClass: s.EngineClass, Laps: s.Laps,
-		Items: s.Items, ItemOdds: s.ItemOdds, Anticheat: s.Anticheat, SetRace: l.setRace + 1, SetSize: l.setSize(),
+		Items: s.Items, ItemOdds: s.ItemOdds, Packs: slices.Clone(s.Packs), Anticheat: s.Anticheat,
+		SetRace: l.setRace + 1, SetSize: l.setSize(),
 	}
 	if s.Mode == proto.RoomBattleSet {
 		spec.Mode = race.ModeBattle
@@ -602,14 +612,30 @@ func points(p race.Placement) int32 {
 	return positionPoints[p.Position-1]
 }
 
+// finished ends the lobby's race and adds it to the human racers' profiles (not for solo races).
 func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement) {
+	results := m.settle(l, raceID, placements)
+	if len(results) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recordTimeout)
+	defer cancel()
+	if err := m.cfg.Scores.RecordRace(ctx, results); err != nil {
+		m.log.Error("recording race results", "lobby", l.id, "race", raceID, "err", err)
+	}
+}
+
+// settle pushes the race's results, adds its points to the set and moves the lobby on. It returns what the human
+// racers' profiles get: nothing for solo races.
+func (m *Manager) settle(l *lobby, raceID uint64, placements []race.Placement) []store.RaceResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped || l.closed || l.raceID != raceID {
-		return
+		return nil
 	}
 	solo := l.solo
 	rows := make([]proto.RaceResultRow, 0, len(placements))
+	var results []store.RaceResult
 	for _, p := range placements {
 		row := proto.RaceResultRow{Slot: p.Slot, AccountID: p.AccountID, Username: p.Username, Position: p.Position,
 			FinishMs: p.FinishMs, Outcome: uint8(p.Outcome), AI: p.AI}
@@ -619,6 +645,12 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 		if mem := l.member(p.AccountID); mem != nil && !p.AI {
 			mem.points += row.Points
 			row.SetPoints = mem.points
+		}
+		if !solo && !p.AI {
+			// Every human who raced counts, kicked and departed racers too (they score 0).
+			done := p.Outcome == race.OutcomeFinished && p.Position >= 1
+			results = append(results, store.RaceResult{AccountID: p.AccountID, Points: uint32(row.Points),
+				Win: done && p.Position == 1, Podium: done && p.Position <= 3})
 		}
 		rows = append(rows, row)
 	}
@@ -644,7 +676,7 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 		if l.public {
 			m.rebalance(instanceKey{l.category, l.sim})
 		}
-		return
+		return results
 	case solo:
 		// Solo races have no results phase: the player may start the next one at once, and players who waited
 		// for the race to end get the next race (or its voting) straight away.
@@ -665,6 +697,7 @@ func (m *Manager) finished(l *lobby, raceID uint64, placements []race.Placement)
 		})
 	}
 	m.broadcast(l, 0)
+	return results
 }
 
 // ---- membership ----

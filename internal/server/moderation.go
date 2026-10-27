@@ -25,6 +25,7 @@ func (s *Server) registerModeration() {
 	s.Handle(proto.TypeModListFlagged, true, s.moderator(s.handleModListFlagged))
 	s.Handle(proto.TypeModRunReports, true, s.moderator(s.handleModRunReports))
 	s.Handle(proto.TypeModGetAccount, true, s.moderator(s.handleModGetAccount))
+	s.Handle(proto.TypeModListHidden, true, s.moderator(s.handleModListHidden))
 }
 
 // moderator wraps a handler that only moderators may call.
@@ -135,7 +136,22 @@ func (s *Server) handleModListFlagged(ctx context.Context, _ *Conn, r *wire.Read
 	if err != nil {
 		return nil, err
 	}
-	return &proto.FlaggedRuns{Total: clampU32(total), Runs: runEntries(runs)}, nil
+	return &proto.RunPage{Total: clampU32(total), Runs: runEntries(runs, true)}, nil
+}
+
+func (s *Server) handleModListHidden(ctx context.Context, _ *Conn, r *wire.Reader) (proto.Message, error) {
+	var req proto.ModListHidden
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	if req.Limit < 1 || req.Limit > proto.MaxPage {
+		return nil, Errorf(proto.StatusBadRequest, msgBadLimit)
+	}
+	total, runs, err := s.deps.Runs.ListHiddenRuns(ctx, req.BoardID, int(req.Offset), int(req.Limit))
+	if err != nil {
+		return nil, err
+	}
+	return &proto.RunPage{Total: clampU32(total), Runs: runEntries(runs, true)}, nil
 }
 
 func (s *Server) handleModRunReports(ctx context.Context, _ *Conn, r *wire.Reader) (proto.Message, error) {
