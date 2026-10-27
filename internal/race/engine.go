@@ -34,10 +34,11 @@ type Pusher interface {
 	Push(accountID uint64, typ proto.Type, m proto.Message) int
 }
 
-// Kicks is the cheat-kick storage (store.Store).
+// Kicks stores cheat kicks and cheat reports (store.Store).
 type Kicks interface {
 	CheatKicked(ctx context.Context, accountIDs []uint64) (map[uint64]bool, error)
 	AddCheatKick(ctx context.Context, k *store.CheatKick) error
+	AddCheatReport(ctx context.Context, r *store.CheatReport) error
 }
 
 // Config wires an Engine.
@@ -455,6 +456,19 @@ func (r *runner) cheatKick(k store.CheatKick) {
 		defer cancel()
 		if err := r.e.cfg.Kicks.AddCheatKick(ctx, &k); err != nil {
 			r.e.log.Error("storing cheat kick failed", "account", k.AccountID, "err", err)
+		}
+	})
+}
+
+func (r *runner) cheatReport(c store.CheatReport) {
+	if r.e.cfg.Kicks == nil {
+		return
+	}
+	r.e.wg.Go(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+		defer cancel()
+		if err := r.e.cfg.Kicks.AddCheatReport(ctx, &c); err != nil {
+			r.e.log.Error("storing cheat report failed", "reporter", c.ReporterID, "suspect", c.SuspectID, "err", err)
 		}
 	})
 }

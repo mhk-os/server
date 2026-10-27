@@ -19,54 +19,54 @@ var ErrGhostExists = errors.New("store: ghost already uploaded")
 
 // Board is a row of boards with the statistics of its visible runs.
 type Board struct {
-	ID          uint64
-	TrackID     string
-	EngineClass uint8
-	Laps        uint8
-	SimVersion  int32
-	TrackHash   string
-	CreatedAt   time.Time
-	Players     uint32     // accounts with a visible run
-	BestMs      int32      // fastest visible finish, 0 = none
-	LastUpload  *time.Time // newest visible upload
+	ID             uint64
+	TrackID        string
+	EngineClass    uint8
+	Laps           uint8
+	ContentVersion int32
+	TrackHash      string
+	CreatedAt      time.Time
+	Players        uint32     // accounts with a visible run
+	BestMs         int32      // fastest visible finish, 0 = none
+	LastUpload     *time.Time // newest visible upload
 }
 
 // BoardFilter narrows ListBoards; zero fields match everything.
 type BoardFilter struct {
-	TrackID     string
-	EngineClass *uint8
-	SimVersion  int32
-	Limit       int
+	TrackID        string
+	EngineClass    *uint8
+	ContentVersion int32
+	Limit          int
 }
 
 // Run is a row of runs: one uploaded ghost and the summary the server validated.
 type Run struct {
-	ID           uint64
-	BoardID      uint64
-	AccountID    uint64
-	GhostID      string
-	TrackID      string
-	TrackPackID  string
-	KartID       string
-	CharacterID  string
-	EngineClass  uint8
-	Laps         uint8
-	SimVersion   int32
-	TrackHash    string
-	SetupHash    string
-	GameBuild    string
-	FinishMs     int32
-	BestLapMs    int32
-	LapMs        []int32
-	FrameCount   int32
-	RecordedAt   time.Time
-	UploadedAt   time.Time
-	Blob         blobs.Hash
-	FileSize     uint32
-	Flags        uint32
-	HiddenAt     *time.Time
-	HiddenBy     *uint64
-	HiddenReason string
+	ID             uint64
+	BoardID        uint64
+	AccountID      uint64
+	GhostID        string
+	TrackID        string
+	TrackPackID    string
+	KartID         string
+	CharacterID    string
+	EngineClass    uint8
+	Laps           uint8
+	ContentVersion int32
+	TrackHash      string
+	SetupHash      string
+	GameBuild      string
+	FinishMs       int32
+	BestLapMs      int32
+	LapMs          []int32
+	FrameCount     int32
+	RecordedAt     time.Time
+	UploadedAt     time.Time
+	Blob           blobs.Hash
+	FileSize       uint32
+	Flags          uint32
+	HiddenAt       *time.Time
+	HiddenBy       *uint64
+	HiddenReason   string
 }
 
 // RunView is a run with what clients see next to it: owner, board, rank and setup mismatch.
@@ -182,7 +182,7 @@ const visible = "r.hidden_at IS NULL AND a.disabled_at IS NULL"
 const rankOrder = "finish_ms, uploaded_at, id"
 
 const runSelect = `SELECT r.id, r.board_id, r.account_id, r.ghost_id, r.track_id, r.track_pack_id, r.kart_id,
-	r.character_id, r.engine_class, r.laps, r.sim_version, r.track_hash, r.setup_hash, r.game_build, r.finish_ms,
+	r.character_id, r.engine_class, r.laps, r.content_version, r.track_hash, r.setup_hash, r.game_build, r.finish_ms,
 	r.best_lap_ms, r.lap_ms, r.frame_count, r.recorded_at, r.uploaded_at, r.blob_sha256, r.file_size, r.flags,
 	r.hidden_at, r.hidden_by, r.hidden_reason, a.username, COALESCE(a.country_user, a.country_ip),
 	a.disabled_at IS NOT NULL, b.track_id
@@ -197,7 +197,7 @@ func scanRun(row rowScanner) (*RunView, error) {
 		hiddenBy sql.Null[uint64]
 	)
 	err := row.Scan(&v.ID, &v.BoardID, &v.AccountID, &v.GhostID, &v.TrackID, &v.TrackPackID, &v.KartID,
-		&v.CharacterID, &v.EngineClass, &v.Laps, &v.SimVersion, &v.TrackHash, &v.SetupHash, &v.GameBuild, &v.FinishMs,
+		&v.CharacterID, &v.EngineClass, &v.Laps, &v.ContentVersion, &v.TrackHash, &v.SetupHash, &v.GameBuild, &v.FinishMs,
 		&v.BestLapMs, &lapMs, &v.FrameCount, &v.RecordedAt, &v.UploadedAt, &blob, &v.FileSize, &v.Flags, &hiddenAt,
 		&hiddenBy, &v.HiddenReason, &v.Username, &v.Country, &v.AccountDisabled, &v.BoardTrackID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -263,9 +263,9 @@ func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run
 // id is taken.
 func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, engine_class, laps, sim_version, track_hash,
+		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, engine_class, laps, content_version, track_hash,
 			created_at) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-			r.TrackID, r.EngineClass, r.Laps, r.SimVersion, r.TrackHash, r.UploadedAt)
+			r.TrackID, r.EngineClass, r.Laps, r.ContentVersion, r.TrackHash, r.UploadedAt)
 		if err != nil {
 			return fmt.Errorf("store: board: %w", err)
 		}
@@ -275,11 +275,11 @@ func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 		}
 		r.BoardID = uint64(boardID)
 		res, err = tx.ExecContext(ctx, `INSERT INTO runs (board_id, account_id, ghost_id, track_id, track_pack_id,
-			kart_id, character_id, engine_class, laps, sim_version, track_hash, setup_hash, game_build, finish_ms,
+			kart_id, character_id, engine_class, laps, content_version, track_hash, setup_hash, game_build, finish_ms,
 			best_lap_ms, lap_ms, frame_count, recorded_at, uploaded_at, blob_sha256, file_size)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			r.BoardID, r.AccountID, r.GhostID, r.TrackID, r.TrackPackID, r.KartID, r.CharacterID, r.EngineClass,
-			r.Laps, r.SimVersion, r.TrackHash, r.SetupHash, r.GameBuild, r.FinishMs, r.BestLapMs, formatLapMs(r.LapMs),
+			r.Laps, r.ContentVersion, r.TrackHash, r.SetupHash, r.GameBuild, r.FinishMs, r.BestLapMs, formatLapMs(r.LapMs),
 			r.FrameCount, r.RecordedAt, r.UploadedAt, r.Blob[:], r.FileSize)
 		if isDuplicate(err) {
 			return ErrGhostExists
@@ -384,17 +384,17 @@ func (s *Store) rankOnBoards(ctx context.Context, views []RunView) error {
 }
 
 type setupKey struct {
-	kart        string
-	engineClass uint8
-	laps        uint8
-	simVersion  int32
+	kart           string
+	engineClass    uint8
+	laps           uint8
+	contentVersion int32
 }
 
 func setupKeyOf(r *Run) setupKey {
-	return setupKey{strings.ToLower(r.KartID), r.EngineClass, r.Laps, r.SimVersion}
+	return setupKey{strings.ToLower(r.KartID), r.EngineClass, r.Laps, r.ContentVersion}
 }
 
-// markSetupMismatch applies the majority rule: for every (kart, engine class, laps, sim version) used by at least
+// markSetupMismatch applies the majority rule: for every (kart, engine class, laps, content version) used by at least
 // 3 accounts, runs whose setup hash is used by fewer accounts than the most common one are mismatched.
 func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 	keys := map[setupKey]bool{}
@@ -403,10 +403,10 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 		k := setupKeyOf(&views[i].Run)
 		if !keys[k] {
 			keys[k] = true
-			args = append(args, k.kart, k.engineClass, k.laps, k.simVersion)
+			args = append(args, k.kart, k.engineClass, k.laps, k.contentVersion)
 		}
 	}
-	in := "(kart_id, engine_class, laps, sim_version) IN ((?,?,?,?)" + strings.Repeat(",(?,?,?,?)", len(keys)-1) + ")"
+	in := "(kart_id, engine_class, laps, content_version) IN ((?,?,?,?)" + strings.Repeat(",(?,?,?,?)", len(keys)-1) + ")"
 
 	type hashKey struct {
 		setupKey
@@ -414,8 +414,8 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 	}
 	perHash := map[hashKey]int{}
 	top := map[setupKey]int{}
-	rows, err := s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, sim_version, setup_hash,
-		COUNT(DISTINCT account_id) FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, sim_version, setup_hash`,
+	rows, err := s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, content_version, setup_hash,
+		COUNT(DISTINCT account_id) FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, content_version, setup_hash`,
 		args...)
 	if err != nil {
 		return fmt.Errorf("store: setup votes: %w", err)
@@ -426,7 +426,7 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 			hash string
 			n    int
 		)
-		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.simVersion, &hash, &n); err != nil {
+		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.contentVersion, &hash, &n); err != nil {
 			rows.Close()
 			return err
 		}
@@ -440,8 +440,8 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 	}
 
 	totals := map[setupKey]int{}
-	rows, err = s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, sim_version, COUNT(DISTINCT account_id)
-		FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, sim_version`, args...)
+	rows, err = s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, content_version, COUNT(DISTINCT account_id)
+		FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, content_version`, args...)
 	if err != nil {
 		return fmt.Errorf("store: setup votes: %w", err)
 	}
@@ -451,7 +451,7 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 			k setupKey
 			n int
 		)
-		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.simVersion, &n); err != nil {
+		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.contentVersion, &n); err != nil {
 			return err
 		}
 		k.kart = strings.ToLower(k.kart)
@@ -468,7 +468,7 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 	return nil
 }
 
-const boardSelect = `SELECT b.id, b.track_id, b.engine_class, b.laps, b.sim_version, b.track_hash, b.created_at,
+const boardSelect = `SELECT b.id, b.track_id, b.engine_class, b.laps, b.content_version, b.track_hash, b.created_at,
 	COUNT(DISTINCT v.account_id), COALESCE(MIN(v.finish_ms), 0), MAX(v.uploaded_at)
 	FROM boards b LEFT JOIN (
 		SELECT r.board_id, r.account_id, r.finish_ms, r.uploaded_at
@@ -480,7 +480,7 @@ func scanBoard(row rowScanner) (*Board, error) {
 		b    Board
 		last sql.NullTime
 	)
-	err := row.Scan(&b.ID, &b.TrackID, &b.EngineClass, &b.Laps, &b.SimVersion, &b.TrackHash, &b.CreatedAt,
+	err := row.Scan(&b.ID, &b.TrackID, &b.EngineClass, &b.Laps, &b.ContentVersion, &b.TrackHash, &b.CreatedAt,
 		&b.Players, &b.BestMs, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -507,9 +507,9 @@ func (s *Store) ListBoards(ctx context.Context, f BoardFilter) ([]Board, error) 
 		conds = append(conds, "b.engine_class = ?")
 		args = append(args, *f.EngineClass)
 	}
-	if f.SimVersion != 0 {
-		conds = append(conds, "b.sim_version = ?")
-		args = append(args, f.SimVersion)
+	if f.ContentVersion != 0 {
+		conds = append(conds, "b.content_version = ?")
+		args = append(args, f.ContentVersion)
 	}
 	query := boardSelect
 	if len(conds) > 0 {

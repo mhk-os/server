@@ -18,7 +18,7 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 	packs := s.packs("e2e")
 	a, b := s.connect(t, false), s.connect(t, false)
 	for _, p := range []*itPlayer{a, b} {
-		p.announce(t, s.sim, packs)
+		p.announce(t, s.contentVersion, packs)
 		if _, err := p.QuickJoin(ctx, 1); err != nil {
 			t.Fatal(err)
 		}

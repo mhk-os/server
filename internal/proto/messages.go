@@ -35,13 +35,13 @@ func (Empty) Decode(r *wire.Reader) error { return r.Err() }
 
 // Hello is request 1, the mandatory first request of a connection.
 type Hello struct {
-	Magic      uint32
-	Protocol   uint16
-	GameCommit string
-	GameBuild  int32
-	SimVersion int32
-	ModAPI     int32
-	Platform   string
+	Magic          uint32
+	Protocol       uint16
+	GameCommit     string
+	GameBuild      int32
+	ContentVersion int32
+	ModAPI         int32
+	Platform       string
 }
 
 func (m *Hello) Encode(w *wire.Writer) {
@@ -49,7 +49,7 @@ func (m *Hello) Encode(w *wire.Writer) {
 	w.U16(m.Protocol)
 	w.String(m.GameCommit)
 	w.I32(m.GameBuild)
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 	w.I32(m.ModAPI)
 	w.String(m.Platform)
 }
@@ -59,7 +59,7 @@ func (m *Hello) Decode(r *wire.Reader) error {
 	m.Protocol = r.U16()
 	m.GameCommit = r.String(MaxGameCommit)
 	m.GameBuild = r.I32()
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	m.ModAPI = r.I32()
 	m.Platform = r.String(MaxPlatform)
 	return r.Err()

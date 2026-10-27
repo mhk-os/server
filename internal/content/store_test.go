@@ -44,7 +44,7 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	}
 
 	commit := "it-" + suffix // a fresh pack version for this run
-	good := proto.PackManifest{PackID: "mhk2", Commit: commit, SimVersion: sim,
+	good := proto.PackManifest{PackID: "mhk2", Commit: commit, ContentVersion: contentVersion,
 		Items: []proto.ManifestItem{it(proto.ContentTrack, "mhk2.Rome", "f"), it(proto.ContentKart, "mhk2.kart", "")}}
 	good.ManifestHash, _ = ManifestHash(good.Items)
 	bad := good
@@ -62,7 +62,8 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	announce(t, c, ids[3], bad)
 
 	// The stored manifest keeps the ids as reported; a fresh catalog reads votes and manifests back.
-	m, err := st.ManifestByHash(ctx, store.PackVersion{PackID: "MHK2", Commit: commit, SimVersion: sim}, good.ManifestHash)
+	m, err := st.ManifestByHash(ctx, store.PackVersion{PackID: "MHK2", Commit: commit, ContentVersion: contentVersion},
+		good.ManifestHash)
 	if err != nil || len(m.Items) != 2 || m.Items[0].ID != "mhk2.Rome" {
 		t.Fatalf("stored manifest %+v %v", m, err)
 	}
@@ -111,5 +112,16 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	}
 	if out := run("kicks", "--limit", "1"); !strings.Contains(out, "1 kick(s)") {
 		t.Fatalf("kicks --limit:\n%s", out)
+	}
+
+	if err := st.AddCheatReport(ctx, &store.CheatReport{LobbyRef: "lobby 1", RaceRef: "race 3", ReporterID: ids[0],
+		SuspectID: ids[3], Reason: "Teleport", Detail: "jumped 40 m", Note: "suspect ping unknown or over 200 ms",
+		CreatedAt: store.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	out = run("cheat-reports", "--account", names[3])
+	if !strings.Contains(out, "1 report(s)") || !strings.Contains(out, names[0]) ||
+		!strings.Contains(out, "no: suspect ping") || !strings.Contains(out, "jumped 40 m") {
+		t.Fatalf("cheat-reports:\n%s", out)
 	}
 }

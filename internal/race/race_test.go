@@ -31,6 +31,7 @@ type fakeEnv struct {
 	finishedN  int
 	placements []Placement
 	kicks      []store.CheatKick
+	reports    []store.CheatReport
 }
 
 func (f *fakeEnv) push(acc uint64, typ proto.Type, m proto.Message) {
@@ -43,7 +44,8 @@ func (f *fakeEnv) finished(_ uint64, p []Placement) {
 	f.finishedN++
 	f.placements = p
 }
-func (f *fakeEnv) cheatKick(k store.CheatKick) { f.kicks = append(f.kicks, k) }
+func (f *fakeEnv) cheatKick(k store.CheatKick)     { f.kicks = append(f.kicks, k) }
+func (f *fakeEnv) cheatReport(r store.CheatReport) { f.reports = append(f.reports, r) }
 
 // of returns the pushes of typ to acc (0 = any account) and forgets every push.
 func (f *fakeEnv) of(acc uint64, typ proto.Type) []proto.Message {
@@ -638,15 +640,27 @@ func TestCheatReports(t *testing.T) {
 	if !slices.Contains(env.dropped, 4) {
 		t.Fatal("UDP seat not dropped")
 	}
+	// Every report is stored, counted or not.
+	r := env.reports
+	if len(r) != 5 || r[0].Counted || r[0].Note != "reporter ping unknown or over 200 ms" || r[1].Counted ||
+		!r[2].Counted || r[2].ReporterID != acc(0) || r[2].SuspectID != acc(4) || r[2].Reason != "Speed" ||
+		r[2].RaceRef != "7" {
+		t.Fatalf("stored reports %+v", env.reports)
+	}
 
-	// A suspect with a bad link cannot be judged.
+	// A suspect with a bad link: speed and acceleration still count, the other checks do not.
 	rs, _, _ = newTestRace(3, Spec{Anticheat: true})
 	goAt = startRace(t, rs)
 	rs.seats[2].rttUs.Store(300_000)
-	rs.onCheatReport(rs.seats[0], &proto.CheatReport{SuspectSlot: 2, Reason: 1}, goAt)
-	rs.onCheatReport(rs.seats[1], &proto.CheatReport{SuspectSlot: 2, Reason: 1}, goAt)
+	rs.onCheatReport(rs.seats[0], &proto.CheatReport{SuspectSlot: 2, Reason: proto.FlagTeleport}, goAt)
+	rs.onCheatReport(rs.seats[1], &proto.CheatReport{SuspectSlot: 2, Reason: proto.FlagTeleport}, goAt)
 	if rs.seats[2].out {
-		t.Fatal("kicked a suspect whose RTT is over 200 ms")
+		t.Fatal("teleport reports kicked a suspect whose RTT is over 200 ms")
+	}
+	rs.onCheatReport(rs.seats[0], &proto.CheatReport{SuspectSlot: 2, Reason: proto.FlagSpeed}, goAt)
+	rs.onCheatReport(rs.seats[1], &proto.CheatReport{SuspectSlot: 2, Reason: proto.FlagAcceleration}, goAt)
+	if !rs.seats[2].out {
+		t.Fatal("speed reports ignored for a suspect whose RTT is over 200 ms")
 	}
 
 	// Larger races need half of the eligible observers.

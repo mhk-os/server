@@ -8,23 +8,23 @@ import (
 
 // Field and list limits of the time-trial and moderation messages (docs/protocol.md, phase 2).
 const (
-	MaxTrackID       = 96
-	MaxContentID     = 96 // kartId, characterId
-	MaxHash          = 32 // trackHash, ghost id
-	MaxContinent     = 2
-	MaxLapTimes      = 99
-	MaxGhostFile     = 8 << 20
-	MaxReportDetail  = 512
-	MaxModReason     = 256
-	MaxBoards        = 200
-	MaxPage          = 100 // limit of every paged request (leaderboards, run pages, player lists)
-	MaxMyRuns        = 500
-	MaxRunReports    = 500
-	AnyEngineClass   = 255
-	AnySimVersion    = 0
-	boardInfoMinSize = 8 + 1 + 1 + 1 + 4 + 1 + 4 + 4 + 8
-	runEntryMinSize  = 8 + 4 + 8 + 1 + 1 + 4 + 4 + 1 + 1 + 1 + 1 + 8 + 8 + 4 + 1 + 1 + 4 + 8 + 1 + 1
-	runReportMinSize = 1 + 1 + 4 + 1 + 8 + 1
+	MaxTrackID        = 96
+	MaxContentID      = 96 // kartId, characterId
+	MaxHash           = 32 // trackHash, ghost id
+	MaxContinent      = 2
+	MaxLapTimes       = 99
+	MaxGhostFile      = 8 << 20
+	MaxReportDetail   = 512
+	MaxModReason      = 256
+	MaxBoards         = 200
+	MaxPage           = 100 // limit of every paged request (leaderboards, run pages, player lists)
+	MaxMyRuns         = 500
+	MaxRunReports     = 500
+	AnyEngineClass    = 255
+	AnyContentVersion = 0
+	boardInfoMinSize  = 8 + 1 + 1 + 1 + 4 + 1 + 4 + 4 + 8
+	runEntryMinSize   = 8 + 4 + 8 + 1 + 1 + 4 + 4 + 1 + 1 + 1 + 1 + 8 + 8 + 4 + 1 + 1 + 4 + 8 + 1 + 1
+	runReportMinSize  = 1 + 1 + 4 + 1 + 8 + 1
 )
 
 // optTime writes "0 when none" times: the zero time.Time encodes as 0.
@@ -45,37 +45,37 @@ func readOptTime(r *wire.Reader) time.Time {
 	return t
 }
 
-// ListBoards is request 128. EngineClass AnyEngineClass and SimVersion AnySimVersion match every board.
+// ListBoards is request 128. EngineClass AnyEngineClass and ContentVersion AnyContentVersion match every board.
 type ListBoards struct {
-	TrackID     string
-	EngineClass uint8
-	SimVersion  int32
+	TrackID        string
+	EngineClass    uint8
+	ContentVersion int32
 }
 
 func (m *ListBoards) Encode(w *wire.Writer) {
 	w.String(m.TrackID)
 	w.U8(m.EngineClass)
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 }
 
 func (m *ListBoards) Decode(r *wire.Reader) error {
 	m.TrackID = r.String(MaxTrackID)
 	m.EngineClass = r.U8()
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	return r.Err()
 }
 
 // BoardInfo describes one leaderboard. Players, BestMs and LastUpload count visible runs only.
 type BoardInfo struct {
-	BoardID     uint64
-	TrackID     string
-	EngineClass uint8
-	Laps        uint8
-	SimVersion  int32
-	TrackHash   string
-	Players     uint32
-	BestMs      int32
-	LastUpload  time.Time // zero = none
+	BoardID        uint64
+	TrackID        string
+	EngineClass    uint8
+	Laps           uint8
+	ContentVersion int32
+	TrackHash      string
+	Players        uint32
+	BestMs         int32
+	LastUpload     time.Time // zero = none
 }
 
 func (m *BoardInfo) Encode(w *wire.Writer) {
@@ -83,7 +83,7 @@ func (m *BoardInfo) Encode(w *wire.Writer) {
 	w.String(m.TrackID)
 	w.U8(m.EngineClass)
 	w.U8(m.Laps)
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 	w.String(m.TrackHash)
 	w.U32(m.Players)
 	w.I32(m.BestMs)
@@ -95,7 +95,7 @@ func (m *BoardInfo) Decode(r *wire.Reader) error {
 	m.TrackID = r.String(MaxTrackID)
 	m.EngineClass = r.U8()
 	m.Laps = r.U8()
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	m.TrackHash = r.String(MaxHash)
 	m.Players = r.U32()
 	m.BestMs = r.I32()

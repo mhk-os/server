@@ -15,8 +15,8 @@ import (
 // manifestFile is the -manifests file: the packs a bot announces in ContentHello, with their items so it can
 // answer the server's requests for missing manifests. `mhk-bot dump-manifests` writes it.
 type manifestFile struct {
-	SimVersion int32          `json:"simVersion"`
-	Packs      []manifestPack `json:"packs"`
+	ContentVersion int32          `json:"contentVersion"`
+	Packs          []manifestPack `json:"packs"`
 }
 
 type manifestPack struct {
@@ -80,7 +80,7 @@ func (f *manifestFile) manifests(missing []string) []proto.PackManifest {
 	for _, p := range f.Packs {
 		for _, h := range missing {
 			if strings.EqualFold(h, p.ManifestHash) {
-				out = append(out, proto.PackManifest{PackID: p.PackID, Commit: p.Commit, SimVersion: f.SimVersion,
+				out = append(out, proto.PackManifest{PackID: p.PackID, Commit: p.Commit, ContentVersion: f.ContentVersion,
 					ManifestHash: p.ManifestHash, Items: p.items()})
 				break
 			}
@@ -89,11 +89,11 @@ func (f *manifestFile) manifests(missing []string) []proto.PackManifest {
 	return out
 }
 
-// dumpManifests writes the most reported manifest of every pack for sim from the server's database.
-func dumpManifests(ctx context.Context, st *store.Store, sim int32, packs []string, out string) error {
-	f := manifestFile{SimVersion: sim}
+// dumpManifests writes the most reported manifest of every pack for contentVersion from the server's database.
+func dumpManifests(ctx context.Context, st *store.Store, contentVersion int32, packs []string, out string) error {
+	f := manifestFile{ContentVersion: contentVersion}
 	for _, id := range packs {
-		m, err := st.MostReportedManifest(ctx, id, sim)
+		m, err := st.MostReportedManifest(ctx, id, contentVersion)
 		if err != nil {
 			return fmt.Errorf("pack %s: %w", id, err)
 		}

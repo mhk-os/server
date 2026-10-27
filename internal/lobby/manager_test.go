@@ -13,12 +13,17 @@ import (
 	"github.com/mhk-os/server/internal/store"
 )
 
-func instances(e *env, cat uint8, sim int32) []uint16 {
+// instances lists the instance numbers of a category and content version (every content set: tests use one).
+func instances(e *env, cat uint8, contentVersion int32) []uint16 {
 	e.m.mu.Lock()
 	defer e.m.mu.Unlock()
 	var out []uint16
-	for _, l := range e.m.instances[instanceKey{cat, sim}] {
-		out = append(out, l.instance)
+	for k, list := range e.m.instances {
+		if k.category == cat && k.contentVersion == contentVersion {
+			for _, l := range list {
+				out = append(out, l.instance)
+			}
+		}
 	}
 	return out
 }
@@ -32,22 +37,23 @@ func TestListOpensOneInstancePerCategory(t *testing.T) {
 	}
 	for i, s := range list {
 		c := categories[i+1]
-		if s.Category != uint8(i+1) || s.Instance != 1 || s.Kind != proto.LobbyPublic || s.SimVersion != testSim ||
-			s.MaxPlayers != 10 || s.Mode != c.mode || s.Anticheat != c.anticheat || !slices.Equal(s.Packs, c.packs) ||
+		if s.Category != uint8(i+1) || s.Instance != 1 || s.Kind != proto.LobbyPublic ||
+			s.ContentVersion != testContentVersion || s.MaxPlayers != 10 || s.Mode != c.mode ||
+			s.Anticheat != c.anticheat || !slices.Equal(s.Packs, c.packs) ||
 			s.Phase != proto.PhaseWaiting || s.Name != c.name+" #1" || s.EngineClass != 2 || s.SetRace != 0 ||
 			s.SetSize != 4 {
 			t.Fatalf("summary %d: %+v", i, s)
 		}
 	}
-	// Listing again does not open more; another simulation version gets its own instances.
+	// Listing again does not open more; another content version gets its own instances.
 	list2, _ := e.m.List(e.player(1))
 	if len(list2) != maxCategory || list2[0].LobbyID != list[0].LobbyID {
 		t.Fatal("second list changed the instances")
 	}
-	e.cat.announce(2, testSim+1, allPacks...)
+	e.cat.announce(2, testContentVersion+1, allPacks...)
 	list3, _ := e.m.List(Player{AccountID: 2, Username: "p2"})
-	if list3[0].SimVersion != testSim+1 || list3[0].LobbyID == list[0].LobbyID {
-		t.Fatal("simulation versions share instances")
+	if list3[0].ContentVersion != testContentVersion+1 || list3[0].LobbyID == list[0].LobbyID {
+		t.Fatal("content versions share instances")
 	}
 }
 
@@ -61,7 +67,7 @@ func TestInstancesOpenAndClose(t *testing.T) {
 		}
 	}
 	// #1 is full: #2 opened.
-	if got := instances(e, 1, testSim); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	s11 := e.ok(e.m.QuickJoin(e.player(11), 1))
@@ -70,17 +76,17 @@ func TestInstancesOpenAndClose(t *testing.T) {
 	}
 	// #1 regains room, #2 still has a player: nothing closes.
 	e.m.Leave(3)
-	if got := instances(e, 1, testSim); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	// #2 empties while #1 has room: #2 closes.
 	e.m.Leave(11)
-	if got := instances(e, 1, testSim); !slices.Equal(got, []uint16{1}) {
+	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1}) {
 		t.Fatalf("instances %v after #2 emptied", got)
 	}
 	// Fill #1 again: the new instance reuses number 2.
 	e.ok(e.m.QuickJoin(e.player(12), 1))
-	if got := instances(e, 1, testSim); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	// The last instance with room stays even when empty; Join by id works and full lobbies refuse.
@@ -118,16 +124,16 @@ func TestJoinErrors(t *testing.T) {
 	wantStatus(t, err, proto.StatusBadRequest, "content not announced")
 
 	// Missing packs are listed.
-	e.cat.announce(51, testSim, "game", "mhk2")
+	e.cat.announce(51, testContentVersion, "game", "mhk2")
 	_, err = e.m.QuickJoin(Player{AccountID: 51, Username: "x"}, 1)
 	wantStatus(t, err, proto.StatusBadRequest, "Missing content packs: mhk3, mhke, mhkt.")
 	if _, err := e.m.QuickJoin(Player{AccountID: 51, Username: "x"}, 9); err != nil {
 		t.Fatal("mhk2-only category refused:", err)
 	}
 
-	// Another simulation version cannot join by id.
+	// Another content version cannot join by id.
 	host := e.ok(e.m.QuickJoin(e.player(1), 1))
-	e.cat.announce(52, testSim+1, allPacks...)
+	e.cat.announce(52, testContentVersion+1, allPacks...)
 	_, err = e.m.Join(Player{AccountID: 52, Username: "x"}, host.Summary.LobbyID, "")
 	wantStatus(t, err, proto.StatusBadRequest, "update the game")
 
@@ -158,7 +164,7 @@ func TestOneLobbyPerAccount(t *testing.T) {
 	if left := e.push.of(1, proto.PushLobbyLeft); len(left) != 0 {
 		t.Fatalf("LobbyLeft %v", left)
 	}
-	if got := instances(e, 1, testSim); len(got) != 1 {
+	if got := instances(e, 1, testContentVersion); len(got) != 1 {
 		t.Fatalf("category 1 instances %v", got)
 	}
 }

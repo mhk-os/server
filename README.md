@@ -4,8 +4,8 @@ The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts, time
 upload and download, in-game moderation, and real-time multiplayer (public lobbies, private rooms, races over UDP).
 Clients speak a small binary protocol over one TCP (or TLS) connection plus UDP during races, specified in
 [docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run reports, content manifests and votes,
-content strikes, cheat kicks and the moderation audit log live in MariaDB (10.11+); the ghost files themselves live in the
-data directory. Lobbies and races live in the server's memory: a restart ends them.
+content strikes, cheat kicks, cheat reports and the moderation audit log live in MariaDB (10.11+); the ghost files
+themselves live in the data directory. Lobbies and races live in the server's memory: a restart ends them.
 
 ## Quick start
 
@@ -37,11 +37,11 @@ The compose MariaDB creates the `mhk_test` database for the integration tests on
 `cmd/mhk-bot` joins a lobby and races by replaying a ghost, to test the game against remote karts:
 
 ```sh
-go run ./cmd/mhk-bot dump-manifests -dsn "$MHK_DB_DSN" -sim 4 -out packs.json game mhk2 mhk3 mhke mhkt
+go run ./cmd/mhk-bot dump-manifests -dsn "$MHK_DB_DSN" -content-version 4 -out packs.json game mhk2 mhk3 mhke mhkt
 go run ./cmd/mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass kart-racer-2026 -join ABC234 -n 3
 ```
 
-`dump-manifests` writes the pack manifests players reported most for that `simVersion` (the game must have
+`dump-manifests` writes the pack manifests players reported most for that `contentVersion` (the game must have
 announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` joins a public lobby instead of
 a room code, `-n` starts that many bots (`bot1` … `bot3`, registered when missing), `-character`/`-kart` default to
 the ghost's, and `-platform NAME` sets the Hello platform (a Unity `RuntimePlatform` name such as `Android` or
@@ -107,6 +107,7 @@ mhk-server admin board list [--track T]
 mhk-server admin audit [--limit N]
 mhk-server admin content strikes [--account U] [--limit N]                       # copies differing from the majority
 mhk-server admin kicks [--account U] [--limit N]                                 # race kicks for cheating
+mhk-server admin cheat-reports [--account U] [--limit N]                         # every race cheat report, by or about U
 ```
 
 Usernames are matched case-insensitively. The disable reason is shown to the player, so write it for them.

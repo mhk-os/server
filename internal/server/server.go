@@ -89,7 +89,16 @@ type Deps struct {
 	Runs       store.Runs
 	Profiles   store.Profiles
 	Blobs      *blobs.Store
+	Content    Content // checks the content of uploaded runs
 	Geo        *geo.DB // nil = no GeoIP database
+}
+
+// Content is what time-trial uploads ask the content catalog (content.Catalog, which registers with the server
+// and so cannot be imported here).
+type Content interface {
+	// RunContent returns why conn, logged in as accountID, may not upload a run with these kart, character and
+	// track ids (a *StatusError: content not announced yet, or one of them modified there); nil when it may.
+	RunContent(ctx context.Context, conn any, accountID uint64, kart, character, track string) error
 }
 
 // HandlerFunc handles one request. It decodes the body from r and returns the response payload (nil for an

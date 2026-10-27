@@ -27,8 +27,9 @@ type seat struct {
 	badMacLogged bool
 
 	// Race goroutine only.
-	worldMac   *proto.UDPMac
-	everKicked bool // ever cheat-kicked: reports and claims never count
+	worldMac      *proto.UDPMac
+	everKicked    bool // ever cheat-kicked: reports and claims never count
+	storedReports int  // cheat reports of this racer written to cheat_reports
 
 	loaded     *proto.RaceLoaded
 	loadedHash [32]byte

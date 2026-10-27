@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mhk-os/server/internal/admin"
 	"github.com/mhk-os/server/internal/auth"
+	"github.com/mhk-os/server/internal/content"
 	"github.com/mhk-os/server/internal/ghost/ghosttest"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/server"
@@ -36,7 +38,32 @@ func newPlayer(t *testing.T, ts *testServer, prefix string) *player {
 	if err != nil {
 		t.Fatal(err)
 	}
+	announce(t, c, nil)
 	return &player{c: c, acct: s.Account, name: name}
+}
+
+// announce sends the connection's content (uploads need it) and every manifest the server asks for.
+func announce(t *testing.T, c *testclient.Client, ms []proto.PackManifest) {
+	t.Helper()
+	refs := make([]proto.PackRef, len(ms))
+	for i, m := range ms {
+		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.ManifestHash}
+	}
+	res, err := c.ContentHello(ctxT(t), testclient.DefaultHello().ContentVersion, refs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var send []proto.PackManifest
+	for _, m := range ms {
+		if slices.Contains(res.Missing, m.ManifestHash) {
+			send = append(send, m)
+		}
+	}
+	if len(send) > 0 {
+		if err := c.ContentManifests(ctxT(t), send); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // newModerator registers an account, promotes it with the CLI and logs in again so the connection has the role.
@@ -49,6 +76,7 @@ func newModerator(t *testing.T, ts *testServer) *player {
 	if err != nil || s.Account.Role != proto.RoleModerator {
 		t.Fatalf("moderator login %+v %v", s, err)
 	}
+	announce(t, c, nil)
 	return &player{c: c, acct: s.Account, name: p.name}
 }
 
@@ -116,20 +144,20 @@ func TestUploadAndLeaderboard(t *testing.T) {
 		r1.Run.EngineClass != 2 || r1.Run.Username != a.name || r1.Run.AccountID != a.acct.ID || r1.Run.Hidden {
 		t.Fatalf("first upload %+v", r1)
 	}
-	boards, err := a.c.ListBoards(ctx, strings.ToUpper(track), proto.AnyEngineClass, proto.AnySimVersion)
+	boards, err := a.c.ListBoards(ctx, strings.ToUpper(track), proto.AnyEngineClass, proto.AnyContentVersion)
 	if err != nil || len(boards) != 1 {
 		t.Fatalf("boards %+v %v", boards, err)
 	}
 	bd := boards[0]
-	if bd.BoardID != r1.Run.BoardID || bd.TrackID != track || bd.Laps != 3 || bd.EngineClass != 2 || bd.SimVersion != 4 ||
-		bd.Players != 1 || bd.BestMs != 92_500 || bd.LastUpload.IsZero() {
+	if bd.BoardID != r1.Run.BoardID || bd.TrackID != track || bd.Laps != 3 || bd.EngineClass != 2 ||
+		bd.ContentVersion != 4 || bd.Players != 1 || bd.BestMs != 92_500 || bd.LastUpload.IsZero() {
 		t.Fatalf("board %+v", bd)
 	}
 	if bs, _ := a.c.ListBoards(ctx, track, 1, 0); len(bs) != 0 {
 		t.Fatalf("engine class filter: %+v", bs)
 	}
 	if bs, _ := a.c.ListBoards(ctx, track, 2, 5); len(bs) != 0 {
-		t.Fatalf("sim version filter: %+v", bs)
+		t.Fatalf("content version filter: %+v", bs)
 	}
 
 	r2 := upload(t, a, run(track, kart, 30, 30, 30)) // 90.5 s: new best
@@ -174,7 +202,7 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	_, err = a.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: 1 << 60, Limit: 10})
 	wantStatus(t, err, proto.StatusNotFound)
 
-	boards, _ = a.c.ListBoards(ctx, track, proto.AnyEngineClass, proto.AnySimVersion)
+	boards, _ = a.c.ListBoards(ctx, track, proto.AnyEngineClass, proto.AnyContentVersion)
 	if boards[0].Players != 2 || boards[0].BestMs != 90_500 {
 		t.Fatalf("board stats %+v", boards[0])
 	}
@@ -296,6 +324,54 @@ func TestUploadRateLimit(t *testing.T) {
 	if first.Run.RunID == 0 {
 		t.Fatal("no run id")
 	}
+}
+
+func TestUploadContentChecks(t *testing.T) {
+	ts := start(t, server.Config{}, generous)
+	ctx := ctxT(t)
+	pack, mod, track := uniqueID("pk"), uniqueID("mod"), uniqueID("trk")
+	kart := pack + ".kart"
+	manifest := func(packID, fingerprint string, ids ...string) proto.PackManifest {
+		m := proto.PackManifest{PackID: packID, Commit: "c1", ContentVersion: testclient.DefaultHello().ContentVersion}
+		for _, id := range ids {
+			m.Items = append(m.Items, proto.ManifestItem{Kind: proto.ContentKart, ID: id, Fingerprint: fingerprint})
+		}
+		m.ManifestHash, _ = content.ManifestHash(m.Items)
+		return m
+	}
+	wantRefused := func(p *player, status proto.Status, msg string) {
+		t.Helper()
+		_, err := p.c.UploadRun(ctx, run(track, kart, 30, 30, 30).Encode())
+		wantStatus(t, err, status)
+		if !strings.Contains(err.Error(), msg) {
+			t.Fatalf("%v does not mention %q", err, msg)
+		}
+	}
+
+	// Nothing announced on this connection yet.
+	c := connect(t, ts)
+	s, err := c.Register(ctx, uniqueName("cc_"), password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRefused(&player{c: c, acct: s.Account}, proto.StatusBadRequest, "hasn't sent its content")
+
+	// Three accounts back the kart's fingerprint; a fourth copy of the same commit differs.
+	var honest []*player
+	for range 3 {
+		p := newPlayer(t, ts, "cc_")
+		announce(t, p.c, []proto.PackManifest{manifest(pack, "aa", kart)})
+		honest = append(honest, p)
+	}
+	tampered := newPlayer(t, ts, "cc_")
+	announce(t, tampered.c, []proto.PackManifest{manifest(pack, "bb", kart)})
+	wantRefused(tampered, proto.StatusForbidden, "Your copy of "+pack+" differs from other players' ("+kart+")")
+	upload(t, honest[0], run(track, kart, 30, 30, 30))
+
+	// A mod replacing the kart by load order.
+	modded := newPlayer(t, ts, "cc_")
+	announce(t, modded.c, []proto.PackManifest{manifest(pack, "aa"), manifest(mod, "ff", kart)})
+	wantRefused(modded, proto.StatusForbidden, "uses "+kart+" replaced by "+mod)
 }
 
 func TestLeaderboardFilters(t *testing.T) {

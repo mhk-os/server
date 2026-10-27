@@ -52,7 +52,7 @@ func NewID() string {
 func New() *Ghost {
 	g := &Ghost{
 		Header: ghost.Header{
-			ID: NewID(), GameBuild: "v0.9 abc1234", SimVersion: 4, PlayerName: "Test Driver", PlayerID: "player-1",
+			ID: NewID(), GameBuild: "v0.9 abc1234", ContentVersion: 4, PlayerName: "Test Driver", PlayerID: "player-1",
 			DateTicks: Ticks(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)),
 			TrackID:   "test.track", TrackPackID: "test", TrackPackVersion: "1.0",
 			TrackHash: "9b7809579ee7ae57280e58893e32df90", KartID: "test.kart", CharacterID: "test.char",
@@ -183,7 +183,7 @@ func (g *Ghost) encodeHeader() []byte {
 	var w Writer
 	w.Str(h.ID)
 	w.Str(h.GameBuild)
-	w.I32(h.SimVersion)
+	w.I32(h.ContentVersion)
 	w.Str(h.PlayerName)
 	w.Str(h.PlayerID)
 	w.I64(h.DateTicks)

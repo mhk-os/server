@@ -12,11 +12,11 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// PackVersion identifies what the catalog majority is computed over: a pack at a commit for a simulation version.
+// PackVersion identifies what the catalog majority is computed over: a pack at a commit for a content version.
 type PackVersion struct {
-	PackID     string
-	Commit     string
-	SimVersion int32
+	PackID         string
+	Commit         string
+	ContentVersion int32
 }
 
 // Manifest is a row of pack_manifests.
@@ -51,8 +51,8 @@ const ActionLobbyKick = "lobby.kick"
 func (s *Store) HasManifest(ctx context.Context, v PackVersion, hash string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pack_manifests
-		WHERE pack_id = ? AND pack_commit = ? AND sim_version = ? AND manifest_hash = ?`,
-		v.PackID, v.Commit, v.SimVersion, hash).Scan(&n)
+		WHERE pack_id = ? AND pack_commit = ? AND content_version = ? AND manifest_hash = ?`,
+		v.PackID, v.Commit, v.ContentVersion, hash).Scan(&n)
 	return n > 0, err
 }
 
@@ -60,9 +60,9 @@ func (s *Store) HasManifest(ctx context.Context, v PackVersion, hash string) (bo
 func (s *Store) PutManifest(ctx context.Context, m *Manifest, at time.Time) error {
 	w := wire.NewWriter(16 + 40*len(m.Items))
 	proto.EncodeManifestItems(w, m.Items)
-	_, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO pack_manifests (pack_id, pack_commit, sim_version,
+	_, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO pack_manifests (pack_id, pack_commit, content_version,
 		manifest_hash, items, item_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		m.PackID, m.Commit, m.SimVersion, m.Hash, w.Bytes(), len(m.Items), at)
+		m.PackID, m.Commit, m.ContentVersion, m.Hash, w.Bytes(), len(m.Items), at)
 	return err
 }
 
@@ -70,9 +70,9 @@ func (s *Store) PutManifest(ctx context.Context, m *Manifest, at time.Time) erro
 func (s *Store) ManifestByHash(ctx context.Context, v PackVersion, hash string) (*Manifest, error) {
 	var blob []byte
 	m := &Manifest{}
-	err := s.db.QueryRowContext(ctx, `SELECT pack_id, pack_commit, sim_version, manifest_hash, items
-		FROM pack_manifests WHERE pack_id = ? AND pack_commit = ? AND sim_version = ? AND manifest_hash = ?`,
-		v.PackID, v.Commit, v.SimVersion, hash).Scan(&m.PackID, &m.Commit, &m.SimVersion, &m.Hash, &blob)
+	err := s.db.QueryRowContext(ctx, `SELECT pack_id, pack_commit, content_version, manifest_hash, items
+		FROM pack_manifests WHERE pack_id = ? AND pack_commit = ? AND content_version = ? AND manifest_hash = ?`,
+		v.PackID, v.Commit, v.ContentVersion, hash).Scan(&m.PackID, &m.Commit, &m.ContentVersion, &m.Hash, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -90,7 +90,7 @@ func (s *Store) ManifestByHash(ctx context.Context, v PackVersion, hash string) 
 // PackVotes returns the manifest hash every account reported for the pack version.
 func (s *Store) PackVotes(ctx context.Context, v PackVersion) (map[uint64]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT account_id, manifest_hash FROM pack_votes
-		WHERE pack_id = ? AND pack_commit = ? AND sim_version = ?`, v.PackID, v.Commit, v.SimVersion)
+		WHERE pack_id = ? AND pack_commit = ? AND content_version = ?`, v.PackID, v.Commit, v.ContentVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -111,23 +111,23 @@ func (s *Store) PackVotes(ctx context.Context, v PackVersion) (map[uint64]string
 
 // SetPackVote records the account's latest manifest hash for the pack version.
 func (s *Store) SetPackVote(ctx context.Context, v PackVersion, accountID uint64, hash string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO pack_votes (pack_id, pack_commit, sim_version, account_id,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO pack_votes (pack_id, pack_commit, content_version, account_id,
 		manifest_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE manifest_hash = VALUES(manifest_hash), updated_at = VALUES(updated_at)`,
-		v.PackID, v.Commit, v.SimVersion, accountID, hash, at)
+		v.PackID, v.Commit, v.ContentVersion, accountID, hash, at)
 	return err
 }
 
 // AddContentStrike stores a strike. With once, a strike with the same account, pack version and both hashes is
 // written only the first time, so announcing the same differing copy again does not pile up strikes.
 func (s *Store) AddContentStrike(ctx context.Context, k *ContentStrike, once bool) error {
-	q := `INSERT INTO content_strikes (account_id, pack_id, pack_commit, sim_version, manifest_hash, majority_hash,
+	q := `INSERT INTO content_strikes (account_id, pack_id, pack_commit, content_version, manifest_hash, majority_hash,
 		reason, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM DUAL`
-	args := []any{k.AccountID, k.PackID, k.Commit, k.SimVersion, k.ManifestHash, k.MajorityHash, k.Reason, k.CreatedAt}
+	args := []any{k.AccountID, k.PackID, k.Commit, k.ContentVersion, k.ManifestHash, k.MajorityHash, k.Reason, k.CreatedAt}
 	if once {
 		q += ` WHERE NOT EXISTS (SELECT 1 FROM content_strikes WHERE account_id = ? AND pack_id = ? AND
-			pack_commit = ? AND sim_version = ? AND manifest_hash = ? AND majority_hash = ?)`
-		args = append(args, k.AccountID, k.PackID, k.Commit, k.SimVersion, k.ManifestHash, k.MajorityHash)
+			pack_commit = ? AND content_version = ? AND manifest_hash = ? AND majority_hash = ?)`
+		args = append(args, k.AccountID, k.PackID, k.Commit, k.ContentVersion, k.ManifestHash, k.MajorityHash)
 	}
 	_, err := s.db.ExecContext(ctx, q, args...)
 	return err
@@ -135,7 +135,7 @@ func (s *Store) AddContentStrike(ctx context.Context, k *ContentStrike, once boo
 
 // ContentStrikes lists strikes newest first; accountID 0 means every account, limit 0 no limit.
 func (s *Store) ContentStrikes(ctx context.Context, accountID uint64, limit int) ([]ContentStrike, error) {
-	q := `SELECT cs.id, cs.account_id, a.username, cs.pack_id, cs.pack_commit, cs.sim_version, cs.manifest_hash,
+	q := `SELECT cs.id, cs.account_id, a.username, cs.pack_id, cs.pack_commit, cs.content_version, cs.manifest_hash,
 		cs.majority_hash, cs.reason, cs.created_at FROM content_strikes cs JOIN accounts a ON a.id = cs.account_id`
 	var args []any
 	if accountID != 0 {
@@ -155,7 +155,7 @@ func (s *Store) ContentStrikes(ctx context.Context, accountID uint64, limit int)
 	var out []ContentStrike
 	for rows.Next() {
 		var k ContentStrike
-		if err := rows.Scan(&k.ID, &k.AccountID, &k.Username, &k.PackID, &k.Commit, &k.SimVersion, &k.ManifestHash,
+		if err := rows.Scan(&k.ID, &k.AccountID, &k.Username, &k.PackID, &k.Commit, &k.ContentVersion, &k.ManifestHash,
 			&k.MajorityHash, &k.Reason, &k.CreatedAt); err != nil {
 			return nil, err
 		}

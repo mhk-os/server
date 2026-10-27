@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,10 +28,10 @@ import (
 const itPassword = "kart-racer-2026"
 
 type itServer struct {
-	addr  string
-	st    *store.Store
-	races *fakeRaces
-	sim   int32
+	addr           string
+	st             *store.Store
+	races          *fakeRaces
+	contentVersion int32
 }
 
 // startServer runs the server with faked races, or with the real race engine and UDP when realRaces is set.
@@ -66,9 +67,9 @@ func startServer(t *testing.T, realRaces bool) *itServer {
 		}
 		cfg.UDPPort = uint16(udp.LocalAddr().(*net.UDPAddr).Port)
 	}
-	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
-		Profiles: st, Blobs: ghosts})
 	catalog := content.New(st, log)
+	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
+		Profiles: st, Blobs: ghosts, Content: catalog})
 	catalog.Register(srv)
 	its := &itServer{st: st}
 	var races race.Races
@@ -98,11 +99,11 @@ func startServer(t *testing.T, realRaces bool) *itServer {
 			engine.Close()
 		}
 	})
-	// A random simulation version keeps this run's catalog votes apart from earlier runs on the same database.
+	// A random content version keeps this run's catalog votes apart from earlier runs on the same database.
 	var b [3]byte
 	rand.Read(b[:])
 	its.addr = ln.Addr().String()
-	its.sim = 1_000_000 + int32(b[0])<<16 | int32(b[1])<<8 | int32(b[2])
+	its.contentVersion = 1_000_000 + int32(b[0])<<16 | int32(b[1])<<8 | int32(b[2])
 	return its
 }
 
@@ -129,7 +130,7 @@ func (s *itServer) connect(t *testing.T, moderator bool) *itPlayer {
 		}
 		t.Cleanup(func() { c.Close() })
 		h := testclient.DefaultHello()
-		h.SimVersion, h.Platform = s.sim, "OSXEditor" // LobbyMember/RaceSlot.platform 2
+		h.ContentVersion, h.Platform = s.contentVersion, "OSXEditor" // LobbyMember/RaceSlot.platform 2
 		if _, err := c.Hello(ctx, h); err != nil {
 			t.Fatal(err)
 		}
@@ -157,8 +158,8 @@ func (s *itServer) connect(t *testing.T, moderator bool) *itPlayer {
 	return &itPlayer{Client: c, id: sess.Account.ID, name: name}
 }
 
-func manifest(id, commit string, sim int32, items ...proto.ManifestItem) proto.PackManifest {
-	m := proto.PackManifest{PackID: id, Commit: commit, SimVersion: sim, Items: items}
+func manifest(id, commit string, contentVersion int32, items ...proto.ManifestItem) proto.PackManifest {
+	m := proto.PackManifest{PackID: id, Commit: commit, ContentVersion: contentVersion, Items: items}
 	m.ManifestHash, _ = content.ManifestHash(items)
 	return m
 }
@@ -170,24 +171,25 @@ func item(kind uint8, id string) proto.ManifestItem {
 // packs are the built-in pack and the classic packs of category 1, at a commit unique to the test run.
 func (s *itServer) packs(commit string) []proto.PackManifest {
 	return []proto.PackManifest{
-		manifest("game", commit, s.sim, item(proto.ContentCharacter, "game.huhn"), item(proto.ContentKart, "game.kart")),
-		manifest("mhk2", commit, s.sim, item(proto.ContentTrack, "mhk2.rome"), item(proto.ContentTrack, "mhk2.alps"),
-			item(proto.ContentKart, "mhk2.speedy")),
-		manifest("mhk3", commit, s.sim, item(proto.ContentTrack, "mhk3.paris")),
-		manifest("mhke", commit, s.sim),
-		manifest("mhkt", commit, s.sim, item(proto.ContentArena, "mhkt.arena")),
+		manifest("game", commit, s.contentVersion, item(proto.ContentCharacter, "game.huhn"),
+			item(proto.ContentKart, "game.kart")),
+		manifest("mhk2", commit, s.contentVersion, item(proto.ContentTrack, "mhk2.rome"),
+			item(proto.ContentTrack, "mhk2.alps"), item(proto.ContentKart, "mhk2.speedy")),
+		manifest("mhk3", commit, s.contentVersion, item(proto.ContentTrack, "mhk3.paris")),
+		manifest("mhke", commit, s.contentVersion),
+		manifest("mhkt", commit, s.contentVersion, item(proto.ContentArena, "mhkt.arena")),
 	}
 }
 
 // announce runs ContentHello and sends what the server asks for.
-func (p *itPlayer) announce(t *testing.T, sim int32, ms []proto.PackManifest) *proto.ContentHelloResult {
+func (p *itPlayer) announce(t *testing.T, contentVersion int32, ms []proto.PackManifest) *proto.ContentHelloResult {
 	t.Helper()
 	ctx := itCtx(t)
 	refs := make([]proto.PackRef, len(ms))
 	for i, m := range ms {
 		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.ManifestHash}
 	}
-	res, err := p.ContentHello(ctx, sim, refs)
+	res, err := p.ContentHello(ctx, contentVersion, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +243,7 @@ func (s *itServer) waitStart(t *testing.T, n int) startCall {
 func TestPublicLobbyOverTCP(t *testing.T) {
 	s := startServer(t, false)
 	ctx := itCtx(t)
-	commit := "c" + hex.EncodeToString([]byte{byte(s.sim), byte(s.sim >> 8)})
+	commit := "c" + hex.EncodeToString([]byte{byte(s.contentVersion), byte(s.contentVersion >> 8)})
 	packs := s.packs(commit)
 
 	a, b, mod := s.connect(t, false), s.connect(t, false), s.connect(t, true)
@@ -249,18 +251,18 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 	// Lobby requests need the content announced first.
 	_, err := a.ListLobbies(ctx)
 	itStatus(t, err, proto.StatusBadRequest, "content not announced")
-	res := a.announce(t, s.sim, packs)
+	res := a.announce(t, s.contentVersion, packs)
 	if len(res.Missing) != len(packs) || len(res.Strikes) != 0 {
 		t.Fatalf("first ContentHello %+v", res)
 	}
-	if res := b.announce(t, s.sim, packs); len(res.Missing) != 0 {
+	if res := b.announce(t, s.contentVersion, packs); len(res.Missing) != 0 {
 		t.Fatalf("known manifests requested again: %+v", res)
 	}
-	mod.announce(t, s.sim, packs)
-	// ContentHello must carry the Hello's simulation version.
-	_, err = a.ContentHello(ctx, s.sim+1, nil)
-	itStatus(t, err, proto.StatusBadRequest, "simVersion")
-	a.announce(t, s.sim, packs)
+	mod.announce(t, s.contentVersion, packs)
+	// ContentHello must carry the Hello's content version.
+	_, err = a.ContentHello(ctx, s.contentVersion+1, nil)
+	itStatus(t, err, proto.StatusBadRequest, "contentVersion")
+	a.announce(t, s.contentVersion, packs)
 
 	list, err := a.ListLobbies(ctx)
 	if err != nil || len(list) != maxCategory {
@@ -299,7 +301,7 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 
 	// Missing packs are refused with a list.
 	c := s.connect(t, false)
-	c.announce(t, s.sim, packs[:2])
+	c.announce(t, s.contentVersion, packs[:2])
 	_, err = c.QuickJoin(ctx, 1)
 	itStatus(t, err, proto.StatusBadRequest, "mhk3, mhke, mhkt")
 
@@ -397,8 +399,8 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 	ctx := itCtx(t)
 	packs := s.packs("room")
 	owner, guest := s.connect(t, false), s.connect(t, false)
-	owner.announce(t, s.sim, packs)
-	guest.announce(t, s.sim, packs)
+	owner.announce(t, s.contentVersion, packs)
+	guest.announce(t, s.contentVersion, packs)
 
 	settings := proto.RoomSettings{Name: "Hühnerstall", Mode: proto.RoomRaceSet, Packs: []string{"mhk2", "mhk3"},
 		Anticheat: true, EngineClass: 1, Laps: 2, Items: true, MaxPlayers: 4, TrackPick: proto.PickOwner,
@@ -452,4 +454,50 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 	}
 	_, err = owner.JoinLobby(ctx, 0, st.Code)
 	itStatus(t, err, proto.StatusNotFound, "")
+}
+
+func TestLobbyContentRulesOverTCP(t *testing.T) {
+	s := startServer(t, false)
+	ctx := itCtx(t)
+	packs := s.packs("rules")
+	a, b, modded := s.connect(t, false), s.connect(t, false), s.connect(t, false)
+	a.announce(t, s.contentVersion, packs)
+
+	// A mod replacing a kart of a lobby pack is refused, also without anticheat.
+	mod := manifest("actest", "rules", s.contentVersion,
+		proto.ManifestItem{Kind: proto.ContentKart, ID: "mhk2.speedy", Fingerprint: "twice as fast"})
+	modded.announce(t, s.contentVersion, append(slices.Clone(packs), mod))
+	_, err := modded.QuickJoin(ctx, 2)
+	itStatus(t, err, proto.StatusBadRequest, "actest replaces content of this lobby (mhk2.speedy)")
+
+	// Another version of mhk3 races in its own public instance and cannot enter a's anticheat lobbies.
+	other := slices.Clone(packs)
+	other[2] = manifest("mhk3", "rules", s.contentVersion, item(proto.ContentTrack, "mhk3.paris"),
+		item(proto.ContentTrack, "mhk3.lyon"))
+	b.announce(t, s.contentVersion, other)
+	stA, err := a.QuickJoin(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stB, err := b.QuickJoin(ctx, 1)
+	if err != nil || stB.Summary.LobbyID == stA.Summary.LobbyID || len(stB.Members) != 1 {
+		t.Fatalf("QuickJoin with another mhk3 %+v %v", stB, err)
+	}
+	_, err = b.JoinLobby(ctx, stA.Summary.LobbyID, "")
+	itStatus(t, err, proto.StatusForbidden, "Your version of mhk3 differs from this lobby's")
+	settings := proto.RoomSettings{Mode: proto.RoomRaceSet, Packs: []string{"mhk2", "mhk3"}, Anticheat: true,
+		MaxPlayers: 4, RacesPerSet: 1}
+	room, err := a.CreateRoom(ctx, &settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.JoinLobby(ctx, 0, room.Code)
+	itStatus(t, err, proto.StatusForbidden, "Your version of mhk3 differs from this lobby's")
+	settings.Anticheat = false
+	if err := a.UpdateRoom(ctx, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.JoinLobby(ctx, 0, room.Code); err != nil {
+		t.Fatalf("join without anticheat: %v", err)
+	}
 }

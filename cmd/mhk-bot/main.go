@@ -2,7 +2,7 @@
 // game can be tested against remote karts.
 //
 //	mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass secret -quick 1 [-n 3]
-//	mhk-bot dump-manifests -dsn DSN -sim N -out packs.json mhk2 mhk3 ...
+//	mhk-bot dump-manifests -dsn DSN -content-version N -out packs.json mhk2 mhk3 ...
 //
 // Bots know nothing about the track, so their RaceLoaded carries a hash unique to each bot: with one human (or
 // bots only) nobody has a majority, the tie keeps every racer and the race uses the lowest slot's content. With two
@@ -133,21 +133,21 @@ func parseServer(uri string) (addr, host string, conf *tls.Config, err error) {
 func dump(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("dump-manifests", flag.ContinueOnError)
 	dsn := fs.String("dsn", os.Getenv("MHK_DB_DSN"), "MariaDB DSN of the server (MHK_DB_DSN)")
-	sim := fs.Int("sim", 0, "simVersion of the manifests")
+	contentVersion := fs.Int("content-version", 0, "content version of the manifests")
 	out := fs.String("out", "manifests.json", "file to write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dsn == "" || *sim == 0 || fs.NArg() == 0 {
+	if *dsn == "" || *contentVersion == 0 || fs.NArg() == 0 {
 		fs.Usage()
-		return errors.New("need -dsn, -sim and at least one pack id")
+		return errors.New("need -dsn, -content-version and at least one pack id")
 	}
 	st, err := store.Open(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if err := dumpManifests(ctx, st, int32(*sim), fs.Args(), *out); err != nil {
+	if err := dumpManifests(ctx, st, int32(*contentVersion), fs.Args(), *out); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %d packs to %s\n", fs.NArg(), *out)

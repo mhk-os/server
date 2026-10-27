@@ -60,7 +60,7 @@ const (
 type Header struct {
 	ID               string
 	GameBuild        string
-	SimVersion       int32
+	ContentVersion   int32
 	PlayerName       string
 	PlayerID         string
 	DateTicks        int64 // .NET DateTime ticks, UTC
@@ -285,7 +285,7 @@ func (r *reader) block(name string) ([]byte, error) {
 func readHeader(r *reader, h *Header) error {
 	h.ID = r.str()
 	h.GameBuild = r.str()
-	h.SimVersion = r.i32()
+	h.ContentVersion = r.i32()
 	h.PlayerName = r.str()
 	h.PlayerID = r.str()
 	h.DateTicks = r.i64()

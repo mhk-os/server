@@ -147,12 +147,12 @@ func (m *PackRef) Decode(r *wire.Reader) error {
 
 // ContentHello is request 256: the content packs the client has enabled.
 type ContentHello struct {
-	SimVersion int32
-	Packs      []PackRef
+	ContentVersion int32
+	Packs          []PackRef
 }
 
 func (m *ContentHello) Encode(w *wire.Writer) {
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 	w.Count(len(m.Packs))
 	for i := range m.Packs {
 		m.Packs[i].Encode(w)
@@ -160,7 +160,7 @@ func (m *ContentHello) Encode(w *wire.Writer) {
 }
 
 func (m *ContentHello) Decode(r *wire.Reader) error {
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	m.Packs = make([]PackRef, r.Count(MaxAnnouncedPacks, packRefMinSize))
 	for i := range m.Packs {
 		m.Packs[i].Decode(r)
@@ -208,17 +208,17 @@ type ManifestItem struct {
 
 // PackManifest describes the gameplay content of one pack version.
 type PackManifest struct {
-	PackID       string
-	Commit       string
-	SimVersion   int32
-	ManifestHash string
-	Items        []ManifestItem
+	PackID         string
+	Commit         string
+	ContentVersion int32
+	ManifestHash   string
+	Items          []ManifestItem
 }
 
 func (m *PackManifest) Encode(w *wire.Writer) {
 	w.String(m.PackID)
 	w.String(m.Commit)
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 	w.String(m.ManifestHash)
 	EncodeManifestItems(w, m.Items)
 }
@@ -226,7 +226,7 @@ func (m *PackManifest) Encode(w *wire.Writer) {
 func (m *PackManifest) Decode(r *wire.Reader) error {
 	m.PackID = r.String(MaxPackID)
 	m.Commit = r.String(MaxPackCommit)
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	m.ManifestHash = r.String(MaxManifestHash)
 	m.Items = DecodeManifestItems(r)
 	return r.Err()
@@ -325,21 +325,21 @@ func (m *RoomSettings) Decode(r *wire.Reader) error {
 
 // LobbySummary is one lobby in ListLobbies and the head of LobbyState.
 type LobbySummary struct {
-	LobbyID     uint64
-	Kind        uint8
-	Category    uint8
-	Instance    uint16
-	Name        string
-	Mode        uint8
-	Anticheat   bool
-	Packs       []string
-	Players     uint8
-	MaxPlayers  uint8
-	Phase       uint8
-	SimVersion  int32
-	EngineClass uint8
-	SetRace     uint8 // as LobbyState.SetRace
-	SetSize     uint8
+	LobbyID        uint64
+	Kind           uint8
+	Category       uint8
+	Instance       uint16
+	Name           string
+	Mode           uint8
+	Anticheat      bool
+	Packs          []string
+	Players        uint8
+	MaxPlayers     uint8
+	Phase          uint8
+	ContentVersion int32
+	EngineClass    uint8
+	SetRace        uint8 // as LobbyState.SetRace
+	SetSize        uint8
 }
 
 func (m *LobbySummary) Encode(w *wire.Writer) {
@@ -354,7 +354,7 @@ func (m *LobbySummary) Encode(w *wire.Writer) {
 	w.U8(m.Players)
 	w.U8(m.MaxPlayers)
 	w.U8(m.Phase)
-	w.I32(m.SimVersion)
+	w.I32(m.ContentVersion)
 	w.U8(m.EngineClass)
 	w.U8(m.SetRace)
 	w.U8(m.SetSize)
@@ -372,7 +372,7 @@ func (m *LobbySummary) Decode(r *wire.Reader) error {
 	m.Players = r.U8()
 	m.MaxPlayers = r.U8()
 	m.Phase = r.U8()
-	m.SimVersion = r.I32()
+	m.ContentVersion = r.I32()
 	m.EngineClass = r.U8()
 	m.SetRace = r.U8()
 	m.SetSize = r.U8()

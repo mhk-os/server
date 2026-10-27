@@ -84,7 +84,7 @@ func (b *bot) connect(ctx context.Context) error {
 	b.c = c
 	hello := testclient.DefaultHello()
 	hello.GameCommit, hello.Platform = "mhk-bot", b.cfg.platform
-	hello.SimVersion = b.cfg.manifests.SimVersion
+	hello.ContentVersion = b.cfg.manifests.ContentVersion
 	sent := time.Now()
 	ok, err := c.Hello(ctx, hello)
 	if err != nil {
@@ -103,7 +103,7 @@ func (b *bot) connect(ctx context.Context) error {
 		return fmt.Errorf("login %s: %w", b.name, err)
 	}
 	b.acc = s.Account.ID
-	res, err := c.ContentHello(ctx, b.cfg.manifests.SimVersion, b.cfg.manifests.refs())
+	res, err := c.ContentHello(ctx, b.cfg.manifests.ContentVersion, b.cfg.manifests.refs())
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("content hello: %w", err)

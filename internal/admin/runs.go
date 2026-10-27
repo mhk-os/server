@@ -131,8 +131,8 @@ func runShow(ctx context.Context, env *Env, args []string) error {
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", v.ID)
 	fmt.Fprintf(tw, "Account\t%s (id %d, %s)\n", v.Username, v.AccountID, orDash(v.Country))
-	fmt.Fprintf(tw, "Board\t%d: %s, engine class %d, %d laps, sim %d, track hash %s\n", v.BoardID, v.BoardTrackID,
-		v.EngineClass, v.Laps, v.SimVersion, v.TrackHash)
+	fmt.Fprintf(tw, "Board\t%d: %s, engine class %d, %d laps, content version %d, track hash %s\n", v.BoardID,
+		v.BoardTrackID, v.EngineClass, v.Laps, v.ContentVersion, v.TrackHash)
 	fmt.Fprintf(tw, "Track pack\t%s\n", v.TrackPackID)
 	fmt.Fprintf(tw, "Kart / character\t%s / %s\n", v.KartID, v.CharacterID)
 	fmt.Fprintf(tw, "Time\t%s (best lap %s; laps %s)\n", formatMs(v.FinishMs), formatMs(v.BestLapMs),
@@ -312,7 +312,7 @@ func boardList(ctx context.Context, env *Env, args []string) error {
 		if b.BestMs > 0 {
 			best = formatMs(b.BestMs)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n", b.ID, b.TrackID, b.EngineClass, b.Laps, b.SimVersion,
+		fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n", b.ID, b.TrackID, b.EngineClass, b.Laps, b.ContentVersion,
 			b.TrackHash, b.Players, best, formatTime(b.LastUpload))
 	}
 	tw.Flush()

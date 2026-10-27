@@ -198,6 +198,7 @@ func serve(ctx context.Context, args []string) error {
 	udpPort := uint16(udp.LocalAddr().(*net.UDPAddr).Port)
 
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), auth.DefaultLimits)
+	catalog := content.New(st, log)
 	srv := server.New(server.Config{Version: version, UDPPort: udpPort}, server.Deps{
 		Log:        log,
 		Auth:       svc,
@@ -207,9 +208,9 @@ func serve(ctx context.Context, args []string) error {
 		Runs:       st,
 		Profiles:   st,
 		Blobs:      ghosts,
+		Content:    catalog,
 		Geo:        geoDB,
 	})
-	catalog := content.New(st, log)
 	catalog.Register(srv)
 	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})
 	defer races.Close()

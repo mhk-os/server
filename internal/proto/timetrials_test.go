@@ -22,8 +22,8 @@ func sampleRun(id uint64) RunEntry {
 
 func timeTrialMessages() []Message {
 	return []Message{
-		&ListBoards{TrackID: "mhk3.rome", EngineClass: AnyEngineClass, SimVersion: 7},
-		&BoardInfo{BoardID: 1, TrackID: "mhk3.rome", EngineClass: 2, Laps: 3, SimVersion: 7,
+		&ListBoards{TrackID: "mhk3.rome", EngineClass: AnyEngineClass, ContentVersion: 7},
+		&BoardInfo{BoardID: 1, TrackID: "mhk3.rome", EngineClass: 2, Laps: 3, ContentVersion: 7,
 			TrackHash: "ffeeddccbbaa99887766554433221100", Players: 12, BestMs: 90_000, LastUpload: when},
 		&BoardList{Boards: []BoardInfo{{BoardID: 1, TrackID: "a", LastUpload: when}, {BoardID: 2, TrackID: "b"}}},
 		new(sampleRun(5)),

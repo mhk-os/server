@@ -99,7 +99,7 @@ func newMemStore() *memStore {
 }
 
 func vkey(v store.PackVersion) string {
-	return strings.ToLower(v.PackID) + "\x00" + strings.ToLower(v.Commit) + "\x00" + string(rune(v.SimVersion))
+	return strings.ToLower(v.PackID) + "\x00" + strings.ToLower(v.Commit) + "\x00" + string(rune(v.ContentVersion))
 }
 
 func (s *memStore) HasManifest(_ context.Context, v store.PackVersion, hash string) (bool, error) {
@@ -167,11 +167,11 @@ func (s *memStore) strikeCount() int {
 	return len(s.strikes)
 }
 
-const sim = 7
+const contentVersion = 7
 
 // pack builds a manifest of pack "mhk2" at commit "v1" whose items are the given track ids (kind 1).
 func pack(tracks ...string) proto.PackManifest {
-	m := proto.PackManifest{PackID: "mhk2", Commit: "v1", SimVersion: sim}
+	m := proto.PackManifest{PackID: "mhk2", Commit: "v1", ContentVersion: contentVersion}
 	for _, t := range tracks {
 		m.Items = append(m.Items, proto.ManifestItem{Kind: proto.ContentTrack, ID: t, Fingerprint: "f"})
 	}
@@ -191,7 +191,7 @@ func announce(t *testing.T, c *Catalog, id uint64, ms ...proto.PackManifest) *pr
 	for i, m := range ms {
 		refs[i] = ref(m)
 	}
-	res, err := c.Hello(ctx, id, id, sim, refs)
+	res, err := c.Hello(ctx, id, id, contentVersion, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestMajorityAndStrikes(t *testing.T) {
 	}
 	// A brand-new (unknown) hash is struck at once: its manifest is still owed.
 	odd := pack("mhk2.odd")
-	res, err := c.Hello(context.Background(), 5, 5, sim, []proto.PackRef{ref(odd)})
+	res, err := c.Hello(context.Background(), 5, 5, contentVersion, []proto.PackRef{ref(odd)})
 	if err != nil || len(res.Missing) != 1 || len(res.Strikes) != 1 {
 		t.Fatalf("unknown hash: %+v %v", res, err)
 	}
@@ -334,7 +334,7 @@ func TestHelloAndManifestValidation(t *testing.T) {
 		"duplicate pack": {ref(m), {PackID: "MHK2", ManifestHash: m.ManifestHash}},
 		"control commit": {{PackID: "mhk2", Commit: "a\nb", ManifestHash: m.ManifestHash}},
 	} {
-		_, err := c.Hello(ctx, 1, 1, sim, refs)
+		_, err := c.Hello(ctx, 1, 1, contentVersion, refs)
 		if err == nil {
 			t.Errorf("%s accepted", name)
 			continue
@@ -345,7 +345,7 @@ func TestHelloAndManifestValidation(t *testing.T) {
 
 	upper := ref(m)
 	upper.ManifestHash = strings.ToUpper(upper.ManifestHash)
-	res, err := c.Hello(ctx, 1, 1, sim, []proto.PackRef{upper})
+	res, err := c.Hello(ctx, 1, 1, contentVersion, []proto.PackRef{upper})
 	if err != nil || len(res.Missing) != 1 {
 		t.Fatal(res, err)
 	}
@@ -387,7 +387,7 @@ func TestRaceStrike(t *testing.T) {
 		t.Fatal("no strike stored")
 	}
 	k := st.strikes[0]
-	if k.Commit != "v1" || k.SimVersion != sim || k.ManifestHash != m.ManifestHash || len(k.Reason) != 255 {
+	if k.Commit != "v1" || k.ContentVersion != contentVersion || k.ManifestHash != m.ManifestHash || len(k.Reason) != 255 {
 		t.Fatalf("strike %+v", k)
 	}
 }

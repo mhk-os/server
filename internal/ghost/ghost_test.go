@@ -20,7 +20,7 @@ func TestParseValid(t *testing.T) {
 	}
 	h := s.Header
 	if h.ID != g.Header.ID || h.TrackID != "test.track" || h.KartID != "test.kart" || h.Laps != 3 ||
-		h.EngineClass != 2 || h.SimVersion != 4 || h.PlayerName != "Test Driver" || h.FrameCount != g.Header.FrameCount {
+		h.EngineClass != 2 || h.ContentVersion != 4 || h.PlayerName != "Test Driver" || h.FrameCount != g.Header.FrameCount {
 		t.Fatalf("header %+v", h)
 	}
 	if s.FinishMs != 90_500 || s.BestLapMs != 29_500 || len(s.LapMs) != 3 || s.LapMs[2] != 30_500 {

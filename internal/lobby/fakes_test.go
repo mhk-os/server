@@ -180,10 +180,10 @@ func newFakeCatalog() *fakeCatalog {
 
 var allPacks = []string{"game", "mhk2", "mhk3", "mhke", "mhkt"}
 
-func (c *fakeCatalog) announce(id uint64, sim int32, packs ...string) {
+func (c *fakeCatalog) announce(id uint64, contentVersion int32, packs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	a := content.Announcement{SimVersion: sim, Packs: map[string]proto.PackRef{}}
+	a := content.Announcement{ContentVersion: contentVersion, Packs: map[string]proto.PackRef{}}
 	for _, p := range packs {
 		a.Packs[strings.ToLower(p)] = proto.PackRef{PackID: p, Commit: "v1", ManifestHash: strings.Repeat("a", 32)}
 	}
@@ -208,6 +208,8 @@ func (c *fakeCatalog) Differs(id uint64, pack string) bool {
 func (c *fakeCatalog) Has(id uint64, pack string, kind uint8, item string) bool {
 	return slices.ContainsFunc(c.Items(id, pack, kind), func(x string) bool { return strings.EqualFold(x, item) })
 }
+
+func (c *fakeCatalog) Overrides(content.Announcement) []content.Override { return nil }
 
 func (c *fakeCatalog) Items(id uint64, pack string, kind uint8) []string {
 	c.mu.Lock()
@@ -328,7 +330,7 @@ type env struct {
 	scores *fakeScores
 }
 
-const testSim = 7
+const testContentVersion = 7
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
@@ -351,7 +353,7 @@ func newEnv(t *testing.T) *env {
 
 // player returns a player with the default content announced.
 func (e *env) player(id uint64) Player {
-	e.cat.announce(id, testSim, allPacks...)
+	e.cat.announce(id, testContentVersion, allPacks...)
 	return Player{AccountID: id, Username: fmt.Sprintf("p%d", id), Country: "DE"}
 }
 

@@ -31,6 +31,7 @@ const (
 	reportWindow      = 15 * time.Second
 	strikeWindow      = 30 * time.Second
 	strikesToKick     = 5
+	maxStoredReports  = 100 // per reporter and race: bounds what a flooding client writes to cheat_reports
 	hitGrace          = 300 * time.Millisecond
 	finishTolerance   = time.Second
 	zeroHealthLimit   = 2 * time.Second
@@ -56,6 +57,7 @@ type env interface {
 	going(raceID uint64)
 	finished(raceID uint64, placements []Placement)
 	cheatKick(k store.CheatKick)
+	cheatReport(r store.CheatReport)
 }
 
 type phase uint8
@@ -852,22 +854,24 @@ func (rs *raceState) tickBridges(now time.Time) {
 
 // --- anticheat reports, unknown content ---
 
+// onCheatReport stores every report about another racer (moderators review races where nobody could be kicked)
+// and counts it towards a kick when reportIgnored allows.
 func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Time) {
-	if !rs.spec.Anticheat || !rs.arbitrated() || !m.Reason.Valid() {
-		rs.debug("cheat report ignored (anticheat off, not racing or bad reason)", rep, "suspect", m.SuspectSlot,
-			"reason", uint8(m.Reason))
+	suspect := rs.seatAt(m.SuspectSlot)
+	if suspect == nil || suspect == rep {
+		rs.debug("cheat report about nobody", rep, "suspect", m.SuspectSlot)
 		return
 	}
-	suspect := rs.seatAt(m.SuspectSlot)
-	if suspect == nil || suspect == rep || suspect.out || !rs.eligible(rep) || !rs.rttOK(suspect) {
-		if rs.debugging() {
-			args := []any{"suspect", m.SuspectSlot, "reporterEligible", rs.eligible(rep), "reporterRttMs", rep.rttMs(),
-				"everKicked", rep.everKicked}
-			if suspect != nil {
-				args = append(args, "suspectRttMs", suspect.rttMs(), "suspectOut", suspect.out)
-			}
-			rs.debug("cheat report not counted", rep, args...)
-		}
+	ignored := rs.reportIgnored(rep, suspect, m.Reason)
+	if rep.storedReports < maxStoredReports {
+		rep.storedReports++
+		rs.env.cheatReport(store.CheatReport{LobbyRef: formatID(rs.spec.LobbyID), RaceRef: formatID(rs.id),
+			ReporterID: rep.racer.AccountID, SuspectID: suspect.racer.AccountID, Reason: m.Reason.String(),
+			Detail: strings.ToValidUTF8(m.Detail, "?"), Counted: ignored == "", Note: ignored, CreatedAt: now})
+	}
+	if ignored != "" {
+		rs.debug("cheat report not counted", rep, "suspect", suspect.slot, "reason", m.Reason.String(), "why", ignored,
+			"reporterRttMs", rep.rttMs(), "suspectRttMs", suspect.rttMs())
 		return
 	}
 	votes := rs.reports[suspect.slot]
@@ -897,6 +901,30 @@ func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Tim
 	why := slices.Sorted(maps.Keys(reasons))
 	delete(rs.reports, suspect.slot)
 	rs.kickCheater(suspect, "cheat reports: "+strings.Join(why, ", "), strings.Join(reporters, ","), now)
+}
+
+// reportIgnored returns why a cheat report does not count, "" when it does. Speed and acceleration reports count
+// whatever the suspect's ping: latency does not change those magnitudes, and a faked ping must not shield them.
+func (rs *raceState) reportIgnored(rep, suspect *seat, reason proto.FlagReason) string {
+	switch {
+	case !rs.spec.Anticheat:
+		return "anticheat off"
+	case !rs.arbitrated():
+		return "race not running"
+	case !reason.Valid():
+		return "unknown reason"
+	case suspect.out:
+		return "suspect out of the race"
+	case rep.out:
+		return "reporter out of the race"
+	case rep.everKicked:
+		return "reporter was kicked for cheating"
+	case !rs.rttOK(rep):
+		return "reporter ping unknown or over 200 ms"
+	case !rs.rttOK(suspect) && reason != proto.FlagSpeed && reason != proto.FlagAcceleration:
+		return "suspect ping unknown or over 200 ms"
+	}
+	return ""
 }
 
 func (rs *raceState) onUnknownContent(rep *seat, m *proto.UnknownContent, now time.Time) {

@@ -28,17 +28,17 @@ func sampleRow(slot uint8) RaceResultRow {
 func lobbyMessages() []Message {
 	summary := LobbySummary{LobbyID: 4, Kind: LobbyPublic, Category: 3, Instance: 2, Name: "Races #2",
 		Mode: RoomRaceSet, Anticheat: true, Packs: []string{"mhk2", "mhk3"}, Players: 3, MaxPlayers: 10,
-		Phase: PhaseVoting, SimVersion: 7, EngineClass: 2, SetRace: 3, SetSize: 4}
+		Phase: PhaseVoting, ContentVersion: 7, EngineClass: 2, SetRace: 3, SetSize: 4}
 	member := LobbyMember{AccountID: 1, Username: "Hans", Country: "DE", CharacterID: "mhk2.char.huhn",
 		KartID: "mhk2.kart.speedy", Ready: true, Owner: true, Moderator: true, InRace: true, PingMs: 48,
 		SetPoints: 37, Joined: when, Platform: PlatformMacOS}
 	return []Message{
 		&PackRef{PackID: "mhk2", Commit: "v1.2", ManifestHash: "00112233445566778899aabbccddeeff"},
-		&ContentHello{SimVersion: 7, Packs: []PackRef{{"game", "abc", "ff"}, {"mhk2", "", "00"}}},
-		&ContentHello{SimVersion: -1, Packs: []PackRef{}},
+		&ContentHello{ContentVersion: 7, Packs: []PackRef{{"game", "abc", "ff"}, {"mhk2", "", "00"}}},
+		&ContentHello{ContentVersion: -1, Packs: []PackRef{}},
 		&ContentHelloResult{Missing: []string{"aa", "bb"}, Strikes: []ContentStrike{{"mhk3", "differs"}}},
 		&ContentHelloResult{Missing: []string{}, Strikes: []ContentStrike{}},
-		&PackManifest{PackID: "mhk2", Commit: "c", SimVersion: 7, ManifestHash: "h",
+		&PackManifest{PackID: "mhk2", Commit: "c", ContentVersion: 7, ManifestHash: "h",
 			Items: []ManifestItem{{ContentTrack, "mhk2.rome", "f1"}, {ContentArena, "mhk2.arena", ""}}},
 		&ContentManifests{Manifests: []PackManifest{{PackID: "p", Items: []ManifestItem{}}}},
 		new(sampleSettings()),
@@ -108,7 +108,7 @@ func TestLobbyMemberBytes(t *testing.T) {
 
 func TestLobbySummaryBytes(t *testing.T) {
 	s := LobbySummary{LobbyID: 1, Kind: LobbyPrivate, Category: 0, Instance: 2, Name: "n", Mode: RoomBattleSet,
-		Anticheat: true, Packs: []string{"p"}, Players: 3, MaxPlayers: 4, Phase: PhaseResults, SimVersion: -5,
+		Anticheat: true, Packs: []string{"p"}, Players: 3, MaxPlayers: 4, Phase: PhaseResults, ContentVersion: -5,
 		EngineClass: 1, SetRace: 2, SetSize: 16}
 	le := binary.LittleEndian
 	want := le.AppendUint64(nil, 1)

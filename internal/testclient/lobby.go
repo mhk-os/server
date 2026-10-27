@@ -6,10 +6,12 @@ import (
 	"github.com/mhk-os/server/internal/proto"
 )
 
-// ContentHello announces packs for simVersion (which must equal the Hello's).
-func (c *Client) ContentHello(ctx context.Context, sim int32, packs []proto.PackRef) (*proto.ContentHelloResult, error) {
+// ContentHello announces packs for contentVersion (which must equal the Hello's).
+func (c *Client) ContentHello(ctx context.Context, contentVersion int32, packs []proto.PackRef) (
+	*proto.ContentHelloResult, error) {
 	var res proto.ContentHelloResult
-	if err := c.Request(ctx, proto.TypeContentHello, &proto.ContentHello{SimVersion: sim, Packs: packs}, &res); err != nil {
+	req := &proto.ContentHello{ContentVersion: contentVersion, Packs: packs}
+	if err := c.Request(ctx, proto.TypeContentHello, req, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

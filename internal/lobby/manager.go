@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -73,6 +74,7 @@ type Catalog interface {
 	Differs(accountID uint64, packID string) bool
 	Has(accountID uint64, packID string, kind uint8, id string) bool
 	Items(accountID uint64, packID string, kind uint8) []string
+	Overrides(ann content.Announcement) []content.Override
 }
 
 // Auditor writes the moderation audit log (store.Store).
@@ -125,15 +127,16 @@ type member struct {
 func (m *member) hasLoadout() bool { return m.character != "" && m.kart != "" }
 
 type lobby struct {
-	id       uint64
-	public   bool
-	category uint8
-	instance uint16
-	sim      int32
-	code     string
-	settings proto.RoomSettings
-	members  []*member // join order: members[0] is the longest present
-	owner    uint64    // private rooms
+	id             uint64
+	public         bool
+	category       uint8
+	instance       uint16
+	contentVersion int32
+	set            contentSet // anticheat lobbies: what every member announces; nil otherwise
+	code           string
+	settings       proto.RoomSettings
+	members        []*member // join order: members[0] is the longest present
+	owner          uint64    // private rooms
 
 	phase   uint8
 	ends    time.Time // zero = no timer
@@ -179,10 +182,51 @@ func (l *lobby) trackKind() uint8 {
 	return proto.ContentTrack
 }
 
+// instanceKey groups the public instances players are matched into: anticheat categories also by content set.
 type instanceKey struct {
-	category uint8
-	sim      int32
+	category       uint8
+	contentVersion int32
+	set            string // contentSet.String()
 }
+
+func (l *lobby) key() instanceKey { return instanceKey{l.category, l.contentVersion, l.set.String()} }
+
+// publicKey returns the instance key of category cat for an announcement and the content set of its instances.
+func publicKey(cat uint8, ann content.Announcement) (instanceKey, contentSet) {
+	var set contentSet
+	if categories[cat].anticheat {
+		set = setOf(ann, categories[cat].packs)
+	}
+	return instanceKey{cat, ann.ContentVersion, set.String()}, set
+}
+
+// contentSet is the manifest hash of each lobby pack and of the game pack, by lowercase pack id ("" = not
+// announced). Every member of an anticheat lobby announces the same.
+type contentSet map[string]string
+
+func setOf(ann content.Announcement, packs []string) contentSet {
+	s := contentSet{}
+	for _, pack := range withGame(packs) {
+		ref, _ := ann.Pack(pack)
+		s[strings.ToLower(pack)] = ref.ManifestHash
+	}
+	return s
+}
+
+// String is the canonical form instances are keyed by; "" for nil.
+func (s contentSet) String() string {
+	var b strings.Builder
+	for _, pack := range slices.Sorted(maps.Keys(s)) {
+		b.WriteString(pack)
+		b.WriteByte('=')
+		b.WriteString(s[pack])
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+// withGame returns the game pack followed by packs.
+func withGame(packs []string) []string { return append([]string{gamePack}, packs...) }
 
 // Manager owns every lobby.
 type Manager struct {
@@ -298,13 +342,13 @@ func (m *Manager) isContent(packs []string, accountID uint64, kind uint8, id str
 	return m.cfg.Catalog.Has(accountID, pack, kind, id)
 }
 
-// checkContent applies the content rules of joining: same simulation, every pack enabled, and in anticheat
-// lobbies no pack that differs from the catalog majority.
-func (m *Manager) checkContent(p Player, ann content.Announcement, sim int32, packs []string, anticheat bool) error {
-	if ann.SimVersion != sim {
+// checkContent applies the content rules of every lobby: same content version, every pack enabled, and no pack
+// replacing an item of a lobby pack or of the game pack.
+func (m *Manager) checkContent(ann content.Announcement, contentVersion int32, packs []string) error {
+	if ann.ContentVersion != contentVersion {
 		return errorf(proto.StatusBadRequest,
-			"This lobby runs another game version (simulation %d, yours %d). Please update the game.", sim,
-			ann.SimVersion)
+			"This lobby runs another game version (content version %d, yours %d). Please update the game.",
+			contentVersion, ann.ContentVersion)
 	}
 	var missing []string
 	for _, pack := range packs {
@@ -315,18 +359,53 @@ func (m *Manager) checkContent(p Player, ann content.Announcement, sim int32, pa
 	if len(missing) > 0 {
 		return errorf(proto.StatusBadRequest, "Missing content packs: %s.", strings.Join(missing, ", "))
 	}
-	if anticheat {
-		for _, pack := range packs {
-			if m.cfg.Catalog.Differs(p.AccountID, pack) {
-				return errorf(proto.StatusForbidden, "Your copy of %s differs from other players'.", pack)
-			}
+	var mods, ids []string
+	n := 0
+	for _, o := range m.cfg.Catalog.Overrides(ann) {
+		if !hasPack(withGame(packs), content.PackOf(o.ID)) {
+			continue
+		}
+		n++
+		if !slices.Contains(mods, o.Pack) {
+			mods = append(mods, o.Pack)
+		}
+		if len(ids) < 3 {
+			ids = append(ids, o.ID)
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	more := ""
+	if n > len(ids) {
+		more = fmt.Sprintf(" and %d more", n-len(ids))
+	}
+	return errorf(proto.StatusBadRequest, "%s replaces content of this lobby (%s%s). Everybody must race with the "+
+		"same content: disable it on the Mods screen to join.", strings.Join(mods, ", "), strings.Join(ids, ", "), more)
+}
+
+// checkAnticheat applies the content rules of anticheat lobbies: no lobby pack (nor the game pack) differing from
+// the catalog majority, and the lobby's content set when it has one.
+func (m *Manager) checkAnticheat(p Player, ann content.Announcement, packs []string, set contentSet) error {
+	for _, pack := range withGame(packs) {
+		if m.cfg.Catalog.Differs(p.AccountID, pack) {
+			return errorf(proto.StatusForbidden, "Your copy of %s differs from other players'.", pack)
+		}
+	}
+	if set == nil {
+		return nil
+	}
+	for _, pack := range withGame(packs) {
+		if ref, _ := ann.Pack(pack); ref.ManifestHash != set[strings.ToLower(pack)] {
+			return errorf(proto.StatusForbidden,
+				"Your version of %s differs from this lobby's (update your mods or pick another lobby).", pack)
 		}
 	}
 	return nil
 }
 
 func (m *Manager) checkJoin(l *lobby, p Player, ann content.Announcement) error {
-	if err := m.checkContent(p, ann, l.sim, l.settings.Packs, false); err != nil {
+	if err := m.checkContent(ann, l.contentVersion, l.settings.Packs); err != nil {
 		return err
 	}
 	if until, ok := l.bans[p.AccountID]; ok {
@@ -338,7 +417,10 @@ func (m *Manager) checkJoin(l *lobby, p Player, ann content.Announcement) error 
 	if l.full() {
 		return errorf(proto.StatusForbidden, "This lobby is full.")
 	}
-	return m.checkContent(p, ann, l.sim, l.settings.Packs, l.settings.Anticheat)
+	if !l.settings.Anticheat {
+		return nil
+	}
+	return m.checkAnticheat(p, ann, l.settings.Packs, l.set)
 }
 
 // ---- state pushes ----
@@ -347,7 +429,7 @@ func (m *Manager) summary(l *lobby) proto.LobbySummary {
 	s := proto.LobbySummary{
 		LobbyID: l.id, Kind: proto.LobbyPrivate, Name: l.settings.Name, Mode: l.settings.Mode,
 		Anticheat: l.settings.Anticheat, Packs: l.settings.Packs, Players: uint8(len(l.members)),
-		MaxPlayers: l.settings.MaxPlayers, Phase: l.phase, SimVersion: l.sim,
+		MaxPlayers: l.settings.MaxPlayers, Phase: l.phase, ContentVersion: l.contentVersion,
 		EngineClass: l.settings.EngineClass, SetRace: l.setRace, SetSize: l.setSize(),
 	}
 	if l.public {
@@ -495,7 +577,7 @@ func (m *Manager) endVoting(l *lobby) {
 // loadout (the racers of the next race), "" when there is none.
 func (m *Manager) randomTrack(l *lobby) string {
 	kind := l.trackKind()
-	packs := append([]string{gamePack}, l.settings.Packs...)
+	packs := withGame(l.settings.Packs)
 	var common map[string]string // lowercase id → id
 	for _, mem := range l.members {
 		if !mem.hasLoadout() {
@@ -674,7 +756,7 @@ func (m *Manager) settle(l *lobby, raceID uint64, placements []race.Placement) [
 	case len(l.members) == 0:
 		m.idle(l)
 		if l.public {
-			m.rebalance(instanceKey{l.category, l.sim})
+			m.rebalance(l.key(), l.set)
 		}
 		return results
 	case solo:
@@ -702,9 +784,9 @@ func (m *Manager) settle(l *lobby, raceID uint64, placements []race.Placement) [
 
 // ---- membership ----
 
-func (m *Manager) newLobby(sim int32, settings proto.RoomSettings) *lobby {
+func (m *Manager) newLobby(contentVersion int32, settings proto.RoomSettings) *lobby {
 	m.nextID++
-	l := &lobby{id: m.nextID, sim: sim, settings: settings, bans: map[uint64]time.Time{}}
+	l := &lobby{id: m.nextID, contentVersion: contentVersion, settings: settings, bans: map[uint64]time.Time{}}
 	m.lobbies[l.id] = l
 	return l
 }
@@ -720,7 +802,7 @@ func (m *Manager) closeLobby(l *lobby) {
 		delete(m.codes, l.code)
 	}
 	if l.public {
-		key := instanceKey{l.category, l.sim}
+		key := l.key()
 		m.instances[key] = slices.DeleteFunc(m.instances[key], func(x *lobby) bool { return x == l })
 		if len(m.instances[key]) == 0 {
 			delete(m.instances, key)
@@ -734,9 +816,9 @@ func (m *Manager) closeLobby(l *lobby) {
 	l.members = nil
 }
 
-// rebalance keeps the public instances of a category: empty instances close while another one has room, and when
-// none has room a new one opens.
-func (m *Manager) rebalance(key instanceKey) {
+// rebalance keeps the public instances under a key: empty instances close while another one has room, and when
+// none has room a new one opens (with the key's content set).
+func (m *Manager) rebalance(key instanceKey, set contentSet) {
 	list := m.instances[key]
 	for i := len(list) - 1; i >= 0; i-- {
 		l := list[i]
@@ -755,10 +837,10 @@ func (m *Manager) rebalance(key instanceKey) {
 			return
 		}
 	}
-	m.openInstance(key)
+	m.openInstance(key, set)
 }
 
-func (m *Manager) openInstance(key instanceKey) *lobby {
+func (m *Manager) openInstance(key instanceKey, set contentSet) *lobby {
 	list := m.instances[key]
 	number := uint16(1)
 	for _, l := range list { // sorted: the first gap is the lowest free number
@@ -767,8 +849,8 @@ func (m *Manager) openInstance(key instanceKey) *lobby {
 		}
 		number++
 	}
-	l := m.newLobby(key.sim, publicSettings(key.category))
-	l.public, l.category, l.instance = true, key.category, number
+	l := m.newLobby(key.contentVersion, publicSettings(key.category))
+	l.public, l.category, l.instance, l.set = true, key.category, number, set
 	i, _ := slices.BinarySearchFunc(list, number, func(x *lobby, n uint16) int { return int(x.instance) - int(n) })
 	m.instances[key] = slices.Insert(list, i, l)
 	return l
@@ -800,7 +882,7 @@ func (m *Manager) join(l *lobby, p Player) *proto.LobbyState {
 		if l.phase == proto.PhaseWaiting && len(l.members) >= 2 {
 			m.startVoting(l)
 		}
-		m.rebalance(instanceKey{l.category, l.sim})
+		m.rebalance(l.key(), l.set)
 	}
 	m.broadcast(l, p.AccountID)
 	return m.state(l)
@@ -848,7 +930,7 @@ func (m *Manager) removeMember(l *lobby, accountID uint64, reason uint8, message
 		m.endVoting(l)
 	}
 	if l.public {
-		m.rebalance(instanceKey{l.category, l.sim})
+		m.rebalance(l.key(), l.set)
 	}
 	m.broadcast(l, 0)
 }
@@ -867,8 +949,8 @@ func (m *Manager) newCode() string {
 
 // ---- requests ----
 
-// List returns the public instances of every category for the caller's simulation version, opening the first
-// instance of a category when it has none.
+// List returns the public instances of every category for the caller's content version (in anticheat categories,
+// those of the caller's content set), opening the first instance of a category when it has none.
 func (m *Manager) List(p Player) ([]proto.LobbySummary, error) {
 	ann, err := m.announced(p)
 	if err != nil {
@@ -878,8 +960,8 @@ func (m *Manager) List(p Player) ([]proto.LobbySummary, error) {
 	defer m.mu.Unlock()
 	var out []proto.LobbySummary
 	for cat := uint8(minCategory); cat <= maxCategory; cat++ {
-		key := instanceKey{cat, ann.SimVersion}
-		m.rebalance(key)
+		key, set := publicKey(cat, ann)
+		m.rebalance(key, set)
 		for _, l := range m.instances[key] {
 			// The list is capped by the protocol; 500 instances would mean thousands of players per category.
 			if len(out) < proto.MaxLobbies {
@@ -916,8 +998,8 @@ func (m *Manager) Join(p Player, lobbyID uint64, code string) (*proto.LobbyState
 	return m.join(l, p), nil
 }
 
-// QuickJoin enters the fullest public instance of a category that has room (and that the caller may join: a
-// kick ban from one instance falls through to the next).
+// QuickJoin enters the fullest public instance of a category (of the caller's content set in anticheat categories)
+// that has room and that the caller may join: a kick ban from one instance falls through to the next.
 func (m *Manager) QuickJoin(p Player, cat uint8) (*proto.LobbyState, error) {
 	if cat < minCategory || cat > maxCategory {
 		return nil, errorf(proto.StatusBadRequest, "Unknown lobby category %d.", cat)
@@ -928,8 +1010,8 @@ func (m *Manager) QuickJoin(p Player, cat uint8) (*proto.LobbyState, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := instanceKey{cat, ann.SimVersion}
-	m.rebalance(key)
+	key, set := publicKey(cat, ann)
+	m.rebalance(key, set)
 	candidates := slices.Clone(m.instances[key])
 	if cur := m.byAccount[p.AccountID]; cur != nil && slices.Contains(candidates, cur) {
 		return m.state(cur), nil
@@ -982,8 +1064,13 @@ func (m *Manager) validateSettings(p Player, ann content.Announcement, s proto.R
 			return bad("Pack %q is listed twice or empty.", pack)
 		}
 	}
-	if err := m.checkContent(p, ann, ann.SimVersion, s.Packs, s.Anticheat); err != nil {
+	if err := m.checkContent(ann, ann.ContentVersion, s.Packs); err != nil {
 		return s, err
+	}
+	if s.Anticheat {
+		if err := m.checkAnticheat(p, ann, s.Packs, nil); err != nil {
+			return s, err
+		}
 	}
 	seen := map[string]bool{}
 	for _, o := range s.ItemOdds {
@@ -1005,7 +1092,7 @@ func (m *Manager) validateSettings(p Player, ann content.Announcement, s proto.R
 	return s, nil
 }
 
-// CreateRoom opens a private room owned by the caller.
+// CreateRoom opens a private room owned by the caller; an anticheat room keeps the caller's content set.
 func (m *Manager) CreateRoom(p Player, settings proto.RoomSettings) (*proto.LobbyState, error) {
 	ann, err := m.announced(p)
 	if err != nil {
@@ -1017,15 +1104,19 @@ func (m *Manager) CreateRoom(p Player, settings proto.RoomSettings) (*proto.Lobb
 	if err != nil {
 		return nil, err
 	}
-	l := m.newLobby(ann.SimVersion, s)
+	l := m.newLobby(ann.ContentVersion, s)
+	if s.Anticheat {
+		l.set = setOf(ann, s.Packs)
+	}
 	l.code = m.newCode()
 	m.codes[l.code] = l
 	return m.join(l, p), nil
 }
 
 // UpdateRoom changes the settings of the caller's room while it waits. Every member must be able to stay: the
-// update is refused when one lacks a new pack (or holds a differing copy in an anticheat room) or when the room
-// would be over its new size. Loadouts that stop being room content are cleared.
+// update is refused when one lacks a new pack, runs a mod replacing content of one, or (anticheat rooms, whose
+// content set becomes the owner's) holds a differing copy, or when the room would be over its new size. Loadouts
+// that stop being room content are cleared.
 func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 	ann, err := m.announced(p)
 	if err != nil {
@@ -1049,12 +1140,20 @@ func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 	if len(l.members) > int(s.MaxPlayers) {
 		return errorf(proto.StatusBadRequest, "The room has %d players, more than %d.", len(l.members), s.MaxPlayers)
 	}
+	var set contentSet
+	if s.Anticheat {
+		set = setOf(ann, s.Packs)
+	}
 	for _, mem := range l.members {
 		mann, ok := m.cfg.Catalog.Announced(mem.AccountID)
 		if !ok {
 			return errorf(proto.StatusBadRequest, "%s has not announced their content.", mem.Username)
 		}
-		if err := m.checkContent(mem.Player, mann, l.sim, s.Packs, s.Anticheat); err != nil {
+		err := m.checkContent(mann, l.contentVersion, s.Packs)
+		if err == nil && s.Anticheat {
+			err = m.checkAnticheat(mem.Player, mann, s.Packs, set)
+		}
+		if err != nil {
 			msg := err.Error()
 			if se := (*server.StatusError)(nil); errors.As(err, &se) {
 				msg = se.Message
@@ -1062,7 +1161,7 @@ func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 			return errorf(proto.StatusBadRequest, "%s cannot play with these settings: %s", mem.Username, msg)
 		}
 	}
-	l.settings = s
+	l.settings, l.set = s, set
 	for _, mem := range l.members {
 		if mem.character != "" && !m.isContent(s.Packs, mem.AccountID, proto.ContentCharacter, mem.character) {
 			mem.character = ""
@@ -1084,13 +1183,28 @@ func (m *Manager) Leave(accountID uint64) {
 	}
 }
 
-// SetLoadout chooses the caller's character and kart ("" clears); both must be lobby content.
+// SetLoadout chooses the caller's character and kart ("" clears); both must be lobby content, and the caller's
+// content must still pass the lobby's content rules.
 func (m *Manager) SetLoadout(p Player, character, kart string) error {
+	ann, err := m.announced(p)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l := m.byAccount[p.AccountID]
 	if l == nil {
 		return errNotInLobby
+	}
+	if character != "" || kart != "" {
+		if err := m.checkContent(ann, l.contentVersion, l.settings.Packs); err != nil {
+			return err
+		}
+		if l.settings.Anticheat {
+			if err := m.checkAnticheat(p, ann, l.settings.Packs, l.set); err != nil {
+				return err
+			}
+		}
 	}
 	if character != "" && !m.isContent(l.settings.Packs, p.AccountID, proto.ContentCharacter, character) {
 		return errorf(proto.StatusBadRequest, "%s is not a character of this lobby.", character)

@@ -97,7 +97,7 @@ func (s *Server) handleListBoards(ctx context.Context, _ *Conn, r *wire.Reader) 
 	if err := req.Decode(r); err != nil {
 		return nil, err
 	}
-	f := store.BoardFilter{TrackID: req.TrackID, SimVersion: req.SimVersion, Limit: proto.MaxBoards}
+	f := store.BoardFilter{TrackID: req.TrackID, ContentVersion: req.ContentVersion, Limit: proto.MaxBoards}
 	if req.EngineClass != proto.AnyEngineClass {
 		f.EngineClass = &req.EngineClass
 	}
@@ -108,7 +108,7 @@ func (s *Server) handleListBoards(ctx context.Context, _ *Conn, r *wire.Reader) 
 	out := &proto.BoardList{Boards: make([]proto.BoardInfo, len(boards))}
 	for i, b := range boards {
 		out.Boards[i] = proto.BoardInfo{
-			BoardID: b.ID, TrackID: b.TrackID, EngineClass: b.EngineClass, Laps: b.Laps, SimVersion: b.SimVersion,
+			BoardID: b.ID, TrackID: b.TrackID, EngineClass: b.EngineClass, Laps: b.Laps, ContentVersion: b.ContentVersion,
 			TrackHash: b.TrackHash, Players: b.Players, BestMs: b.BestMs,
 		}
 		if b.LastUpload != nil {
@@ -192,6 +192,10 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	if res, err := s.existingUpload(ctx, acct, sum.ID); res != nil || err != nil {
 		return res, err
 	}
+	if err := s.deps.Content.RunContent(ctx, c, acct.ID, sum.KartID, sum.CharacterID, sum.TrackID); err != nil {
+		c.log.Info("run refused", "kart", sum.KartID, "character", sum.CharacterID, "track", sum.TrackID, "err", err)
+		return nil, err
+	}
 	hash, err := s.deps.Blobs.Put(req.File)
 	if err != nil {
 		return nil, err
@@ -199,7 +203,7 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	run := &store.Run{
 		AccountID: acct.ID, GhostID: sum.ID, TrackID: sum.TrackID, TrackPackID: sum.TrackPackID, KartID: sum.KartID,
 		CharacterID: sum.CharacterID, EngineClass: uint8(sum.EngineClass), Laps: uint8(sum.Laps),
-		SimVersion: sum.SimVersion, TrackHash: sum.TrackHash, SetupHash: sum.SetupHash,
+		ContentVersion: sum.ContentVersion, TrackHash: sum.TrackHash, SetupHash: sum.SetupHash,
 		GameBuild: storedLabel(sum.GameBuild, maxStoredGameBuild), FinishMs: sum.FinishMs, BestLapMs: sum.BestLapMs,
 		LapMs: sum.LapMs, FrameCount: sum.FrameCount, RecordedAt: sum.Recorded, UploadedAt: now, Blob: hash,
 		FileSize: uint32(len(req.File)),

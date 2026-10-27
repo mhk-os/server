@@ -13,7 +13,8 @@ var when = time.UnixMilli(1_761_000_000_123).UTC()
 
 func messages() []Message {
 	list := []Message{
-		&Hello{Magic: Magic, Protocol: Version, GameCommit: "abc123", GameBuild: 42, SimVersion: 3, ModAPI: 1, Platform: "WindowsPlayer"},
+		&Hello{Magic: Magic, Protocol: Version, GameCommit: "abc123", GameBuild: 42, ContentVersion: 3, ModAPI: 1,
+			Platform: "WindowsPlayer"},
 		&HelloOk{Protocol: Version, ServerVersion: "v1.0.0", UDPPort: 7350, ServerTime: when},
 		&Ping{ClientTime: when},
 		&Pong{ClientTime: when, ServerTime: when.Add(time.Second)},
@@ -52,13 +53,13 @@ func TestRoundTrips(t *testing.T) {
 
 // TestHelloBytes pins the exact encoding so the C# codec can assert the same bytes.
 func TestHelloBytes(t *testing.T) {
-	h := &Hello{Magic: Magic, Protocol: 1, GameCommit: "ab", GameBuild: 2, SimVersion: 3, ModAPI: 4, Platform: "W"}
+	h := &Hello{Magic: Magic, Protocol: 1, GameCommit: "ab", GameBuild: 2, ContentVersion: 3, ModAPI: 4, Platform: "W"}
 	want := []byte{
 		'M', 'H', 'K', 'O', // magic
 		0x01, 0x00, // protocol
 		0x02, 'a', 'b', // gameCommit
 		0x02, 0, 0, 0, // gameBuild
-		0x03, 0, 0, 0, // simVersion
+		0x03, 0, 0, 0, // contentVersion
 		0x04, 0, 0, 0, // modApi
 		0x01, 'W', // platform
 	}

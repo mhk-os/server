@@ -26,6 +26,7 @@ type Store interface {
 	store.Profiles
 	ContentStrikes(ctx context.Context, accountID uint64, limit int) ([]store.ContentStrike, error)
 	CheatKicks(ctx context.Context, accountID uint64, limit int) ([]store.CheatKickView, error)
+	CheatReports(ctx context.Context, accountID uint64, limit int) ([]store.CheatReportView, error)
 }
 
 // Env is passed to every command.
@@ -56,7 +57,8 @@ func usageErr(format string, args ...any) error {
 // Root is the command tree. Lobbies live in the server's memory, so the CLI has no lobby commands.
 var Root = &Command{
 	Name: "admin",
-	Subs: []*Command{accountCommand, runCommand, boardCommand, auditCommand, contentCommand, kicksCommand},
+	Subs: []*Command{accountCommand, runCommand, boardCommand, auditCommand, contentCommand, kicksCommand,
+		cheatReportsCommand},
 }
 
 // Run executes args (without the leading "admin") against the tree.

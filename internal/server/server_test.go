@@ -17,6 +17,7 @@ import (
 	"github.com/mhk-os/server/internal/admin"
 	"github.com/mhk-os/server/internal/auth"
 	"github.com/mhk-os/server/internal/blobs"
+	"github.com/mhk-os/server/internal/content"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/server"
 	"github.com/mhk-os/server/internal/store"
@@ -78,8 +79,10 @@ func start(t *testing.T, cfg server.Config, limits auth.Limits) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalog := content.New(st, log)
 	srv := server.New(cfg, server.Deps{Log: log, Auth: svc, Accounts: st, Sessions: st, Moderation: st, Runs: st,
-		Profiles: st, Blobs: ghosts})
+		Profiles: st, Blobs: ghosts, Content: catalog})
+	catalog.Register(srv)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

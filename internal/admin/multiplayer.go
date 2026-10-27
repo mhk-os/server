@@ -21,6 +21,12 @@ var kicksCommand = &Command{
 	Run: cheatKicks,
 }
 
+var cheatReportsCommand = &Command{
+	Name: "cheat-reports", Usage: "[--account U] [--limit N]",
+	Summary: "list cheat reports races received (counted or not) by or about an account, newest first",
+	Run:     cheatReports,
+}
+
 // accountFilterArgs parses [--account U] [--limit N] and resolves the account (0 = everybody).
 func accountFilterArgs(ctx context.Context, env *Env, name string, args []string) (uint64, int, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -60,7 +66,7 @@ func contentStrikes(ctx context.Context, env *Env, args []string) error {
 	for i := range strikes {
 		k := &strikes[i]
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", formatTime(&k.CreatedAt), k.Username, k.PackID,
-			orDash(k.Commit), k.SimVersion, orDash(k.ManifestHash), orDash(k.MajorityHash), k.Reason)
+			orDash(k.Commit), k.ContentVersion, orDash(k.ManifestHash), orDash(k.MajorityHash), k.Reason)
 	}
 	tw.Flush()
 	fmt.Fprintf(env.Out, "%d strike(s)\n", len(strikes))
@@ -85,5 +91,30 @@ func cheatKicks(ctx context.Context, env *Env, args []string) error {
 	}
 	tw.Flush()
 	fmt.Fprintf(env.Out, "%d kick(s)\n", len(kicks))
+	return nil
+}
+
+func cheatReports(ctx context.Context, env *Env, args []string) error {
+	id, limit, err := accountFilterArgs(ctx, env, "cheat-reports", args)
+	if err != nil {
+		return err
+	}
+	reports, err := env.Store.CheatReports(ctx, id, limit)
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "TIME\tSUSPECT\tREPORTER\tLOBBY\tRACE\tREASON\tCOUNTED\tDETAIL")
+	for i := range reports {
+		r := &reports[i]
+		counted := "yes"
+		if !r.Counted {
+			counted = "no: " + r.Note
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", formatTime(&r.CreatedAt), r.Suspect, r.Reporter,
+			orDash(r.LobbyRef), orDash(r.RaceRef), r.Reason, counted, orDash(r.Detail))
+	}
+	tw.Flush()
+	fmt.Fprintf(env.Out, "%d report(s)\n", len(reports))
 	return nil
 }

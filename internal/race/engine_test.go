@@ -430,6 +430,11 @@ func TestRaceIntegration(t *testing.T) {
 		st, err := h.st.AccountStats(context.Background(), bots[2].acc)
 		return err == nil && st.CheatKicks == 1
 	})
+	eventually(t, "cheat_reports rows", func() bool {
+		reps, err := h.st.CheatReports(context.Background(), bots[2].acc, 0)
+		return err == nil && len(reps) == 2 && reps[0].Counted && reps[0].Suspect != "" &&
+			reps[0].Detail == "speed" && reps[0].Reason == "Speed"
+	})
 	_, before := bots[0].udp.World()
 	eventually(t, "World without the kicked racer", func() bool {
 		w, n := bots[0].udp.World()

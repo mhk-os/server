@@ -78,8 +78,8 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-func testManifests(sim int32) *manifestFile {
-	f := &manifestFile{SimVersion: sim}
+func testManifests(contentVersion int32) *manifestFile {
+	f := &manifestFile{ContentVersion: contentVersion}
 	add := func(id string, items ...manifestItem) {
 		p := manifestPack{PackID: id, Commit: "botcommit", Items: items}
 		p.ManifestHash, _ = content.ManifestHash(p.items())
@@ -113,7 +113,7 @@ func TestManifestFile(t *testing.T) {
 		t.Fatalf("refs %+v", refs)
 	}
 	ms := got.manifests([]string{f.Packs[1].ManifestHash})
-	if len(ms) != 1 || ms[0].PackID != "mhk2" || ms[0].SimVersion != 7 || len(ms[0].Items) != 1 {
+	if len(ms) != 1 || ms[0].PackID != "mhk2" || ms[0].ContentVersion != 7 || len(ms[0].Items) != 1 {
 		t.Fatalf("manifests %+v", ms)
 	}
 	f.Packs[0].Items[0].Fingerprint = "changed"
@@ -136,15 +136,15 @@ func TestParseServer(t *testing.T) {
 }
 
 // stack is an in-process server (content catalog, race engine, lobbies) on ephemeral ports with a fresh catalog
-// (its own simVersion) and the files a bot needs.
+// (its own contentVersion) and the files a bot needs.
 type stack struct {
-	addr      string
-	st        *store.Store
-	sim       int32
-	mf        *manifestFile
-	dir       string
-	ghost     string // path of the short ghost
-	manifests string // path of the manifest file
+	addr           string
+	st             *store.Store
+	contentVersion int32
+	mf             *manifestFile
+	dir            string
+	ghost          string // path of the short ghost
+	manifests      string // path of the manifest file
 }
 
 // startStack starts the server with the given idle timeout (0 = the protocol's 45 s).
@@ -175,11 +175,11 @@ func startStack(t *testing.T, idle time.Duration) *stack {
 	}
 	limits := auth.Limits{Register: auth.Rate{N: 1000, Per: time.Hour}, LoginFailIP: auth.Rate{N: 1000, Per: time.Hour},
 		LoginFailAccount: auth.Rate{N: 1000, Per: time.Hour}}
+	catalog := content.New(st, log)
 	srv := server.New(server.Config{Version: "test", UDPPort: uint16(udp.LocalAddr().(*net.UDPAddr).Port),
 		ConnLimit: auth.Rate{N: 1000, Per: time.Minute}, IdleTimeout: idle},
 		server.Deps{Log: log, Auth: auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, 2), limits),
-			Accounts: st, Sessions: st, Moderation: st, Runs: st, Profiles: st, Blobs: ghosts})
-	catalog := content.New(st, log)
+			Accounts: st, Sessions: st, Moderation: st, Runs: st, Profiles: st, Blobs: ghosts, Content: catalog})
 	catalog.Register(srv)
 	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})
 	races.Register(srv)
@@ -200,11 +200,11 @@ func startStack(t *testing.T, idle time.Duration) *stack {
 		races.Close()
 	})
 
-	var simBytes [4]byte
-	rand.Read(simBytes[:])
+	var versionBytes [4]byte
+	rand.Read(versionBytes[:])
 	s := &stack{addr: ln.Addr().String(), st: st, dir: t.TempDir(),
-		sim: int32(binary.LittleEndian.Uint32(simBytes[:])&0xFFFFFF) + 1_000_000}
-	s.mf = testManifests(s.sim)
+		contentVersion: int32(binary.LittleEndian.Uint32(versionBytes[:])&0xFFFFFF) + 1_000_000}
+	s.mf = testManifests(s.contentVersion)
 	s.manifests = writeJSON(t, s.mf)
 	s.ghost = filepath.Join(s.dir, "run.mhkghost")
 	if err := os.WriteFile(s.ghost, shortGhost(t), 0o644); err != nil {
@@ -229,7 +229,7 @@ func (s *stack) human(t *testing.T, ctx context.Context) (*testclient.Client, *p
 	}
 	t.Cleanup(func() { c.Close() })
 	hello := testclient.DefaultHello()
-	hello.SimVersion = s.sim
+	hello.ContentVersion = s.contentVersion
 	if _, err := c.Hello(ctx, hello); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func (s *stack) human(t *testing.T, ctx context.Context) (*testclient.Client, *p
 	if _, err := c.Register(ctx, randomName("hu"), "kart-racer-2026"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.ContentHello(ctx, s.sim, s.mf.refs())
+	res, err := c.ContentHello(ctx, s.contentVersion, s.mf.refs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,15 +332,15 @@ func TestBotRacesHuman(t *testing.T) {
 
 	// Both announced the same manifests, so a dump reproduces the file the bot used.
 	out := filepath.Join(s.dir, "dump.json")
-	if err := dumpManifests(context.Background(), s.st, s.sim, []string{"game", "mhk2"}, out); err != nil {
+	if err := dumpManifests(context.Background(), s.st, s.contentVersion, []string{"game", "mhk2"}, out); err != nil {
 		t.Fatal(err)
 	}
 	dumped, err := loadManifests(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dumped.SimVersion != s.sim || len(dumped.Packs) != 2 || dumped.Packs[1].ManifestHash != s.mf.Packs[1].ManifestHash ||
-		dumped.Packs[0].Commit != "botcommit" {
+	if dumped.ContentVersion != s.contentVersion || len(dumped.Packs) != 2 ||
+		dumped.Packs[1].ManifestHash != s.mf.Packs[1].ManifestHash || dumped.Packs[0].Commit != "botcommit" {
 		t.Fatalf("dump %+v", dumped)
 	}
 }

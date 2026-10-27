@@ -6,10 +6,11 @@ import (
 	"github.com/mhk-os/server/internal/proto"
 )
 
-func (c *Client) ListBoards(ctx context.Context, trackID string, engineClass uint8, simVersion int32) ([]proto.BoardInfo, error) {
+func (c *Client) ListBoards(ctx context.Context, trackID string, engineClass uint8, contentVersion int32) (
+	[]proto.BoardInfo, error) {
 	var resp proto.BoardList
 	err := c.Request(ctx, proto.TypeListBoards,
-		&proto.ListBoards{TrackID: trackID, EngineClass: engineClass, SimVersion: simVersion}, &resp)
+		&proto.ListBoards{TrackID: trackID, EngineClass: engineClass, ContentVersion: contentVersion}, &resp)
 	return resp.Boards, err
 }
 
