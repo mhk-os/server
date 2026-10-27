@@ -25,7 +25,8 @@ func messages() []Message {
 		&Session{Token: "t", Expires: when, Account: Account{ID: 1, Username: "abc", Created: when}},
 		&Disconnect{Status: StatusAccountDisabled, Message: "cheating"},
 	}
-	return append(append(list, timeTrialMessages()...), profileMessages()...)
+	list = append(append(list, timeTrialMessages()...), profileMessages()...)
+	return append(list, achievementMessages()...)
 }
 
 func TestRoundTrips(t *testing.T) {

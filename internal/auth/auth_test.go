@@ -9,14 +9,14 @@ import (
 
 func TestValidateUsername(t *testing.T) {
 	good := []string{"abc", "Hans_Huhn", "a.b-c", "x12345678901234567z", strings.Repeat("a", 20), "007", "a_1",
-		"Moderator1"}
+		"Moderator1", "anon", "anonymous1", "anon_x"}
 	for _, name := range good {
 		if err := ValidateUsername(name); err != nil {
 			t.Errorf("%q rejected: %v", name, err)
 		}
 	}
 	bad := []string{"", "ab", strings.Repeat("a", 21), "_abc", "abc_", ".ab", "ab-", "a b", "äbc", "ab@c",
-		"Admin", "MODERATOR", "mod", "mhk-os", "MhkOs", "root"}
+		"Admin", "MODERATOR", "mod", "mhk-os", "MhkOs", "root", "Anonymous", "anon-1234567890", "ANON-x"}
 	for _, name := range bad {
 		if err := ValidateUsername(name); err == nil {
 			t.Errorf("%q accepted", name)

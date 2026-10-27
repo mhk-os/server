@@ -221,6 +221,23 @@ func (m *Session) Decode(r *wire.Reader) error {
 	return m.Account.Decode(r)
 }
 
+// DeleteAccount is request 26.
+type DeleteAccount struct {
+	Password   string
+	DeleteRuns bool // hide the anonymized runs too
+}
+
+func (m *DeleteAccount) Encode(w *wire.Writer) {
+	w.String(m.Password)
+	w.Bool(m.DeleteRuns)
+}
+
+func (m *DeleteAccount) Decode(r *wire.Reader) error {
+	m.Password = r.String(MaxPasswordField)
+	m.DeleteRuns = r.Bool()
+	return r.Err()
+}
+
 // Disconnect is push 1: the server is about to close the connection.
 type Disconnect struct {
 	Status  Status

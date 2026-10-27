@@ -21,7 +21,12 @@ const (
 	msgSessionInvalid     = "Your session has ended. Please log in again."
 	msgAccountDisabled    = "This account has been disabled."
 	msgBadCountry         = "Unknown country code."
+	msgWrongPassword      = "Wrong password."
+	msgAccountDeleted     = "This account was deleted."
 )
+
+// auditAccountDeleted is the audit log reason of DeleteAccount; the store appends what happened to the runs.
+const auditAccountDeleted = "account deleted by the player"
 
 // StatusError is an expected request failure with a status and a message for the player.
 type StatusError struct {
@@ -87,6 +92,7 @@ func (s *Server) registerAccounts() {
 	s.Handle(proto.TypeResume, false, s.handleResume)
 	s.Handle(proto.TypeLogout, true, s.handleLogout)
 	s.Handle(proto.TypeSetCountry, true, s.handleSetCountry)
+	s.Handle(proto.TypeDeleteAccount, true, s.handleDeleteAccount)
 }
 
 // loggedIn binds c to the session and records the account's activity.
@@ -177,4 +183,41 @@ func (s *Server) handleSetCountry(ctx context.Context, c *Conn, r *wire.Reader) 
 	c.updateAccount(acct)
 	a := acct.Proto()
 	return &a, nil
+}
+
+// handleDeleteAccount deletes the logged-in account after checking its password. Its runs stay ranked under a new
+// anonymous account (hidden with deleteRuns); its other connections are dropped, this one stays open, logged out.
+func (s *Server) handleDeleteAccount(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
+	var req proto.DeleteAccount
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	acct := c.Account()
+	if acct == nil {
+		return nil, Errorf(proto.StatusNotLoggedIn, "Please log in first.")
+	}
+	checked, err := s.deps.Auth.CheckCredentials(ctx, c.IP(), acct.Username, req.Password)
+	switch {
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		return nil, Errorf(proto.StatusInvalidCredentials, msgWrongPassword)
+	case err != nil:
+		return nil, authError(err)
+	case checked.ID != acct.ID:
+		// The account was deleted elsewhere and its name taken again.
+		return nil, Errorf(proto.StatusSessionInvalid, msgSessionInvalid)
+	}
+	act := store.Action{Actor: &acct.ID, Action: store.ActionDeleteAccount, TargetAccount: &acct.ID,
+		TargetRef: acct.Username, Reason: auditAccountDeleted, CreatedAt: store.Now()}
+	anon, err := s.deps.Accounts.DeleteOwnAccount(ctx, acct.ID, req.DeleteRuns, act)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, Errorf(proto.StatusSessionInvalid, msgSessionInvalid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.logout()
+	dropped := s.hub.Disconnect(acct.ID, proto.StatusSessionInvalid, msgAccountDeleted)
+	c.log.Info("account deleted by the player", "account", acct.ID, "username", acct.Username, "runs_to", anon,
+		"runs_hidden", req.DeleteRuns, "connections", dropped)
+	return nil, nil
 }

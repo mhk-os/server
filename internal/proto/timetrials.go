@@ -413,6 +413,32 @@ func (m *PlayerRuns) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
+// RunHiddenInfo is the response to RunHiddenReason (request 135, body RunID).
+type RunHiddenInfo struct {
+	HiddenAt        time.Time // zero = not hidden
+	Moderator       string    // "" = sysadmin, the player's own deletion, or a disabled owner
+	Reason          string
+	DeletedByOwner  bool
+	AccountDisabled bool // hidden because the owner is disabled; Reason is the disable reason
+}
+
+func (m *RunHiddenInfo) Encode(w *wire.Writer) {
+	optTime(w, m.HiddenAt)
+	w.String(m.Moderator)
+	w.String(m.Reason)
+	w.Bool(m.DeletedByOwner)
+	w.Bool(m.AccountDisabled)
+}
+
+func (m *RunHiddenInfo) Decode(r *wire.Reader) error {
+	m.HiddenAt = readOptTime(r)
+	m.Moderator = r.String(MaxAccountName)
+	m.Reason = r.String(MaxModReason)
+	m.DeletedByOwner = r.Bool()
+	m.AccountDisabled = r.Bool()
+	return r.Err()
+}
+
 // ModHideRun is request 64.
 type ModHideRun struct {
 	RunID  uint64

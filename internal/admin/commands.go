@@ -83,6 +83,10 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+	ach, err := env.Store.AchievementSummary(ctx, a.ID)
+	if err != nil {
+		return err
+	}
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", a.ID)
 	fmt.Fprintf(tw, "Username\t%s\n", a.Username)
@@ -98,6 +102,8 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "Score\t%d\n", p.Score)
 	fmt.Fprintf(tw, "Rank\t%s\n", rankLabel(p.Rank))
 	fmt.Fprintf(tw, "Races\t%d (%d wins, %d podiums)\n", p.Races, p.Wins, p.Podiums)
+	fmt.Fprintf(tw, "Achievements\t%d unlocked (%d stats, %d set items; last sync %s)\n", ach.Unlocked, ach.Stats,
+		ach.SetItems, formatTime(ach.SyncedAt))
 	fmt.Fprintf(tw, "Status\t%s\n", status(a))
 	if a.Disabled() {
 		by := "sysadmin"
@@ -133,6 +139,9 @@ func accountSetRole(ctx context.Context, env *Env, args []string) error {
 	a, err := findAccount(ctx, env, pos[0])
 	if err != nil {
 		return err
+	}
+	if a.Role == proto.RoleAnonymous {
+		return fmt.Errorf("%s holds the runs of a deleted account and keeps its role", a.Username)
 	}
 	if a.Role == role {
 		fmt.Fprintf(env.Out, "%s is already %s\n", a.Username, role)

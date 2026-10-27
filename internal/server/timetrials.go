@@ -36,6 +36,7 @@ func (s *Server) registerTimeTrials() {
 	s.Handle(proto.TypeReportRun, true, s.handleReportRun)
 	s.Handle(proto.TypeMyRuns, true, s.handleMyRuns)
 	s.Handle(proto.TypePlayerRuns, false, s.handlePlayerRuns)
+	s.Handle(proto.TypeRunHiddenReason, true, s.handleRunHiddenReason)
 }
 
 // isModerator reports whether the connection is logged in as a moderator.
@@ -323,4 +324,29 @@ func (s *Server) handlePlayerRuns(ctx context.Context, c *Conn, r *wire.Reader) 
 		return nil, err
 	}
 	return &proto.RunPage{Total: clampU32(total), Runs: runEntries(runs, mod)}, nil
+}
+
+// handleRunHiddenReason tells moderators, and the run's owner, why the run is hidden. The owner of a run of an
+// anonymous account never logs in, so its runs answer moderators only.
+func (s *Server) handleRunHiddenReason(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
+	var req proto.RunID
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	h, err := s.deps.Runs.RunHiddenInfo(ctx, req.RunID)
+	if err != nil {
+		return nil, runNotFound(err)
+	}
+	if id, _ := c.AccountID(); h.AccountID != id && !isModerator(c) {
+		return nil, Errorf(proto.StatusNotFound, msgRunNotFound)
+	}
+	out := &proto.RunHiddenInfo{}
+	switch {
+	case h.HiddenAt != nil:
+		out.HiddenAt, out.Moderator, out.Reason, out.DeletedByOwner = *h.HiddenAt, h.Moderator, h.Reason,
+			h.DeletedByOwner
+	case h.DisabledAt != nil:
+		out.HiddenAt, out.Reason, out.AccountDisabled = *h.DisabledAt, h.DisabledReason, true
+	}
+	return out, nil
 }

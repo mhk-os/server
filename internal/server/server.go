@@ -81,16 +81,17 @@ func (c *Config) applyDefaults() {
 
 // Deps are the services handlers use.
 type Deps struct {
-	Log        *slog.Logger
-	Auth       *auth.Service
-	Accounts   store.Accounts
-	Sessions   store.Sessions
-	Moderation store.Moderation
-	Runs       store.Runs
-	Profiles   store.Profiles
-	Blobs      *blobs.Store
-	Content    Content // checks the content of uploaded runs
-	Geo        *geo.DB // nil = no GeoIP database
+	Log          *slog.Logger
+	Auth         *auth.Service
+	Accounts     store.Accounts
+	Sessions     store.Sessions
+	Moderation   store.Moderation
+	Runs         store.Runs
+	Profiles     store.Profiles
+	Achievements store.Achievements
+	Blobs        *blobs.Store
+	Content      Content // checks the content of uploaded runs
+	Geo          *geo.DB // nil = no GeoIP database
 }
 
 // Content is what time-trial uploads ask the content catalog (content.Catalog, which registers with the server
@@ -137,7 +138,8 @@ type Server struct {
 	goneHooks  []func(accountID uint64)
 }
 
-// New returns a server with the connection, account, time-trial and moderation handlers registered.
+// New returns a server with the connection, account, profile, achievement, time-trial and moderation handlers
+// registered.
 func New(cfg Config, deps Deps) *Server {
 	cfg.applyDefaults()
 	if deps.Log == nil {
@@ -157,6 +159,7 @@ func New(cfg Config, deps Deps) *Server {
 	s.registerModeration()
 	s.registerAccounts()
 	s.registerProfiles()
+	s.registerAchievements()
 	return s
 }
 

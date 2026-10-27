@@ -19,10 +19,12 @@ func (s *Server) registerProfiles() {
 	s.Handle(proto.TypeScoreLeaderboard, false, s.handleScoreLeaderboard)
 }
 
-// profileAccount loads an account whose profile or runs are asked for: disabled accounts exist for moderators only.
+// profileAccount loads an account whose runs are asked for: disabled and anonymous accounts exist for moderators
+// only.
 func (s *Server) profileAccount(ctx context.Context, id uint64, moderator bool) (*store.Account, error) {
 	a, err := s.deps.Accounts.AccountByID(ctx, id)
-	if errors.Is(err, store.ErrNotFound) || err == nil && a.Disabled() && !moderator {
+	if errors.Is(err, store.ErrNotFound) ||
+		err == nil && (a.Disabled() || a.Role == proto.RoleAnonymous) && !moderator {
 		return nil, Errorf(proto.StatusNotFound, msgAccountNotFound)
 	}
 	return a, err
@@ -96,7 +98,7 @@ func (s *Server) handleGetProfile(ctx context.Context, c *Conn, r *wire.Reader) 
 	}
 	mod := isModerator(c)
 	p, err := s.deps.Profiles.Profile(ctx, req.AccountID)
-	if errors.Is(err, store.ErrNotFound) || err == nil && p.Disabled && !mod {
+	if errors.Is(err, store.ErrNotFound) || err == nil && (p.Disabled && !mod || p.Role == proto.RoleAnonymous) {
 		return nil, Errorf(proto.StatusNotFound, msgAccountNotFound)
 	}
 	if err != nil {

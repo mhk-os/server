@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/store"
 )
 
@@ -135,17 +136,36 @@ func (s *Service) Register(ctx context.Context, ip netip.Addr, country, username
 
 // Login checks credentials and creates a new session.
 func (s *Service) Login(ctx context.Context, ip netip.Addr, username, password string) (*Login, error) {
+	acct, err := s.CheckCredentials(ctx, ip, username, password)
+	if err != nil {
+		return nil, err
+	}
+	if acct.Disabled() {
+		return nil, &DisabledError{Reason: acct.DisabledReason}
+	}
+	now := store.Now()
+	if err := s.accounts.TouchLogin(ctx, acct.ID, now); err != nil {
+		return nil, err
+	}
+	acct.LastLoginAt = &now
+	return s.newSession(ctx, acct, ip, now)
+}
+
+// CheckCredentials returns the account when the password is right. Failures count toward the login rate limits
+// (per IP and per username); anonymous accounts never match.
+func (s *Service) CheckCredentials(ctx context.Context, ip netip.Addr, username, password string) (*store.Account,
+	error) {
 	userKey := strings.ToLower(username)
 	if s.loginFailIP.Blocked(ipKey(ip)) || s.loginFailUser.Blocked(userKey) {
 		return nil, ErrRateLimited
 	}
-	fail := func() (*Login, error) {
+	fail := func() (*store.Account, error) {
 		s.loginFailIP.Add(ipKey(ip))
 		s.loginFailUser.Add(userKey)
 		return nil, ErrInvalidCredentials
 	}
 	acct, err := s.accounts.AccountByUsername(ctx, username)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || err == nil && acct.Role == proto.RoleAnonymous {
 		s.hasher.DummyVerify(ctx, password)
 		return fail()
 	}
@@ -159,15 +179,7 @@ func (s *Service) Login(ctx context.Context, ip netip.Addr, username, password s
 	if !ok {
 		return fail()
 	}
-	if acct.Disabled() {
-		return nil, &DisabledError{Reason: acct.DisabledReason}
-	}
-	now := store.Now()
-	if err := s.accounts.TouchLogin(ctx, acct.ID, now); err != nil {
-		return nil, err
-	}
-	acct.LastLoginAt = &now
-	return s.newSession(ctx, acct, ip, now)
+	return acct, nil
 }
 
 func (s *Service) newSession(ctx context.Context, acct *store.Account, ip netip.Addr, now time.Time) (*Login, error) {

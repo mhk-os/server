@@ -59,9 +59,9 @@ type RaceResult struct {
 // Profiles is the player directory and the online race score.
 type Profiles interface {
 	SetProfileListed(ctx context.Context, id uint64, listed bool) error
-	// ListPlayers pages listed accounts that are not disabled.
+	// ListPlayers pages listed accounts that are neither disabled nor anonymous.
 	ListPlayers(ctx context.Context, q PlayerQuery) (total int, players []PlayerSummary, err error)
-	// PlayerSummaries returns the summaries of the ids that exist, in no particular order.
+	// PlayerSummaries returns the summaries of the ids that exist and are not anonymous, in no particular order.
 	PlayerSummaries(ctx context.Context, ids []uint64, includeDisabled bool) ([]PlayerSummary, error)
 	Profile(ctx context.Context, id uint64) (*Profile, error)
 	// ScoreLeaderboard pages ranked accounts by rank, then username; total counts the rows matching search.
@@ -73,8 +73,9 @@ type Profiles interface {
 
 var _ Profiles = (*Store)(nil)
 
-// ranked is the condition for accounts on the score ranking; queries alias accounts a.
-const ranked = "a.score > 0 AND a.disabled_at IS NULL"
+// ranked is the condition for accounts on the score ranking; queries alias accounts a. Anonymous accounts (role 2)
+// never race, so their score stays 0 and the rank count needs no role check.
+const ranked = "a.score > 0 AND a.disabled_at IS NULL AND a.role <> 2"
 
 // summarySelect computes the rank per row; accounts_score (score, disabled_at) makes the count an index range scan.
 const summarySelect = `SELECT a.id, a.username, COALESCE(a.country_user, a.country_ip), a.role, a.created_at,
@@ -145,7 +146,7 @@ func (s *Store) SetProfileListed(ctx context.Context, id uint64, listed bool) er
 }
 
 func (s *Store) ListPlayers(ctx context.Context, q PlayerQuery) (int, []PlayerSummary, error) {
-	where, args := searchCond("a.profile_listed AND a.disabled_at IS NULL", nil, q.Search)
+	where, args := searchCond("a.profile_listed AND a.disabled_at IS NULL AND a.role <> 2", nil, q.Search)
 	order := "a.id DESC"
 	if q.ByName {
 		order = "a.username_lower, a.id"
@@ -161,7 +162,7 @@ func (s *Store) PlayerSummaries(ctx context.Context, ids []uint64, includeDisabl
 	for i, id := range ids {
 		args[i] = id
 	}
-	query := summarySelect + " FROM accounts a WHERE a.id IN (" + placeholders(len(ids)) + ")"
+	query := summarySelect + " FROM accounts a WHERE a.role <> 2 AND a.id IN (" + placeholders(len(ids)) + ")"
 	if !includeDisabled {
 		query += " AND a.disabled_at IS NULL"
 	}

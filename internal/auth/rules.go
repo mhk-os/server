@@ -16,8 +16,11 @@ const (
 
 var reservedUsernames = map[string]bool{
 	"admin": true, "administrator": true, "moderator": true, "mod": true, "system": true, "server": true,
-	"root": true, "mhk": true, "mhkos": true, "mhk-os": true,
+	"root": true, "mhk": true, "mhkos": true, "mhk-os": true, "anonymous": true,
 }
+
+// anonymousPrefix starts the usernames of anonymous accounts (store.DeleteOwnAccount); players cannot take it.
+const anonymousPrefix = "anon-"
 
 // RuleError explains to the player why a username or password was refused.
 type RuleError struct {
@@ -46,7 +49,7 @@ func ValidateUsername(name string) error {
 	if !isAlnum(name[0]) || !isAlnum(name[len(name)-1]) {
 		return fail("Usernames must start and end with a letter or digit.")
 	}
-	if reservedUsernames[strings.ToLower(name)] {
+	if lower := strings.ToLower(name); reservedUsernames[lower] || strings.HasPrefix(lower, anonymousPrefix) {
 		return fail("This username is reserved.")
 	}
 	return nil

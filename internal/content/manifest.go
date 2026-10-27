@@ -17,25 +17,11 @@ import (
 
 // validID reports whether s is a content id: 1–96 characters of [A-Za-z0-9_.-]. The restriction keeps
 // lowercasing ASCII-only, so the Go server and the C# client agree on the canonical form.
-func validID(s string) bool {
-	if len(s) == 0 || len(s) > proto.MaxContentID {
-		return false
-	}
-	for i := range len(s) {
-		if c := s[i]; !isAlnum(c) && c != '_' && c != '.' && c != '-' {
-			return false
-		}
-	}
-	return true
-}
+func validID(s string) bool { return proto.ValidID(s, proto.MaxContentID) }
 
 // validPackID is a content id without dots: item ids name their pack as the text before the first dot.
 func validPackID(s string) bool {
 	return len(s) <= proto.MaxPackID && validID(s) && !strings.Contains(s, ".")
-}
-
-func isAlnum(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // printable rejects control characters; they would make the newline-separated canonical form ambiguous.

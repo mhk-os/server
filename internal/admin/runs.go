@@ -152,7 +152,10 @@ func runShow(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "Status\t%s\n", runStatus(v))
 	if v.HiddenAt != nil {
 		by := "sysadmin"
-		if v.HiddenBy != nil {
+		switch {
+		case v.DeletedByOwner:
+			by = "the player, deleting their account"
+		case v.HiddenBy != nil:
 			by = fmt.Sprintf("account %d", *v.HiddenBy)
 		}
 		fmt.Fprintf(tw, "Hidden at\t%s\n", formatTime(v.HiddenAt))

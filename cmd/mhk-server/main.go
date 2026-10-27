@@ -200,16 +200,17 @@ func serve(ctx context.Context, args []string) error {
 	svc := auth.NewService(st, st, auth.NewHasher(auth.DefaultParams, auth.DefaultHashConcurrency), auth.DefaultLimits)
 	catalog := content.New(st, log)
 	srv := server.New(server.Config{Version: version, UDPPort: udpPort}, server.Deps{
-		Log:        log,
-		Auth:       svc,
-		Accounts:   st,
-		Sessions:   st,
-		Moderation: st,
-		Runs:       st,
-		Profiles:   st,
-		Blobs:      ghosts,
-		Content:    catalog,
-		Geo:        geoDB,
+		Log:          log,
+		Auth:         svc,
+		Accounts:     st,
+		Sessions:     st,
+		Moderation:   st,
+		Runs:         st,
+		Profiles:     st,
+		Achievements: st,
+		Blobs:        ghosts,
+		Content:      catalog,
+		Geo:          geoDB,
 	})
 	catalog.Register(srv)
 	races := race.NewEngine(race.Config{Log: log, Hub: srv.Hub(), Kicks: st, UDP: udp, Catalog: catalog})

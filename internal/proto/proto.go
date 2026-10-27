@@ -41,6 +41,10 @@ const (
 	TypeGetProfile       Type = 24
 	TypeScoreLeaderboard Type = 25
 
+	TypeDeleteAccount     Type = 26
+	TypeSyncAchievements  Type = 27
+	TypeAchievementShares Type = 28
+
 	TypeModHideRun        Type = 64
 	TypeModUnhideRun      Type = 65
 	TypeModDisableAccount Type = 66
@@ -50,13 +54,14 @@ const (
 	TypeModGetAccount     Type = 70
 	TypeModListHidden     Type = 71
 
-	TypeListBoards     Type = 128
-	TypeGetLeaderboard Type = 129
-	TypeUploadRun      Type = 130
-	TypeDownloadRun    Type = 131
-	TypeReportRun      Type = 132
-	TypeMyRuns         Type = 133
-	TypePlayerRuns     Type = 134
+	TypeListBoards      Type = 128
+	TypeGetLeaderboard  Type = 129
+	TypeUploadRun       Type = 130
+	TypeDownloadRun     Type = 131
+	TypeReportRun       Type = 132
+	TypeMyRuns          Type = 133
+	TypePlayerRuns      Type = 134
+	TypeRunHiddenReason Type = 135
 )
 
 // Push types.
@@ -121,6 +126,8 @@ type Role uint8
 const (
 	RolePlayer    Role = 0
 	RoleModerator Role = 1
+	// RoleAnonymous holds the time-trial runs of a deleted account; it never logs in and is listed nowhere.
+	RoleAnonymous Role = 2
 )
 
 func (r Role) String() string {
@@ -129,11 +136,13 @@ func (r Role) String() string {
 		return "player"
 	case RoleModerator:
 		return "moderator"
+	case RoleAnonymous:
+		return "anonymous"
 	}
 	return fmt.Sprintf("Role(%d)", uint8(r))
 }
 
-// ParseRole accepts the names String returns.
+// ParseRole accepts the names String returns for the roles an account can be given (not anonymous).
 func ParseRole(s string) (Role, error) {
 	switch s {
 	case "player":
@@ -142,6 +151,21 @@ func ParseRole(s string) (Role, error) {
 		return RoleModerator, nil
 	}
 	return 0, fmt.Errorf("unknown role %q (want player or moderator)", s)
+}
+
+// ValidID reports whether id has 1 to max characters of [A-Za-z0-9_.-], the alphabet of content, stat and
+// achievement ids.
+func ValidID(id string, max int) bool {
+	if len(id) == 0 || len(id) > max {
+		return false
+	}
+	for i := range len(id) {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // FlagReason is why a game client reported a run (ReportRun).

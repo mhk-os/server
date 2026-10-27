@@ -114,7 +114,7 @@ type AccountFilter struct {
 	Limit int // 0 = no limit
 }
 
-// Accounts is what the login flow needs.
+// Accounts is what the login flow and the player's own account requests need.
 type Accounts interface {
 	CreateAccount(ctx context.Context, a *Account) error
 	AccountByID(ctx context.Context, id uint64) (*Account, error)
@@ -122,6 +122,7 @@ type Accounts interface {
 	SetCountryUser(ctx context.Context, id uint64, country *string) error
 	TouchLogin(ctx context.Context, id uint64, at time.Time) error
 	TouchActive(ctx context.Context, id uint64, at time.Time) error
+	DeleteOwnAccount(ctx context.Context, id uint64, hideRuns bool, act Action) (anonymous string, err error)
 }
 
 // Sessions persists login sessions.

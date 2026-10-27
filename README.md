@@ -92,11 +92,11 @@ need the data directory (`-data-dir` / `MHK_DATA_DIR`) to remove the ghost files
 ```sh
 export MHK_DB_DSN='mhk:mhk@tcp(localhost:3307)/mhk?parseTime=true'
 mhk-server admin account list [--role moderator] [--limit N]
-mhk-server admin account show <username>                                         # with score, rank, races, last active
+mhk-server admin account show <username>                                         # with score, rank, races, achievements
 mhk-server admin account set-role <username> player|moderator
 mhk-server admin account disable <username> --reason "Cheating in time trials"   # also revokes sessions
 mhk-server admin account enable <username>
-mhk-server admin account delete <username> --yes                                # permanent, with runs and reports
+mhk-server admin account delete <username> --yes                                # permanent, with runs, reports, achievements
 mhk-server admin run list [--account U] [--track T] [--limit N]                 # newest first
 mhk-server admin run show <id>
 mhk-server admin run hide <id> --reason "Impossible lap"
@@ -114,6 +114,12 @@ Usernames are matched case-insensitively. The disable reason is shown to the pla
 Moderators (role `moderator`) act from inside the game: they hide and unhide runs, disable and enable player
 accounts (not other moderators), and review flagged runs and their reports. Nothing a moderator does is permanent.
 Reports from game clients (`flags`) never hide anything by themselves.
+
+Players delete their own account in the game (`DeleteAccount`, GDPR). Unlike `account delete`, that keeps their
+time-trial runs ranked under a new anonymous account (`anon-` + 10 hex digits, role `anonymous`, shown to players as
+`Anonymous`; hidden as "Deleted by the player" when they ask for it). The audit log keeps the old username, and the
+anonymous account is listed by `account list` and works with `account show`, `run list --account` and
+`account delete`.
 
 ## Deployment
 

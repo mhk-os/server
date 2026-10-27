@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -192,9 +194,9 @@ func (s *Store) EnableAccount(ctx context.Context, id uint64, act Action) error 
 	})
 }
 
-// DeleteAccount removes the account permanently; its sessions, runs, reports and cheat kicks cascade, the audit log
-// keeps the entry. Runs the account reported get their flag counts recomputed. It returns the blobs of the deleted
-// runs that no other run references, for the caller to remove after the commit.
+// DeleteAccount removes the account permanently; its sessions, runs, reports, achievements and everything else it
+// owns cascade, the audit log keeps the entry. It returns the blobs of the deleted runs that no other run
+// references, for the caller to remove after the commit.
 func (s *Store) DeleteAccount(ctx context.Context, id uint64, act Action) ([]blobs.Hash, error) {
 	var orphans []blobs.Hash
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
@@ -205,14 +207,7 @@ func (s *Store) DeleteAccount(ctx context.Context, id uint64, act Action) ([]blo
 		if err != nil {
 			return err
 		}
-		reported, err := countedReportsBy(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM accounts WHERE id = ?", id); err != nil {
-			return err
-		}
-		if err := recountFlags(ctx, tx, reported); err != nil {
+		if err := removeAccount(ctx, tx, id); err != nil {
 			return err
 		}
 		if orphans, err = unreferenced(ctx, tx, hashes); err != nil {
@@ -221,6 +216,92 @@ func (s *Store) DeleteAccount(ctx context.Context, id uint64, act Action) ([]blo
 		return recordAction(ctx, tx, act)
 	})
 	return orphans, err
+}
+
+const (
+	// AnonymousName is the username clients see on the runs of anonymous accounts.
+	AnonymousName = "Anonymous"
+	// DeletedRunsReason is the hidden reason of runs their player deleted with the account.
+	DeletedRunsReason = "Deleted by the player"
+)
+
+// DeleteOwnAccount deletes the account at its player's request. Its runs move to a new anonymous account first
+// (none is created when there are no runs), hidden as deleted by the owner with hideRuns. act.Reason gets what
+// happened to the runs appended. It returns the anonymous account's username, "" when there were no runs.
+func (s *Store) DeleteOwnAccount(ctx context.Context, id uint64, hideRuns bool, act Action) (string, error) {
+	var anon string
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		// Locking the account row also blocks uploads (their run insert checks the account), so no run escapes.
+		var one, runs int
+		err := tx.QueryRowContext(ctx, "SELECT 1 FROM accounts WHERE id = ? FOR UPDATE", id).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM runs WHERE account_id = ?", id).Scan(&runs); err != nil {
+			return err
+		}
+		if runs > 0 {
+			anonID, name, err := createAnonymous(ctx, tx, act.CreatedAt)
+			if err != nil {
+				return err
+			}
+			anon = name
+			if _, err := tx.ExecContext(ctx, "UPDATE runs SET account_id = ? WHERE account_id = ?", anonID,
+				id); err != nil {
+				return err
+			}
+			act.Reason += fmt.Sprintf("; %d run(s) moved to %s", runs, anon)
+			if hideRuns {
+				if _, err := tx.ExecContext(ctx, `UPDATE runs SET hidden_at = ?, hidden_by = NULL, hidden_reason = ?,
+					deleted_by_owner = TRUE WHERE account_id = ?`, act.CreatedAt, DeletedRunsReason, anonID); err != nil {
+					return err
+				}
+				act.Reason += " and hidden"
+			}
+		}
+		if err := removeAccount(ctx, tx, id); err != nil {
+			return err
+		}
+		return recordAction(ctx, tx, act)
+	})
+	return anon, err
+}
+
+// createAnonymous inserts an anonymous account named "anon-" + 10 random hex digits.
+func createAnonymous(ctx context.Context, tx *sql.Tx, now time.Time) (uint64, string, error) {
+	for range 5 {
+		var b [5]byte
+		rand.Read(b[:])
+		name := "anon-" + hex.EncodeToString(b[:])
+		res, err := tx.ExecContext(ctx, `INSERT INTO accounts (username, username_lower, password_hash, role,
+			registration_ip, created_at, profile_listed) VALUES (?, ?, '', ?, '', ?, FALSE)`,
+			name, name, uint8(proto.RoleAnonymous), now)
+		if isDuplicate(err) {
+			continue
+		}
+		if err != nil {
+			return 0, "", fmt.Errorf("store: create anonymous account: %w", err)
+		}
+		id, err := res.LastInsertId()
+		return uint64(id), name, err
+	}
+	return 0, "", errors.New("store: no free anonymous account name")
+}
+
+// removeAccount deletes the account row (everything it owns cascades) and recounts the flags of the runs it
+// reported.
+func removeAccount(ctx context.Context, tx *sql.Tx, id uint64) error {
+	reported, err := countedReportsBy(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM accounts WHERE id = ?", id); err != nil {
+		return err
+	}
+	return recountFlags(ctx, tx, reported)
 }
 
 func accountBlobs(ctx context.Context, tx *sql.Tx, accountID uint64) ([]blobs.Hash, error) {

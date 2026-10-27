@@ -67,6 +67,7 @@ type Run struct {
 	HiddenAt       *time.Time
 	HiddenBy       *uint64
 	HiddenReason   string
+	DeletedByOwner bool // hidden because the player deleted their account and runs
 }
 
 // RunView is a run with what clients see next to it: owner, board, rank and setup mismatch.
@@ -164,6 +165,8 @@ type Runs interface {
 	DeleteRun(ctx context.Context, runID uint64, act Action) (orphans []blobs.Hash, err error)
 	AccountStats(ctx context.Context, accountID uint64) (AccountStats, error)
 	AddCheatKick(ctx context.Context, k *CheatKick) error
+	// RunHiddenInfo returns the run's owner and why it is hidden, if it is.
+	RunHiddenInfo(ctx context.Context, runID uint64) (*HiddenInfo, error)
 }
 
 var _ Runs = (*Store)(nil)
@@ -178,13 +181,20 @@ const (
 // visible is the condition for runs players see; queries alias runs r and accounts a.
 const visible = "r.hidden_at IS NULL AND a.disabled_at IS NULL"
 
+// shownName and shownCountry are the owner's name and country as clients see them: anonymous accounts (role 2)
+// show as AnonymousName without a country. Queries alias accounts a.
+const (
+	shownName    = "IF(a.role = 2, '" + AnonymousName + "', a.username)"
+	shownCountry = "IF(a.role = 2, '', COALESCE(a.country_user, a.country_ip))"
+)
+
 // rankOrder orders runs of a board: fastest first, ties by earlier upload.
 const rankOrder = "finish_ms, uploaded_at, id"
 
 const runSelect = `SELECT r.id, r.board_id, r.account_id, r.ghost_id, r.track_id, r.track_pack_id, r.kart_id,
 	r.character_id, r.engine_class, r.laps, r.content_version, r.track_hash, r.setup_hash, r.game_build, r.finish_ms,
 	r.best_lap_ms, r.lap_ms, r.frame_count, r.recorded_at, r.uploaded_at, r.blob_sha256, r.file_size, r.flags,
-	r.hidden_at, r.hidden_by, r.hidden_reason, a.username, COALESCE(a.country_user, a.country_ip),
+	r.hidden_at, r.hidden_by, r.hidden_reason, r.deleted_by_owner, ` + shownName + `, ` + shownCountry + `,
 	a.disabled_at IS NOT NULL, b.track_id
 	FROM runs r JOIN accounts a ON a.id = r.account_id JOIN boards b ON b.id = r.board_id`
 
@@ -199,7 +209,7 @@ func scanRun(row rowScanner) (*RunView, error) {
 	err := row.Scan(&v.ID, &v.BoardID, &v.AccountID, &v.GhostID, &v.TrackID, &v.TrackPackID, &v.KartID,
 		&v.CharacterID, &v.EngineClass, &v.Laps, &v.ContentVersion, &v.TrackHash, &v.SetupHash, &v.GameBuild, &v.FinishMs,
 		&v.BestLapMs, &lapMs, &v.FrameCount, &v.RecordedAt, &v.UploadedAt, &blob, &v.FileSize, &v.Flags, &hiddenAt,
-		&hiddenBy, &v.HiddenReason, &v.Username, &v.Country, &v.AccountDisabled, &v.BoardTrackID)
+		&hiddenBy, &v.HiddenReason, &v.DeletedByOwner, &v.Username, &v.Country, &v.AccountDisabled, &v.BoardTrackID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -554,11 +564,12 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 		conds = append(conds, visible)
 	}
 	if q.Username != "" {
-		conds = append(conds, "a.username_lower LIKE ?")
+		// Matches the name clients see: anonymous accounts by AnonymousName, never by their internal name.
+		conds = append(conds, "IF(a.role = 2, '"+strings.ToLower(AnonymousName)+"', a.username_lower) LIKE ?")
 		args = append(args, "%"+likeEscape(strings.ToLower(q.Username))+"%")
 	}
 	if q.Country != "" {
-		conds = append(conds, "COALESCE(a.country_user, a.country_ip) = ?")
+		conds = append(conds, shownCountry+" = ?")
 		args = append(args, q.Country)
 	}
 	if q.Continent != "" {
@@ -566,7 +577,7 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 		if len(countries) == 0 {
 			return &LeaderboardPage{}, nil
 		}
-		conds = append(conds, "COALESCE(a.country_user, a.country_ip) IN ("+placeholders(len(countries))+")")
+		conds = append(conds, shownCountry+" IN ("+placeholders(len(countries))+")")
 		for _, c := range countries {
 			args = append(args, c)
 		}
@@ -849,8 +860,8 @@ func (s *Store) HideRun(ctx context.Context, runID uint64, act Action) error {
 		if err := runActionTarget(ctx, tx, runID, &act); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE runs SET hidden_at = ?, hidden_by = ?, hidden_reason = ? WHERE id = ?",
-			act.CreatedAt, toNull(act.Actor), act.Reason, runID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET hidden_at = ?, hidden_by = ?, hidden_reason = ?,
+			deleted_by_owner = FALSE WHERE id = ?`, act.CreatedAt, toNull(act.Actor), act.Reason, runID); err != nil {
 			return err
 		}
 		return recordAction(ctx, tx, act)
@@ -862,12 +873,43 @@ func (s *Store) UnhideRun(ctx context.Context, runID uint64, act Action) error {
 		if err := runActionTarget(ctx, tx, runID, &act); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE runs SET hidden_at = NULL, hidden_by = NULL, hidden_reason = '' WHERE id = ?", runID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET hidden_at = NULL, hidden_by = NULL, hidden_reason = '',
+			deleted_by_owner = FALSE WHERE id = ?`, runID); err != nil {
 			return err
 		}
 		return recordAction(ctx, tx, act)
 	})
+}
+
+// HiddenInfo is a run's owner and why players do not see it.
+type HiddenInfo struct {
+	AccountID      uint64
+	HiddenAt       *time.Time // nil = not hidden itself
+	Moderator      string     // username of the hiding moderator, "" = sysadmin, the owner, or a deleted moderator
+	Reason         string
+	DeletedByOwner bool
+	DisabledAt     *time.Time // the owner's account is disabled
+	DisabledReason string
+}
+
+func (s *Store) RunHiddenInfo(ctx context.Context, runID uint64) (*HiddenInfo, error) {
+	var (
+		h                    HiddenInfo
+		hiddenAt, disabledAt sql.NullTime
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT r.account_id, r.hidden_at, COALESCE(m.username, ''), r.hidden_reason,
+		r.deleted_by_owner, a.disabled_at, a.disabled_reason
+		FROM runs r JOIN accounts a ON a.id = r.account_id LEFT JOIN accounts m ON m.id = r.hidden_by
+		WHERE r.id = ?`, runID).Scan(&h.AccountID, &hiddenAt, &h.Moderator, &h.Reason, &h.DeletedByOwner, &disabledAt,
+		&h.DisabledReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	h.HiddenAt, h.DisabledAt = nullTime(hiddenAt), nullTime(disabledAt)
+	return &h, nil
 }
 
 // unreferenced returns the hashes no run references any more.

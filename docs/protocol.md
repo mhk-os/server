@@ -131,7 +131,8 @@ Rules (server-enforced, clients pre-check for messages):
 
 - **Username**: 3–20 characters of `A–Z a–z 0–9 _ . -`, first and last a letter or digit. Unique case-insensitively;
   the account keeps the case it registered with. Reserved: `admin`, `administrator`, `moderator`, `mod`, `system`,
-  `server`, `root`, `mhk`, `mhkos`, `mhk-os`.
+  `server`, `root`, `mhk`, `mhkos`, `mhk-os`, `anonymous` and every name starting with `anon-` (anonymous accounts,
+  see `DeleteAccount`).
 - **Password**: 8–128 characters (Unicode code points), not equal to the username ignoring case. Stored as argon2id.
 - **Country**: ISO 3166-1 alpha-2 (`DE`, `SK`, …) looked up from the registration IP (GeoIP database, `""` when
   unknown). The player may choose another one; choosing `""` returns to the IP-detected country.
@@ -147,7 +148,7 @@ Rules (server-enforced, clients pre-check for messages):
 | username | string ≤ 20 | |
 | country | string ≤ 2 | effective country, `""` = unknown |
 | countryFromIp | bool | true while the country is the IP-detected one |
-| role | u8 | 0 = player, 1 = moderator |
+| role | u8 | 0 = player, 1 = moderator, 2 = anonymous (see `DeleteAccount`; only moderators see it, in `ModGetAccount`) |
 | created | time | |
 
 `Session`:
@@ -181,6 +182,26 @@ Empty → empty. Revokes the session of this connection; the connection stays op
 
 `country: string ≤ 2` (`""` or two letters A–Z of a known ISO 3166-1 code) → `Account`. Needs login.
 
+### DeleteAccount (request 26)
+
+`password: string ≤ 512`, `deleteRuns: bool` → empty. Needs login. Deletes the logged-in account for good (GDPR):
+
+- A wrong password answers `InvalidCredentials` ("Wrong password.") and counts toward the `Login` failure limits
+  (per IP and per username); while they block, `RateLimited`.
+- The account's time-trial runs move to a new **anonymous account** (role 2, username `anon-` + 10 lowercase hex
+  digits, none is created when there are no runs). Anonymous accounts never log in, are in no list or ranking,
+  `GetProfile`/`GetProfiles`/`PlayerRuns` treat them as unknown (`PlayerRuns` still answers moderators), and every
+  `RunEntry` of theirs carries username `Anonymous` and country `""`. Their runs stay ranked: one leaderboard row per
+  anonymous account, like any account; the leaderboard username filter matches `Anonymous`.
+- With `deleteRuns` the moved runs are also hidden as if a moderator had hidden them, with reason
+  `Deleted by the player` and marked as deleted by their owner (`RunHiddenReason.deletedByOwner`). Moderators still
+  see them and may unhide them.
+- Everything else of the account is deleted: sessions, score, achievements, reports, content votes and strikes,
+  cheat kicks. The moderation audit log keeps an entry "account deleted by the player" with the old username. The
+  username is free again right away.
+- The account's other connections get push `Disconnect(SessionInvalid, "This account was deleted.")`; this
+  connection stays open, logged out.
+
 ## Profiles and score
 
 Every account has a public mini-profile. **Score** grows with online races (race sets, battle sets, championship
@@ -192,7 +213,8 @@ accounts with score > 0 that are not disabled (equal scores share a rank); 0 = u
 **Last active** is the last login, resume or end of a logged-in connection; `online` is true while the account has a
 logged-in connection. A player may take their profile off the players list (`ListPlayers`, default: listed); it stays
 reachable everywhere their name appears (lobbies, leaderboards, rankings). Disabled accounts appear in no list and
-are `NotFound` for everyone except moderators.
+are `NotFound` for everyone except moderators. Anonymous accounts (see `DeleteAccount`) appear in no list or ranking
+and are `NotFound` for everyone.
 
 `PlayerSummary`:
 
@@ -237,6 +259,53 @@ are `NotFound` for everyone except moderators.
 
 None but `SetProfileListed` needs login.
 
+## Achievements
+
+Achievements are defined by the game and its mods; the server knows nothing about them but ids. It stores, per
+account, the **stats** the game counts and the achievements it unlocked, so progress follows the player across
+devices and survives uninstalling a mod (whatever the game no longer shows stays stored).
+
+- **Ids**: stat ids 1–64, set items and achievement ids 1–96 characters of `A–Z a–z 0–9 _ . -`, compared exactly
+  (case-sensitive). Anything else is `BadRequest`.
+- **Counter** stats add up: a sync sends the delta since the last successful sync (u32), the server keeps the u64
+  total. **Maximum** stats keep the highest value ever sent (u32). **Set** stats are sets of item ids (e.g. finished
+  track ids); a sync sends items to add, nothing is ever removed. **Unlocked** achievements keep the earliest unlock
+  time sent; times in the future count as now, times ≤ 0 are `BadRequest`.
+- **Caps per account**: 500 stats (counters, maxima and set stats together), 5000 set items over all sets, 2000
+  unlocked achievements. A sync that would exceed one is refused whole with `BadRequest`.
+
+### SyncAchievements (request 27)
+
+Needs login. Request:
+
+| Field | Type | |
+| ------- | ------ | - |
+| counters | list<(stat: string ≤ 64, delta: u32)> ≤ 256 | added to the account totals (a stat listed twice adds both) |
+| maxima | list<(stat: string ≤ 64, value: u32)> ≤ 256 | |
+| sets | list<(stat: string ≤ 64, items: list<string ≤ 96> ≤ 2000)> ≤ 64 | items to add |
+| unlocked | list<(id: string ≤ 96, at: time)> ≤ 2000 | |
+
+Response, the account's whole merged progress, every list sorted by id (byte order):
+
+| Field | Type | |
+| ------- | ------ | - |
+| counters | list<(stat: string ≤ 64, value: u64)> ≤ 500 | totals |
+| maxima | list<(stat: string ≤ 64, value: u32)> ≤ 500 | |
+| sets | list<(stat: string ≤ 64, items: list<string ≤ 96> ≤ 5000)> ≤ 500 | full sets, items sorted |
+| unlocked | list<(id: string ≤ 96, at: time)> ≤ 2000 | earliest times |
+
+An empty request just fetches. The merge is atomic per request (a refused request stores nothing); syncs of one
+account apply one after another. A client keeps the deltas it sent until the response arrives and sends them again
+after a failure other than `BadRequest`; only a response lost after the server applied the request counts them twice.
+
+### AchievementShares (request 28)
+
+`ids: list<string ≤ 96> ≤ 2000` → `players: u32`, `list<(id: string ≤ 96, unlocked: u32)> ≤ 2000`. No login needed.
+`players` counts the accounts that ever sent `SyncAchievements` (disabled and anonymous accounts excluded),
+`unlocked` how many of them unlocked the achievement; a client shows `unlocked / players` as the share of players.
+With ids the answer lists each requested id once, in request order, 0 when nobody unlocked it; an empty list asks
+for the 2000 most unlocked achievements (most first, ties by id).
+
 ## Time trials (phase 2)
 
 ### Concepts
@@ -260,9 +329,13 @@ None but `SetProfileListed` needs login.
   number of distinct accounts that reported the run. Reports from accounts that were ever kicked from a race for
   cheating, and reports on one's own run, are accepted and ignored. Nothing is hidden automatically. **Only
   moderators see flags**: every `RunEntry` and `ReportRun` answer carries `flags` 0 for anybody else.
-- **Hidden**: a moderator hid the run (or the owner's account is disabled). Hidden runs are excluded for everyone
-  except moderators, who list them with `ModListHidden` (the game's Hidden tab) or see them with `hidden` set when they
-  ask for `includeHidden`. Nothing a moderator does is permanent; only the sysadmin CLI deletes.
+- **Hidden**: a moderator hid the run, its player deleted it with their account (`DeleteAccount` with `deleteRuns`,
+  reason `Deleted by the player`), or the owner's account is disabled. Hidden runs are excluded for everyone except
+  moderators, who list them with `ModListHidden` (the game's Hidden tab) or see them with `hidden` set when they ask
+  for `includeHidden`; `RunHiddenReason` tells why. Nothing a moderator does is permanent; only the sysadmin CLI
+  deletes.
+- **Anonymous runs**: the runs of a deleted account belong to an anonymous account (see `DeleteAccount`) and show
+  username `Anonymous`, country `""`.
 
 ### Upload validation (server)
 
@@ -395,8 +468,24 @@ hidden ones included with `hidden` set), so the client can mark local ghosts as 
 
 `accountId: u64`, `offset: u32`, `limit: u16` (1–100) → `total: u32`, `list<RunEntry>`: the account's visible runs
 on every board (moderators: hidden ones too, with `hidden` set), newest upload first; `rank` is the board rank of
-the account's best run there, 0 for its other runs. `NotFound` when the account is unknown, or disabled for a
-non-moderator. No login needed.
+the account's best run there, 0 for its other runs. `NotFound` when the account is unknown, or disabled or
+anonymous for a non-moderator. No login needed.
+
+### RunHiddenReason (request 135)
+
+`runId: u64` → why the run is hidden. Needs login; answers moderators and the run's owner (`NotFound` for anybody
+else, and for unknown runs; runs of anonymous accounts therefore answer moderators only).
+
+| Field | Type | |
+| ------- | ------ | - |
+| hiddenAt | time | 0 = not hidden |
+| moderator | string ≤ 20 | username of the moderator who hid it; `""` = the sysadmin, the player's own deletion, a disabled owner, or a moderator account deleted since |
+| reason | string ≤ 256 | the moderator's reason, `Deleted by the player`, or the disable reason |
+| deletedByOwner | bool | the player deleted it with their account (`DeleteAccount` with `deleteRuns`) |
+| accountDisabled | bool | hidden because the owner's account is disabled (`hiddenAt` = when it was disabled, `reason` = why) |
+
+A run hidden by a moderator or its player reports that; `accountDisabled` is only set for a run not hidden itself
+whose owner is disabled.
 
 ## Moderation (phase 2)
 
