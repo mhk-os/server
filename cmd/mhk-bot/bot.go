@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/mhk-os/server/internal/proto"
@@ -28,8 +29,10 @@ type botConfig struct {
 	trackID   string // the ghost's track: voted for when the lobby offers it
 	replay    *replay
 	manifests *manifestFile
-	keepAlive time.Duration // TCP Ping interval
-	platform  string        // Hello.platform
+	keepAlive time.Duration     // TCP Ping interval
+	platform  string            // Hello.platform
+	handOver  time.Duration     // > 0: as AI host, leave the race this long after GO and rejoin (the next human hosts)
+	loaded    *proto.RaceLoaded // non-nil: the content a game client loaded, sent instead of a unique hash
 }
 
 // bot is one simulated player: lobby member and racer replaying the ghost.
@@ -46,6 +49,7 @@ type bot struct {
 	slot       uint8
 	raceGo     chan time.Time
 	raceStop   context.CancelFunc
+	handing    atomic.Bool // leaving the lobby on purpose (hand-over): its LobbyLeft is expected
 }
 
 func (b *bot) serverNow() time.Time { return time.Now().Add(b.offset) }
@@ -149,6 +153,9 @@ func (b *bot) onPush(ctx context.Context, p testclient.Push) error {
 	case proto.PushLobbyLeft:
 		var m proto.LobbyLeft
 		m.Decode(r)
+		if m.Reason == proto.LeftSelf && b.handing.CompareAndSwap(true, false) {
+			return nil
+		}
 		return fmt.Errorf("left the lobby (reason %d): %s", m.Reason, m.Message)
 	case proto.PushDisconnect:
 		var m proto.Disconnect
@@ -183,8 +190,35 @@ func (b *bot) onPush(ctx context.Context, p testclient.Push) error {
 			}
 			b.stopRace()
 		}
+	case proto.PushAiHost:
+		var m proto.AiHost
+		if m.Decode(r) == nil && m.RaceID == b.raceID && m.Slot == b.slot {
+			b.warnAIHost(m.RaceID)
+		}
 	}
+	// Everything about AI karts (their grants, uses, hits, finishes) concerns the bot's own kart in no way.
 	return nil
+}
+
+// handOverAI leaves the lobby (and so the race) as its AI host, so the server elects the next human, and joins the
+// lobby again for the next race.
+func (b *bot) handOverAI(ctx context.Context, raceID uint64) error {
+	b.log.Info("handing the AI karts over: leaving the race", "race", raceID)
+	// The race's own context ends with the race: the rejoin must outlive it.
+	jctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	b.handing.Store(true)
+	if err := b.c.LeaveLobby(jctx); err != nil {
+		return err
+	}
+	_, err := b.joinLobby(jctx)
+	return err
+}
+
+// warnAIHost: a bot never reports for the AI karts (it simulates none), so while it hosts they take no items and
+// never finish (DNF). Retry the race until a game client has the lowest human slot.
+func (b *bot) warnAIHost(raceID uint64) {
+	b.log.Warn("this bot is the AI host: the AI karts will not pick up items or finish", "race", raceID)
 }
 
 func (b *bot) onLobbyState(ctx context.Context, st *proto.LobbyState) {
@@ -256,15 +290,30 @@ func (b *bot) race(ctx context.Context, setup *proto.RaceSetup, goCh <-chan time
 	if laps == 0 {
 		laps = uint8(rp.g.Laps)
 	}
-	if err := b.c.Notify(proto.NotifyRaceLoaded, &proto.RaceLoaded{RaceID: setup.RaceID,
-		TrackHash: loadedHash(b.acc), Laps: laps}); err != nil {
+	loaded := &proto.RaceLoaded{RaceID: setup.RaceID, TrackHash: loadedHash(b.acc), Laps: laps}
+	if b.cfg.loaded != nil {
+		copied := *b.cfg.loaded
+		copied.RaceID = setup.RaceID
+		loaded, laps = &copied, copied.Laps
+	}
+	if err := b.c.Notify(proto.NotifyRaceLoaded, loaded); err != nil {
 		return err
 	}
 	if int(laps) != len(rp.g.LapMs) {
 		b.log.Warn("race laps differ from the ghost's: the server will time the finish itself", "race", laps,
 			"ghost", len(rp.g.LapMs))
 	}
-	b.log.Info("race loaded", "race", setup.RaceID, "track", setup.TrackID, "slot", setup.YourSlot, "solo", setup.Solo)
+	ai := 0
+	for _, s := range setup.Grid {
+		if s.AI {
+			ai++
+		}
+	}
+	b.log.Info("race loaded", "race", setup.RaceID, "track", setup.TrackID, "slot", setup.YourSlot, "ai", ai,
+		"aiHost", setup.AIHost, "set", fmt.Sprintf("%d/%d", setup.SetRace, setup.SetSize))
+	if ai > 0 && setup.AIHost == setup.YourSlot {
+		b.warnAIHost(setup.RaceID)
+	}
 	var goAt time.Time
 	select {
 	case <-ctx.Done():
@@ -281,18 +330,17 @@ func (b *bot) race(ctx context.Context, setup *proto.RaceSetup, goCh <-chan time
 		case <-tick.C:
 		}
 		t := b.serverNow().Sub(goAt)
+		if b.cfg.handOver > 0 && ai > 0 && setup.AIHost == setup.YourSlot && t >= b.cfg.handOver {
+			return b.handOverAI(ctx, setup.RaceID)
+		}
 		st := rp.state(t)
 		udp.SetState(st)
 		if finished || t < rp.finish() {
 			continue
 		}
 		finished = true
-		var position uint8
-		if setup.Solo {
-			position = 1
-		}
 		if err := b.c.Notify(proto.NotifyFinished, &proto.Finished{RaceID: setup.RaceID, FinishMs: rp.g.FinishMs,
-			LapMs: rp.g.LapMs, Tick: st.Tick, Position: position}); err != nil {
+			LapMs: rp.g.LapMs, Tick: st.Tick, Slot: proto.OwnSlot}); err != nil {
 			return err
 		}
 		b.log.Info("finished", "race", setup.RaceID, "ms", rp.g.FinishMs)

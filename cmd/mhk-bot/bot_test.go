@@ -314,7 +314,7 @@ func TestBotRacesHuman(t *testing.T) {
 	}
 	ms := int32(time.Since(goMsg.Go).Milliseconds())
 	if err := human.Notify(proto.NotifyFinished, &proto.Finished{RaceID: setup.RaceID, FinishMs: ms,
-		LapMs: []int32{ms / 3, ms / 3, ms - 2*(ms/3)}}); err != nil {
+		LapMs: []int32{ms / 3, ms / 3, ms - 2*(ms/3)}, Slot: proto.OwnSlot}); err != nil {
 		t.Fatal(err)
 	}
 	var results proto.RaceResults

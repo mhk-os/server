@@ -37,8 +37,9 @@ const (
 	zeroHealthLimit   = 2 * time.Second
 	unknownWindow     = 2 * time.Second
 	projectileEvery   = 500 * time.Millisecond
-	projectileSpread  = 2.0 // m: correct when a report is farther from the median
-	outlierMin        = 4.0 // m
+	projectileSilence = 10 * time.Second // no report for this long ends tracking
+	projectileSpread  = 2.0              // m: correct when a report is farther from the median
+	outlierMin        = 4.0              // m
 	bridgeWindow      = 150 * time.Millisecond
 	pickupSlack       = 100 * time.Millisecond
 	pickupMinRadius   = 8.0 // m
@@ -123,6 +124,7 @@ type raceState struct {
 	isEffect    map[string]bool
 	boxFreeAt   []time.Time
 	uses        map[uint32]*use
+	live        map[uint32]*use // uses whose projectile is still tracked (judged every tick)
 	hitsTaken   map[hitKey]bool
 	claims      map[hitKey]*hitClaim
 	reports     map[uint8]map[uint8]cheatVote // suspect → reporter → latest report
@@ -131,13 +133,17 @@ type raceState struct {
 	firstFinish time.Time
 	elimCount   int
 
+	hasAI    bool  // some seat is an AI kart
+	aiHost   *seat // the human reporting for the AI karts, nil = none (no AI or no human left)
+	progress proto.UDPAiProgressPayload
+
 	worldBuf []byte
 	log      *slog.Logger
 }
 
 func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *slog.Logger, seed [32]byte,
 	now time.Time) *raceState {
-	return &raceState{
+	rs := &raceState{
 		id:        id,
 		spec:      spec,
 		env:       e,
@@ -146,6 +152,7 @@ func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *
 		seats:     seats,
 		started:   now,
 		uses:      map[uint32]*use{},
+		live:      map[uint32]*use{},
 		hitsTaken: map[hitKey]bool{},
 		claims:    map[hitKey]*hitClaim{},
 		reports:   map[uint8]map[uint8]cheatVote{},
@@ -154,6 +161,45 @@ func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *
 		worldBuf:  make([]byte, 0, proto.UDPMaxDatagram),
 		log:       log.With("race", id),
 	}
+	rs.hasAI = slices.ContainsFunc(seats, func(s *seat) bool { return s.ai })
+	rs.electHost()
+	return rs
+}
+
+// electHost makes the human with the lowest slot still in the race the AI host (nil without AI or humans).
+func (rs *raceState) electHost() {
+	rs.aiHost = nil
+	if !rs.hasAI {
+		return
+	}
+	for _, s := range rs.seats {
+		if !s.ai && !s.out {
+			rs.aiHost = s
+			return
+		}
+	}
+}
+
+// aiHostSlot is RaceSetup.aiHost: the host's slot, NoSlot without one.
+func (rs *raceState) aiHostSlot() uint8 {
+	if rs.aiHost == nil {
+		return proto.NoSlot
+	}
+	return rs.aiHost.slot
+}
+
+// kart resolves the slot field of a kart notify from s: OwnSlot is s's own kart, an AI slot counts only from the AI
+// host. Anything else (another human's slot, an AI slot from a non-host) is ignored: nil.
+func (rs *raceState) kart(s *seat, slot uint8) *seat {
+	if slot == proto.OwnSlot {
+		return s
+	}
+	if k := rs.seatAt(slot); k != nil && k.ai && s == rs.aiHost {
+		return k
+	}
+	rs.debug("notify about another kart ignored (not the AI host, or not an AI slot)", s, "about", slot,
+		"aiHost", rs.aiHostSlot())
+	return nil
 }
 
 // debug logs a race event at Debug level with the racer's slot and account (s may be nil). Client developers
@@ -164,6 +210,9 @@ func (rs *raceState) debug(msg string, s *seat, args ...any) {
 	}
 	if s != nil {
 		args = append(args, "slot", s.slot, "account", s.racer.AccountID)
+		if s.ai {
+			args = append(args, "ai", true)
+		}
 	}
 	rs.log.Debug(msg, args...)
 }
@@ -173,9 +222,10 @@ func (rs *raceState) debugging() bool { return rs.log.Enabled(context.Background
 
 func shortHash(h [32]byte) string { return hex.EncodeToString(h[:6]) }
 
+// seatOf returns the human seat of an account.
 func (rs *raceState) seatOf(accountID uint64) *seat {
 	for _, s := range rs.seats {
-		if s.racer.AccountID == accountID {
+		if !s.ai && s.racer.AccountID == accountID {
 			return s
 		}
 	}
@@ -189,8 +239,8 @@ func (rs *raceState) seatAt(slot uint8) *seat {
 	return nil
 }
 
-// arbitrated reports whether items, hits and projectiles are judged: never in solo races or before agreement.
-func (rs *raceState) arbitrated() bool { return !rs.spec.Solo && rs.phase == phaseRacing }
+// arbitrated reports whether items, hits and projectiles are judged: after the load agreement until the end.
+func (rs *raceState) arbitrated() bool { return rs.phase == phaseRacing }
 
 func (rs *raceState) raceTick(now time.Time) uint32 {
 	if now.Before(rs.goAt) {
@@ -199,10 +249,10 @@ func (rs *raceState) raceTick(now time.Time) uint32 {
 	return uint32(now.Sub(rs.goAt) * ticksPerSecond / time.Second)
 }
 
-// pushAll sends m to every racer still in the race, except skip (nil = nobody).
+// pushAll sends m to every human still in the race, except skip (nil = nobody). AI karts have no connection.
 func (rs *raceState) pushAll(typ proto.Type, m proto.Message, skip *seat) {
 	for _, s := range rs.seats {
-		if !s.out && s != skip {
+		if !s.ai && !s.out && s != skip {
 			rs.env.push(s.racer.AccountID, typ, m)
 		}
 	}
@@ -213,8 +263,8 @@ func (rs *raceState) rttOK(s *seat) bool {
 	return ok && d <= maxEligibleRTT
 }
 
-// eligible: a racer whose checks, reports and claims count.
-func (rs *raceState) eligible(s *seat) bool { return !s.out && !s.everKicked && rs.rttOK(s) }
+// eligible: a human racer whose checks, reports and claims count.
+func (rs *raceState) eligible(s *seat) bool { return !s.ai && !s.out && !s.everKicked && rs.rttOK(s) }
 
 // observerThreshold is max(2, ⌈eligible observers of x / 2⌉).
 func (rs *raceState) observerThreshold(x *seat) int {
@@ -268,7 +318,7 @@ func (rs *raceState) maybeDecideLoad(now time.Time) {
 		return
 	}
 	for _, s := range rs.seats {
-		if !s.out && s.loaded == nil {
+		if !s.ai && !s.out && s.loaded == nil {
 			return
 		}
 	}
@@ -384,9 +434,10 @@ func packOf(id string) string {
 
 // --- leaving, strikes, kicks ---
 
-// leave takes s out of the race. Idempotent.
+// leave takes a human out of the race; a leaving AI host hands the AI karts to the next human. Idempotent; AI
+// karts never leave.
 func (rs *raceState) leave(s *seat, outcome Outcome, message string, now time.Time) {
-	if s.out || rs.phase == phaseEnded {
+	if s.ai || s.out || rs.phase == phaseEnded {
 		return
 	}
 	rs.debug("racer left", s, "outcome", outcome, "message", message)
@@ -395,6 +446,14 @@ func (rs *raceState) leave(s *seat, outcome Outcome, message string, now time.Ti
 	s.out, s.outcome, s.outAt = true, outcome, now
 	s.held, s.charges = "", 0
 	rs.env.dropSeat(s)
+	if s == rs.aiHost {
+		rs.electHost()
+		if rs.aiHost != nil {
+			rs.log.Info("new AI host", "slot", rs.aiHost.slot, "account", rs.aiHost.racer.AccountID, "previous",
+				s.slot)
+			rs.pushAll(proto.PushAiHost, &proto.AiHost{RaceID: rs.id, Slot: rs.aiHost.slot}, nil)
+		}
+	}
 	if rs.phase == phaseLoading {
 		rs.maybeDecideLoad(now)
 	}
@@ -403,7 +462,7 @@ func (rs *raceState) leave(s *seat, outcome Outcome, message string, now time.Ti
 
 // strike adds a server-side anticheat strike; 5 within 30 s kick. Anticheat-off races never strike.
 func (rs *raceState) strike(s *seat, why string, now time.Time) {
-	if !rs.spec.Anticheat || rs.spec.Solo || s.out {
+	if !rs.spec.Anticheat || s.ai || s.out {
 		return
 	}
 	keep := 0
@@ -423,7 +482,7 @@ func (rs *raceState) strike(s *seat, why string, now time.Time) {
 
 // kickCheater records the kick and removes the racer (outcome kicked: cheating).
 func (rs *raceState) kickCheater(s *seat, reason, reporters string, now time.Time) {
-	if s.out {
+	if s.ai || s.out {
 		return
 	}
 	rs.env.cheatKick(store.CheatKick{
@@ -441,53 +500,69 @@ func (rs *raceState) kickCheater(s *seat, reason, reporters string, now time.Tim
 
 // --- items ---
 
-func (rs *raceState) deny(s *seat, box uint16, reason uint8, why string, args ...any) {
-	rs.debug("item denied", s, append(args, "box", box, "reason", reason, "why", why)...)
-	rs.env.push(s.racer.AccountID, proto.PushItemDenied, &proto.ItemDenied{RaceID: rs.id, BoxID: box, Reason: reason})
+// deny tells the sender s that kart k (s itself, or an AI kart s hosts) does not get the box.
+func (rs *raceState) deny(s, k *seat, box uint16, reason uint8, why string, args ...any) {
+	rs.debug("item denied", k, append(args, "box", box, "reason", reason, "why", why)...)
+	rs.env.push(s.racer.AccountID, proto.PushItemDenied, &proto.ItemDenied{RaceID: rs.id, BoxID: box, Reason: reason,
+		Slot: k.slot})
 }
 
+// onPickup arbitrates a box pickup of the sender's kart or, from the AI host, of an AI kart. AI pickups have no
+// distance check (the server has no AI positions) and never strike; their grant goes to every racer.
 func (rs *raceState) onPickup(s *seat, m *proto.ItemPickup, now time.Time) {
-	if !rs.arbitrated() || !rs.spec.Items {
-		rs.debug("item pickup ignored (solo, items off or not racing)", s, "box", m.BoxID)
+	k := rs.kart(s, m.Slot)
+	if k == nil {
 		return
 	}
-	if int(m.BoxID) >= len(rs.agreed.Boxes) || now.Before(rs.goAt) || s.eliminated {
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "unknown box, before GO or eliminated", "boxes",
+	if !rs.arbitrated() || !rs.spec.Items {
+		rs.debug("item pickup ignored (items off or not racing)", k, "box", m.BoxID)
+		return
+	}
+	if int(m.BoxID) >= len(rs.agreed.Boxes) || now.Before(rs.goAt) || k.eliminated {
+		rs.deny(s, k, m.BoxID, proto.DenyNotAvailable, "unknown box, before GO or eliminated", "boxes",
 			len(rs.agreed.Boxes))
 		return
 	}
 	box := &rs.agreed.Boxes[m.BoxID]
 	if rs.isEffect[box.Fixed] || now.Before(rs.boxFreeAt[m.BoxID]) {
 		// Effect boxes are applied by each client and never arbitrated.
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "effect box or respawning", "fixed", box.Fixed)
+		rs.deny(s, k, m.BoxID, proto.DenyNotAvailable, "effect box or respawning", "fixed", box.Fixed)
 		return
 	}
-	if !rs.nearBox(s, box.Pos) {
-		rs.deny(s, m.BoxID, proto.DenyTooFar, "too far", "hasState", s.hasState, "distance", dist(s.state.Pos, box.Pos),
-			"speed", s.state.Speed(), "rttMs", s.rttMs())
-		rs.strike(s, "item pickup too far from the box", now)
+	if !k.ai && !rs.nearBox(k, box.Pos) {
+		rs.deny(s, k, m.BoxID, proto.DenyTooFar, "too far", "hasState", k.hasState, "distance",
+			dist(k.state.Pos, box.Pos), "speed", k.state.Speed(), "rttMs", k.rttMs())
+		rs.strike(k, "item pickup too far from the box", now)
 		return
 	}
-	if s.charges > 0 && !rs.agreed.Rules.ReplacesHeld {
-		rs.deny(s, m.BoxID, proto.DenyCannotReceive, "holds "+s.held)
+	if k.charges > 0 && !rs.agreed.Rules.ReplacesHeld {
+		rs.deny(s, k, m.BoxID, proto.DenyCannotReceive, "holds "+k.held)
 		return
 	}
-	id, charges := rs.roll(s, box.Fixed)
+	id, charges := rs.roll(k, box.Fixed)
 	if id == "" {
-		rs.deny(s, m.BoxID, proto.DenyNotAvailable, "nothing to roll (empty pool or odds)")
+		rs.deny(s, k, m.BoxID, proto.DenyNotAvailable, "nothing to roll (empty pool or odds)")
 		return
 	}
 	rs.boxFreeAt[m.BoxID] = now.Add(time.Duration(box.RespawnTenths) * 100 * time.Millisecond)
-	s.held, s.charges = id, charges
-	s.usableAt = now.Add(time.Duration(rs.agreed.Rules.RouletteMs)*time.Millisecond - rouletteSlack)
-	if rs.debugging() {
-		rs.debug("item granted", s, "box", m.BoxID, "powerup", id, "charges", charges, "tick", m.Tick,
-			"fixed", box.Fixed, "fraction", rs.positionFraction(s))
+	k.held, k.charges = id, charges
+	k.usableAt = now.Add(time.Duration(rs.agreed.Rules.RouletteMs)*time.Millisecond - rouletteSlack)
+	grant := &proto.ItemGranted{RaceID: rs.id, BoxID: m.BoxID, PowerupID: id, Charges: charges, Tick: m.Tick,
+		Slot: k.slot}
+	if k.ai {
+		// Info, not Debug: live tests watch AI items without the per-datagram noise of debug logging.
+		rs.log.Info("AI item granted", "slot", k.slot, "box", m.BoxID, "powerup", id, "charges", charges,
+			"tick", m.Tick, "fixed", box.Fixed, "fraction", rs.positionFraction(k), "host", s.slot)
+		rs.pushAll(proto.PushItemGranted, grant, nil)
+		return
 	}
-	rs.env.push(s.racer.AccountID, proto.PushItemGranted, &proto.ItemGranted{RaceID: rs.id, BoxID: m.BoxID,
-		PowerupID: id, Charges: charges, Tick: m.Tick})
-	rs.pushAll(proto.PushItemBoxTaken, &proto.ItemBoxTaken{RaceID: rs.id, Slot: s.slot, BoxID: m.BoxID,
-		Tick: m.Tick}, s)
+	if rs.debugging() {
+		rs.debug("item granted", k, "box", m.BoxID, "powerup", id, "charges", charges, "tick", m.Tick,
+			"fixed", box.Fixed, "fraction", rs.positionFraction(k))
+	}
+	rs.env.push(k.racer.AccountID, proto.PushItemGranted, grant)
+	rs.pushAll(proto.PushItemBoxTaken, &proto.ItemBoxTaken{RaceID: rs.id, Slot: k.slot, BoxID: m.BoxID,
+		Tick: m.Tick}, k)
 }
 
 // nearBox checks the racer's latest UDP position against the box: max(8 m, speed × (RTT + 100 ms) + 4 m).
@@ -616,76 +691,85 @@ func drawPool(rng *rand.Rand, pool []proto.PoolEntry, odds []proto.ItemOdds, f f
 	return last
 }
 
+// onUse arbitrates an item use of the sender's kart or, from the AI host, of an AI kart (use id
+// (aiSlot + 1) << 24 | n). It is relayed to everyone but the sender.
 func (rs *raceState) onUse(s *seat, m *proto.ItemUse, now time.Time) {
-	if !rs.arbitrated() || s.eliminated {
-		rs.debug("item use ignored (solo, not racing or eliminated)", s, "use", m.UseID)
+	k := rs.kart(s, m.Slot)
+	if k == nil {
+		return
+	}
+	if !rs.arbitrated() || k.eliminated {
+		rs.debug("item use ignored (not racing or eliminated)", k, "use", m.UseID)
 		return
 	}
 	reject := func(reason uint8, why string) {
-		rs.debug("item use rejected", s, "use", m.UseID, "reason", reason, "why", why, "held", s.held,
-			"charges", s.charges)
+		rs.debug("item use rejected", k, "use", m.UseID, "reason", reason, "why", why, "held", k.held,
+			"charges", k.charges)
 		rs.env.push(s.racer.AccountID, proto.PushItemUseRejected,
 			&proto.ItemUseRejected{RaceID: rs.id, UseID: m.UseID, Reason: reason})
 	}
 	_, reused := rs.uses[m.UseID]
-	if m.UseID>>24 != uint32(s.slot)+1 || m.UseID&0xFFFFFF == 0 || reused || s.charges == 0 {
+	if m.UseID>>24 != uint32(k.slot)+1 || m.UseID&0xFFFFFF == 0 || reused || k.charges == 0 {
 		why := "nothing held"
 		switch {
-		case m.UseID>>24 != uint32(s.slot)+1 || m.UseID&0xFFFFFF == 0:
+		case m.UseID>>24 != uint32(k.slot)+1 || m.UseID&0xFFFFFF == 0:
 			why = "use id not (slot+1)<<24|n"
 		case reused:
 			why = "use id reused"
 		}
 		reject(proto.RejectNotHeld, why)
-		rs.strike(s, "item use without holding it", now)
+		rs.strike(k, "item use without holding it", now)
 		return
 	}
-	if now.Before(s.usableAt) {
+	if now.Before(k.usableAt) {
 		reject(proto.RejectCooldown, "before roulette end")
 		return
 	}
-	u := &use{owner: s.slot, powerupID: s.held}
-	u.proj = &projectile{pending: map[uint8]pendingReport{}, reporters: map[uint8]bool{}, gone: map[uint8]bool{},
-		struck: map[uint8]bool{}}
+	u := &use{owner: k.slot, powerupID: k.held}
+	u.proj = newProjectile(now)
 	rs.uses[m.UseID] = u
-	s.charges--
-	if s.charges == 0 {
-		s.held = ""
+	rs.live[m.UseID] = u
+	k.charges--
+	if k.charges == 0 {
+		k.held = ""
 	}
-	rs.debug("item used", s, "use", m.UseID, "powerup", u.powerupID, "chargesLeft", s.charges, "tick", m.Tick,
+	rs.debug("item used", k, "use", m.UseID, "powerup", u.powerupID, "chargesLeft", k.charges, "tick", m.Tick,
 		"target", m.TargetSlot)
-	rs.pushAll(proto.PushItemUsed, &proto.ItemUsed{RaceID: rs.id, Slot: s.slot, UseID: m.UseID, PowerupID: u.powerupID,
+	rs.pushAll(proto.PushItemUsed, &proto.ItemUsed{RaceID: rs.id, Slot: k.slot, UseID: m.UseID, PowerupID: u.powerupID,
 		Tick: m.Tick, Pos: m.Pos, Rot: m.Rot, Backwards: m.Backwards, TargetSlot: m.TargetSlot}, s)
 }
 
 // --- hits ---
 
+// onHitTaken relays a hit the victim (the sender's kart, or an AI kart from the AI host) applied to itself.
 func (rs *raceState) onHitTaken(s *seat, m *proto.HitTaken, now time.Time) {
-	if !rs.arbitrated() {
+	v := rs.kart(s, m.Slot)
+	if v == nil || !rs.arbitrated() {
 		return
 	}
 	if m.AttackerSlot != proto.NoSlot && rs.seatAt(m.AttackerSlot) == nil {
 		return
 	}
 	if m.UseID != 0 {
-		k := hitKey{s.slot, m.UseID}
+		k := hitKey{v.slot, m.UseID}
 		if rs.hitsTaken[k] {
 			return
 		}
 		rs.hitsTaken[k] = true
 		delete(rs.claims, k)
 	}
-	rs.debug("hit taken", s, "use", m.UseID, "attacker", m.AttackerSlot, "effect", m.EffectID, "tick", m.Tick)
-	rs.pushAll(proto.PushHitApplied, &proto.HitApplied{RaceID: rs.id, VictimSlot: s.slot, AttackerSlot: m.AttackerSlot,
+	rs.debug("hit taken", v, "use", m.UseID, "attacker", m.AttackerSlot, "effect", m.EffectID, "tick", m.Tick)
+	rs.pushAll(proto.PushHitApplied, &proto.HitApplied{RaceID: rs.id, VictimSlot: v.slot, AttackerSlot: m.AttackerSlot,
 		UseID: m.UseID, EffectID: m.EffectID, Tick: m.Tick}, s)
 }
 
+// onHitSeen collects observers' claims that a human was hit; claims about AI karts are ignored.
 func (rs *raceState) onHitSeen(obs *seat, m *proto.HitSeen, now time.Time) {
 	if !rs.arbitrated() || m.UseID == 0 {
 		return
 	}
 	victim := rs.seatAt(m.VictimSlot)
-	if victim == nil || victim == obs || victim.out || rs.uses[m.UseID] == nil {
+	if victim == nil || victim.ai || victim == obs || victim.out || rs.uses[m.UseID] == nil {
 		return
 	}
 	k := hitKey{victim.slot, m.UseID}
@@ -736,40 +820,40 @@ func (rs *raceState) tickHits(now time.Time) {
 
 // --- finish, battles, bridges ---
 
+// onFinished takes the finish of the sender's kart or, from the AI host, of an AI kart. A time the server cannot
+// believe is replaced by its clock (a strike for humans).
 func (rs *raceState) onFinished(s *seat, m *proto.Finished, now time.Time) {
-	if rs.phase != phaseRacing || s.finished || now.Before(rs.goAt) {
-		rs.debug("finish ignored (not racing, before GO or already finished)", s, "finishMs", m.FinishMs)
+	k := rs.kart(s, m.Slot)
+	if k == nil {
 		return
 	}
-	if rs.spec.Solo {
-		s.finished, s.finishAt, s.lapMs = true, now, m.LapMs
-		s.finishMs = m.FinishMs
-		if s.finishMs <= 0 {
-			s.finishMs = int32(now.Sub(rs.goAt).Milliseconds())
-		}
-		s.soloPosition = clampPosition(m.Position, rs.spec.AICount)
-		rs.debug("solo finished", s, "finishMs", s.finishMs, "position", m.Position, "taken", s.soloPosition)
-		rs.end(now)
+	if rs.phase != phaseRacing || k.finished || now.Before(rs.goAt) {
+		rs.debug("finish ignored (not racing, before GO or already finished)", k, "finishMs", m.FinishMs)
 		return
 	}
-	if rs.spec.Mode == ModeBattle || s.eliminated {
+	if rs.spec.Mode == ModeBattle || k.eliminated {
 		return
 	}
 	elapsed := now.Sub(rs.goAt)
-	s.finishMs = m.FinishMs
+	k.finishMs = m.FinishMs
 	plausible := finishPlausible(m, elapsed, s.rttOr(0), rs.agreed.Laps)
 	if !plausible {
-		rs.strike(s, "finish time or laps disagree with the server", now)
-		s.finishMs = int32(elapsed.Milliseconds())
+		rs.strike(k, "finish time or laps disagree with the server", now)
+		k.finishMs = int32(elapsed.Milliseconds())
 	}
-	rs.debug("finished", s, "claimedMs", m.FinishMs, "serverMs", elapsed.Milliseconds(), "takenMs", s.finishMs,
-		"laps", len(m.LapMs), "raceLaps", rs.agreed.Laps, "plausible", plausible, "tick", m.Tick)
-	s.finished, s.finishAt, s.lapMs = true, now, m.LapMs
+	if k.ai {
+		rs.log.Info("AI finished", "slot", k.slot, "claimedMs", m.FinishMs, "takenMs", k.finishMs,
+			"plausible", plausible, "host", s.slot)
+	} else {
+		rs.debug("finished", k, "claimedMs", m.FinishMs, "serverMs", elapsed.Milliseconds(), "takenMs", k.finishMs,
+			"laps", len(m.LapMs), "raceLaps", rs.agreed.Laps, "plausible", plausible, "tick", m.Tick)
+	}
+	k.finished, k.finishAt, k.lapMs = true, now, m.LapMs
 	if rs.firstFinish.IsZero() {
 		rs.firstFinish = now
 	}
-	rs.pushAll(proto.PushPlayerFinished, &proto.PlayerFinished{RaceID: rs.id, Slot: s.slot, FinishMs: s.finishMs,
-		LapMs: s.lapMs}, nil)
+	rs.pushAll(proto.PushPlayerFinished, &proto.PlayerFinished{RaceID: rs.id, Slot: k.slot, FinishMs: k.finishMs,
+		LapMs: k.lapMs}, nil)
 	rs.checkEnd(now)
 }
 
@@ -779,19 +863,13 @@ func finishPlausible(m *proto.Finished, elapsed, rtt time.Duration, laps uint8) 
 	return diff.Abs() <= rtt+finishTolerance && len(m.LapMs) == int(laps)
 }
 
-// clampPosition maps a solo racer's reported place into 1..AI+1 (0 or out of range: last).
-func clampPosition(p, ai uint8) uint8 {
-	if p == 0 || int(p) > int(ai)+1 {
-		return ai + 1
-	}
-	return p
-}
-
+// onEliminatedSelf takes a battle elimination of the sender's kart or, from the AI host, of an AI kart.
 func (rs *raceState) onEliminatedSelf(s *seat, m *proto.EliminatedSelf, now time.Time) {
-	if !rs.arbitrated() || rs.spec.Mode != ModeBattle || now.Before(rs.goAt) || s.eliminated {
+	k := rs.kart(s, m.Slot)
+	if k == nil || !rs.arbitrated() || rs.spec.Mode != ModeBattle || now.Before(rs.goAt) || k.eliminated {
 		return
 	}
-	rs.eliminate(s, m.AttackerSlot, m.Tick, now)
+	rs.eliminate(k, m.AttackerSlot, m.Tick, now)
 }
 
 func (rs *raceState) eliminate(s *seat, attacker uint8, tick uint32, now time.Time) {
@@ -811,7 +889,7 @@ func (rs *raceState) tickHealth(now time.Time) {
 		return
 	}
 	for _, s := range rs.seats {
-		if s.out || s.eliminated || !s.hasState || s.state.Health > 0 {
+		if s.ai || s.out || s.eliminated || !s.hasState || s.state.Health > 0 {
 			s.zeroHealthFrom = time.Time{}
 			continue
 		}
@@ -854,12 +932,12 @@ func (rs *raceState) tickBridges(now time.Time) {
 
 // --- anticheat reports, unknown content ---
 
-// onCheatReport stores every report about another racer (moderators review races where nobody could be kicked)
-// and counts it towards a kick when reportIgnored allows.
+// onCheatReport stores every report about another human racer (moderators review races where nobody could be
+// kicked) and counts it towards a kick when reportIgnored allows. Reports about AI karts are dropped.
 func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Time) {
 	suspect := rs.seatAt(m.SuspectSlot)
-	if suspect == nil || suspect == rep {
-		rs.debug("cheat report about nobody", rep, "suspect", m.SuspectSlot)
+	if suspect == nil || suspect.ai || suspect == rep {
+		rs.debug("cheat report about nobody or an AI kart", rep, "suspect", m.SuspectSlot)
 		return
 	}
 	ignored := rs.reportIgnored(rep, suspect, m.Reason)
@@ -928,11 +1006,11 @@ func (rs *raceState) reportIgnored(rep, suspect *seat, reason proto.FlagReason) 
 }
 
 func (rs *raceState) onUnknownContent(rep *seat, m *proto.UnknownContent, now time.Time) {
-	if rs.spec.Solo || rs.phase == phaseEnded {
+	if rs.phase == phaseEnded {
 		return
 	}
 	x := rs.seatAt(m.Slot)
-	if x == nil || x == rep || x.out {
+	if x == nil || x.ai || x == rep || x.out {
 		rs.debug("unknown content ignored", rep, "about", m.Slot, "id", m.ID)
 		return
 	}
@@ -1009,11 +1087,32 @@ func (rs *raceState) onState(s *seat, payload []byte, now time.Time) {
 	}
 }
 
-// world sends every racer with a known address the other racers' latest states, splitting at the datagram limit.
+// onAiProgress stores the AI host's report of its AI karts (UDP AiProgress): lap, raceDistance and health feed
+// item rolls, DNF ranking and battle survivor ranking. Datagrams from anybody else are ignored.
+func (rs *raceState) onAiProgress(s *seat, payload []byte, now time.Time) {
+	if s != rs.aiHost || s.out || rs.phase == phaseEnded {
+		return
+	}
+	if err := rs.progress.Decode(wire.NewReader(payload)); err != nil {
+		rs.debug("malformed AI progress", s, "err", err, "len", len(payload))
+		return
+	}
+	for _, e := range rs.progress.Entries {
+		if k := rs.seatAt(e.Slot); k != nil && k.ai {
+			k.state.Lap, k.state.RaceDistance, k.state.Health = e.Lap, e.RaceDistance, e.Health
+		}
+	}
+}
+
+// world sends every human with a known address the other humans' latest states, splitting at the datagram limit.
+// AI karts have no address and no state: every client simulates them itself.
 func (rs *raceState) world(now time.Time) {
 	for _, to := range rs.seats {
+		if to.ai || to.out {
+			continue
+		}
 		addr := to.addr.Load()
-		if to.out || addr == nil {
+		if addr == nil {
 			continue
 		}
 		countAt := -1 // offset of the entry count of the datagram being built, -1 = none
@@ -1057,7 +1156,7 @@ func (rs *raceState) tick(now time.Time) {
 	case phaseLoading:
 		if now.Sub(rs.started) >= loadTimeout {
 			for _, s := range rs.seats {
-				if !s.out && s.loaded == nil {
+				if !s.ai && !s.out && s.loaded == nil {
 					rs.leave(s, OutcomeLeft, "Did not finish loading in time.", now)
 				}
 			}
@@ -1074,24 +1173,32 @@ func (rs *raceState) tick(now time.Time) {
 	}
 }
 
+// checkEnd ends the race when no human is left; races when every kart finished, 30 s after the first finisher
+// (human or AI) or after 20 min; battles when at most one kart is alive (of a battle that started with two or
+// more), when no human is alive, or after 4 min.
 func (rs *raceState) checkEnd(now time.Time) {
 	if rs.phase == phaseEnded {
 		return
 	}
-	in, alive, unfinished := 0, 0, 0
+	humans, alive, humansAlive, unfinished := 0, 0, 0, 0
 	for _, s := range rs.seats {
 		if s.out {
 			continue
 		}
-		in++
+		if !s.ai {
+			humans++
+		}
 		if !s.eliminated {
 			alive++
+			if !s.ai {
+				humansAlive++
+			}
 		}
 		if !s.finished {
 			unfinished++
 		}
 	}
-	if in == 0 {
+	if humans == 0 {
 		rs.end(now)
 		return
 	}
@@ -1100,12 +1207,8 @@ func (rs *raceState) checkEnd(now time.Time) {
 	}
 	since := now.Sub(rs.goAt)
 	switch {
-	case rs.spec.Solo:
-		if since >= raceTimeLimit {
-			rs.end(now)
-		}
 	case rs.spec.Mode == ModeBattle:
-		if alive <= 1 || since >= battleTimeLimit {
+		if (alive <= 1 && len(rs.seats) > 1) || humansAlive == 0 || since >= battleTimeLimit {
 			rs.end(now)
 		}
 	default:
@@ -1123,7 +1226,7 @@ func (rs *raceState) end(now time.Time) {
 	}
 	rs.phase = phaseEnded
 	for _, s := range rs.seats {
-		if !s.out {
+		if !s.ai && !s.out {
 			rs.env.dropSeat(s)
 		}
 	}
@@ -1131,16 +1234,17 @@ func (rs *raceState) end(now time.Time) {
 	if rs.debugging() {
 		rows := make([]string, len(placements))
 		for i, p := range placements {
-			rows[i] = fmt.Sprintf("%d:slot%d:acc%d:%dms:outcome%d", p.Position, p.Slot, p.AccountID, p.FinishMs, p.Outcome)
+			rows[i] = fmt.Sprintf("%d:slot%d:acc%d:ai%v:%dms:outcome%d", p.Position, p.Slot, p.AccountID, p.AI,
+				p.FinishMs, p.Outcome)
 		}
 		rs.debug("race ended", nil, "placements", strings.Join(rows, " "))
 	}
 	rs.env.finished(rs.id, placements)
 }
 
-// placements orders every racer: race mode finishers by time, then DNF by distance; battles survivors by health,
-// then eliminated racers by reverse elimination order (both count as finished, FinishMs = time survived); racers
-// that left last, latest leaver first.
+// placements orders every kart, AI included: race mode finishers by time, then DNF by distance (AI: from
+// AiProgress); battles survivors by health, then eliminated karts by reverse elimination order (both count as
+// finished, FinishMs = time survived); racers that left last, latest leaver first.
 func (rs *raceState) placements(now time.Time) []Placement {
 	var stayed, gone []*seat
 	for _, s := range rs.seats {
@@ -1151,7 +1255,7 @@ func (rs *raceState) placements(now time.Time) []Placement {
 		}
 	}
 	slices.SortStableFunc(gone, func(a, b *seat) int { return b.outAt.Compare(a.outAt) })
-	battle := rs.spec.Mode == ModeBattle && !rs.spec.Solo
+	battle := rs.spec.Mode == ModeBattle
 	if battle {
 		slices.SortStableFunc(stayed, func(a, b *seat) int {
 			switch {
@@ -1169,15 +1273,9 @@ func (rs *raceState) placements(now time.Time) []Placement {
 	}
 	out := make([]Placement, 0, len(rs.seats))
 	add := func(s *seat, outcome Outcome, finishMs int32) {
-		p := Placement{Slot: s.slot, AccountID: s.racer.AccountID, Username: s.racer.Username,
-			Position: uint8(len(out) + 1), FinishMs: finishMs, Outcome: outcome}
-		if rs.spec.Solo {
-			p.Position = rs.spec.AICount + 1
-			if outcome == OutcomeFinished {
-				p.Position = s.soloPosition
-			}
-		}
-		out = append(out, p)
+		out = append(out, Placement{Slot: s.slot, AccountID: s.racer.AccountID, Username: s.racer.Username,
+			Position: uint8(len(out) + 1), FinishMs: finishMs, Outcome: outcome, AI: s.ai,
+			CharacterID: s.racer.CharacterID})
 	}
 	for _, s := range stayed {
 		switch {

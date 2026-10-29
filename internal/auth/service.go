@@ -22,6 +22,7 @@ var (
 	ErrUsernameTaken      = errors.New("auth: username taken")
 	ErrRateLimited        = errors.New("auth: rate limited")
 	ErrSessionInvalid     = errors.New("auth: session invalid")
+	ErrRenameLimited      = errors.New("auth: username changed too often")
 )
 
 // DisabledError means the account is disabled; Reason is shown to the player.
@@ -34,6 +35,7 @@ type Limits struct {
 	Register         Rate // successful registrations per IP
 	LoginFailIP      Rate // failed logins per IP
 	LoginFailAccount Rate // failed logins per username (case-insensitive)
+	Rename           Rate // username changes per account, counted in the audit log so restarts keep them
 }
 
 // DefaultLimits are the limits from docs/protocol.md.
@@ -41,13 +43,15 @@ var DefaultLimits = Limits{
 	Register:         Rate{3, time.Hour},
 	LoginFailIP:      Rate{10, 10 * time.Minute},
 	LoginFailAccount: Rate{10, 10 * time.Minute},
+	Rename:           Rate{3, 30 * 24 * time.Hour},
 }
 
-// Service implements register, login, resume and logout.
+// Service implements register, login, resume, logout and username changes.
 type Service struct {
 	accounts store.Accounts
 	sessions store.Sessions
 	hasher   *Hasher
+	rename   Rate
 
 	register      *Limiter
 	loginFailIP   *Limiter
@@ -60,6 +64,7 @@ func NewService(accounts store.Accounts, sessions store.Sessions, hasher *Hasher
 		accounts:      accounts,
 		sessions:      sessions,
 		hasher:        hasher,
+		rename:        limits.Rename,
 		register:      NewLimiter(limits.Register),
 		loginFailIP:   NewLimiter(limits.LoginFailIP),
 		loginFailUser: NewLimiter(limits.LoginFailAccount),
@@ -227,6 +232,34 @@ func (s *Service) Resume(ctx context.Context, ip netip.Addr, token string) (*Log
 		return nil, err
 	}
 	return &Login{Account: acct, Token: token, Hash: hash, Expires: expires}, nil
+}
+
+// auditRenamed is the audit log reason of ChangeUsername; the store appends the old and the new name.
+const auditRenamed = "username changed by the player"
+
+// ChangeUsername renames the account under the Register rules; a case-only change of its own name is allowed and
+// the same name changes nothing. Errors: *RuleError, ErrUsernameTaken, ErrRenameLimited, ErrSessionInvalid (the
+// account is gone).
+func (s *Service) ChangeUsername(ctx context.Context, accountID uint64, username string) (*store.Account, error) {
+	if err := ValidateUsername(username); err != nil {
+		return nil, err
+	}
+	now := store.Now()
+	var limit store.RenameLimit
+	if s.rename.N > 0 {
+		limit = store.RenameLimit{Max: s.rename.N, Since: now.Add(-s.rename.Per)}
+	}
+	act := store.Action{Actor: &accountID, Action: store.ActionRenameAccount, Reason: auditRenamed, CreatedAt: now}
+	acct, err := s.accounts.RenameAccount(ctx, accountID, username, limit, act)
+	switch {
+	case errors.Is(err, store.ErrUsernameTaken):
+		return nil, ErrUsernameTaken
+	case errors.Is(err, store.ErrRenameLimited):
+		return nil, ErrRenameLimited
+	case errors.Is(err, store.ErrNotFound):
+		return nil, ErrSessionInvalid
+	}
+	return acct, err
 }
 
 // Logout revokes a session.

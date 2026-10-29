@@ -1,6 +1,7 @@
 package race
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -26,6 +27,9 @@ type sent struct {
 type fakeEnv struct {
 	pushes     []sent
 	udp        int
+	keepUDP    bool     // record datagrams (copies) in datagrams
+	datagrams  [][]byte // with the receiver's address port
+	udpTo      []uint16
 	dropped    []uint8
 	goingN     int
 	finishedN  int
@@ -37,9 +41,15 @@ type fakeEnv struct {
 func (f *fakeEnv) push(acc uint64, typ proto.Type, m proto.Message) {
 	f.pushes = append(f.pushes, sent{acc, typ, m})
 }
-func (f *fakeEnv) sendUDP(netip.AddrPort, []byte) { f.udp++ }
-func (f *fakeEnv) dropSeat(s *seat)               { f.dropped = append(f.dropped, s.slot) }
-func (f *fakeEnv) going(uint64)                   { f.goingN++ }
+func (f *fakeEnv) sendUDP(to netip.AddrPort, b []byte) {
+	f.udp++
+	if f.keepUDP {
+		f.datagrams = append(f.datagrams, slices.Clone(b))
+		f.udpTo = append(f.udpTo, to.Port())
+	}
+}
+func (f *fakeEnv) dropSeat(s *seat) { f.dropped = append(f.dropped, s.slot) }
+func (f *fakeEnv) going(uint64)     { f.goingN++ }
 func (f *fakeEnv) finished(_ uint64, p []Placement) {
 	f.finishedN++
 	f.placements = p
@@ -79,13 +89,23 @@ func (c *fakeCatalog) Strike(acc uint64, pack, _ string) {
 func acc(slot int) uint64 { return uint64(100 + slot) }
 
 func newTestRace(n int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
+	return newAIRace(0, n, spec)
+}
+
+// newAIRace puts ai AI karts in front of humans human racers (slots ai…); human slot i has account acc(i).
+func newAIRace(ai, humans int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
 	env := &fakeEnv{}
 	cat := &fakeCatalog{commits: map[uint64]string{}, notInMajor: map[string]bool{}}
-	seats := make([]*seat, n)
+	seats := make([]*seat, ai+humans)
 	for i := range seats {
+		if i < ai {
+			seats[i] = &seat{slot: uint8(i), ai: true,
+				racer: Racer{AI: true, CharacterID: fmt.Sprintf("mhk2.char%d", i), KartID: "mhk2.kart"}}
+			continue
+		}
 		key := make([]byte, proto.UDPKeySize)
-		seats[i] = &seat{slot: uint8(i), racer: Racer{AccountID: acc(i), Username: "r"}, token: uint64(i + 1),
-			key: key, worldMac: proto.NewUDPMac(key)}
+		seats[i] = &seat{slot: uint8(i), racer: Racer{AccountID: acc(i), Username: "r"},
+			token: uint64(i + 1), key: key, worldMac: proto.NewUDPMac(key)}
 		seats[i].rttUs.Store(50_000)
 	}
 	if spec.TrackID == "" {
@@ -127,11 +147,13 @@ func testLoaded() *proto.RaceLoaded {
 	}
 }
 
-// startRace loads every racer with the same content and returns the GO instant.
+// startRace loads every human with the same content and returns the GO instant.
 func startRace(t *testing.T, rs *raceState) time.Time {
 	t.Helper()
 	for _, s := range rs.seats {
-		rs.onLoaded(s, testLoaded(), t0)
+		if !s.ai {
+			rs.onLoaded(s, testLoaded(), t0)
+		}
 	}
 	if rs.phase != phaseRacing {
 		t.Fatalf("phase %d after loading", rs.phase)
@@ -259,12 +281,12 @@ func TestLoadDropsSpecialsOutsideLobby(t *testing.T) {
 	now := rs.goAt.Add(time.Second)
 	s0, s1 := rs.seats[0], rs.seats[1]
 	setState(rs, s1, proto.KartState{Pos: proto.Vec3{100, 0, 0}})
-	rs.onPickup(s1, &proto.ItemPickup{BoxID: 1}, now)
+	rs.onPickup(s1, &proto.ItemPickup{BoxID: 1, Slot: proto.OwnSlot}, now)
 	if g := env.of(acc(1), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.rocket" {
 		t.Fatalf("dropped special: grant %v", g)
 	}
 	setState(rs, s0, proto.KartState{Pos: proto.Vec3{100, 0, 0}})
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1}, now.Add(4*time.Second))
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1, Slot: proto.OwnSlot}, now.Add(4*time.Second))
 	if g := env.of(acc(0), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.super" {
 		t.Fatalf("in-lobby special grant %v", g)
 	}
@@ -381,11 +403,11 @@ func TestItemPickup(t *testing.T) {
 		env.reset()
 		return d[0].(*proto.ItemDenied).Reason
 	}
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 0}, goAt.Add(-time.Millisecond))
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 0, Slot: proto.OwnSlot}, goAt.Add(-time.Millisecond))
 	if r := denied(acc(0)); r != proto.DenyNotAvailable {
 		t.Fatalf("before GO: reason %d", r)
 	}
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 0, Tick: 60}, now)
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 0, Tick: 60, Slot: proto.OwnSlot}, now)
 	g := env.of(acc(0), proto.PushItemGranted)
 	if len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.rocket" || g[0].(*proto.ItemGranted).Tick != 60 {
 		t.Fatalf("grant %v", g)
@@ -394,35 +416,35 @@ func TestItemPickup(t *testing.T) {
 		t.Fatal("ItemBoxTaken not sent to the others only")
 	}
 	env.reset()
-	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0}, now) // taken
+	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0, Slot: proto.OwnSlot}, now) // taken
 	if r := denied(acc(1)); r != proto.DenyNotAvailable {
 		t.Fatalf("taken box: reason %d", r)
 	}
 	// s1 is 60 m away at 30 m/s with 50 ms RTT: radius 30 × 0.15 + 4 = 8.5 m.
-	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0}, now.Add(3*time.Second))
+	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0, Slot: proto.OwnSlot}, now.Add(3*time.Second))
 	if r := denied(acc(1)); r != proto.DenyTooFar || len(s1.strikes) != 1 {
 		t.Fatalf("far: reason %d strikes %d", r, len(s1.strikes))
 	}
 	setState(rs, s1, proto.KartState{Pos: proto.Vec3{8, 0, 0}, Vel: [3]int16{3000, 0, 0}})
-	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0}, now.Add(3*time.Second))
+	rs.onPickup(s1, &proto.ItemPickup{BoxID: 0, Slot: proto.OwnSlot}, now.Add(3*time.Second))
 	if len(env.of(acc(1), proto.PushItemGranted)) != 1 {
 		t.Fatal("respawned box within the speed radius not granted")
 	}
 	env.reset()
 	setState(rs, s0, proto.KartState{Pos: proto.Vec3{100, 0, 0}})
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1}, now)
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1, Slot: proto.OwnSlot}, now)
 	if r := denied(acc(0)); r != proto.DenyCannotReceive {
 		t.Fatalf("holding: reason %d", r)
 	}
 	s0.held, s0.charges = "", 0
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1}, now)
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 1, Slot: proto.OwnSlot}, now)
 	if g := env.of(acc(0), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.super" {
 		t.Fatalf("special grant %v", g)
 	}
 	env.reset()
 	s0.held, s0.charges = "", 0
 	setState(rs, s0, proto.KartState{Pos: proto.Vec3{200, 0, 0}})
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 2}, now)
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 2, Slot: proto.OwnSlot}, now)
 	if g := env.of(acc(0), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).PowerupID != "mhk2.boost" ||
 		g[0].(*proto.ItemGranted).Charges != 1 {
 		t.Fatalf("fixed grant %v", g)
@@ -430,7 +452,7 @@ func TestItemPickup(t *testing.T) {
 	env.reset()
 	s0.held, s0.charges = "", 0
 	setState(rs, s0, proto.KartState{Pos: proto.Vec3{300, 0, 0}})
-	rs.onPickup(s0, &proto.ItemPickup{BoxID: 3}, now)
+	rs.onPickup(s0, &proto.ItemPickup{BoxID: 3, Slot: proto.OwnSlot}, now)
 	if r := denied(acc(0)); r != proto.DenyNotAvailable {
 		t.Fatalf("effect box: reason %d", r)
 	}
@@ -443,7 +465,7 @@ func TestItemUse(t *testing.T) {
 	now := goAt.Add(5 * time.Second)
 	use := func(id uint32, at time.Time) uint8 {
 		env.reset()
-		rs.onUse(s, &proto.ItemUse{UseID: id, Tick: 9, TargetSlot: proto.NoSlot}, at)
+		rs.onUse(s, &proto.ItemUse{UseID: id, Tick: 9, TargetSlot: proto.NoSlot, Slot: proto.OwnSlot}, at)
 		if r := env.of(acc(1), proto.PushItemUseRejected); len(r) == 1 {
 			return r[0].(*proto.ItemUseRejected).Reason
 		}
@@ -510,7 +532,7 @@ func TestProjectileStrikesLiarOnce(t *testing.T) {
 	owner := rs.seats[0]
 	owner.held, owner.charges = "mhk2.rocket", 1
 	id := uint32(1<<24 | 1)
-	rs.onUse(owner, &proto.ItemUse{UseID: id, TargetSlot: proto.NoSlot}, goAt.Add(2*time.Second))
+	rs.onUse(owner, &proto.ItemUse{UseID: id, TargetSlot: proto.NoSlot, Slot: proto.OwnSlot}, goAt.Add(2*time.Second))
 	for round := range 2 {
 		for i, x := range []float32{10, 10.4, 9.8, 50} {
 			setState(rs, rs.seats[i], proto.KartState{}, proto.ProjectileReport{UseID: id, Tick: 120,
@@ -540,7 +562,7 @@ func TestHitArbitration(t *testing.T) {
 		rs, env, _ := newTestRace(4, Spec{Items: true, Anticheat: anticheat})
 		goAt := startRace(t, rs)
 		rs.seats[0].held, rs.seats[0].charges = "mhk2.rocket", 1
-		rs.onUse(rs.seats[0], &proto.ItemUse{UseID: 1<<24 | 1, TargetSlot: 2}, goAt.Add(time.Second))
+		rs.onUse(rs.seats[0], &proto.ItemUse{UseID: 1<<24 | 1, TargetSlot: 2, Slot: proto.OwnSlot}, goAt.Add(time.Second))
 		env.reset()
 		return rs, env, goAt.Add(2 * time.Second), 1<<24 | 1
 	}
@@ -575,8 +597,8 @@ func TestHitArbitration(t *testing.T) {
 	seen(rs, 0, id, now)
 	seen(rs, 3, id, now)
 	rs.tickHits(now.Add(400 * time.Millisecond))
-	rs.onHitTaken(rs.seats[2], &proto.HitTaken{AttackerSlot: 0, UseID: id, EffectID: "hit"}, now.Add(500*time.Millisecond))
-	rs.onHitTaken(rs.seats[2], &proto.HitTaken{AttackerSlot: 0, UseID: id, EffectID: "hit"}, now.Add(510*time.Millisecond))
+	rs.onHitTaken(rs.seats[2], &proto.HitTaken{AttackerSlot: 0, UseID: id, EffectID: "hit", Slot: proto.OwnSlot}, now.Add(500*time.Millisecond))
+	rs.onHitTaken(rs.seats[2], &proto.HitTaken{AttackerSlot: 0, UseID: id, EffectID: "hit", Slot: proto.OwnSlot}, now.Add(510*time.Millisecond))
 	rs.tickHits(now.Add(2 * time.Second))
 	if len(rs.seats[2].strikes) != 0 || len(env.of(0, proto.PushHitApplied)) != 3 ||
 		len(env.of(acc(2), proto.PushHitApplied)) != 0 {
@@ -730,18 +752,18 @@ func TestFinishValidation(t *testing.T) {
 		{60000, laps[:2], 60 * time.Second, 50 * time.Millisecond, false},
 	}
 	for i, c := range cases {
-		if got := finishPlausible(&proto.Finished{FinishMs: c.ms, LapMs: c.laps}, c.elapsed, c.rtt, 3); got != c.ok {
+		if got := finishPlausible(&proto.Finished{FinishMs: c.ms, LapMs: c.laps, Slot: proto.OwnSlot}, c.elapsed, c.rtt, 3); got != c.ok {
 			t.Fatalf("case %d: %v", i, got)
 		}
 	}
 
 	rs, env, _ := newTestRace(3, Spec{Anticheat: true})
 	goAt := startRace(t, rs)
-	rs.onFinished(rs.seats[1], &proto.Finished{FinishMs: 30000, LapMs: laps}, goAt.Add(60*time.Second))
+	rs.onFinished(rs.seats[1], &proto.Finished{FinishMs: 30000, LapMs: laps, Slot: proto.OwnSlot}, goAt.Add(60*time.Second))
 	if !rs.seats[1].finished || rs.seats[1].finishMs != 60000 || len(rs.seats[1].strikes) != 1 {
 		t.Fatalf("implausible finish: %d strikes %d", rs.seats[1].finishMs, len(rs.seats[1].strikes))
 	}
-	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 61200, LapMs: laps}, goAt.Add(61500*time.Millisecond))
+	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 61200, LapMs: laps, Slot: proto.OwnSlot}, goAt.Add(61500*time.Millisecond))
 	if rs.seats[0].finishMs != 61200 || len(rs.seats[0].strikes) != 0 {
 		t.Fatal("plausible finish changed")
 	}
@@ -760,7 +782,7 @@ func TestRaceEnd(t *testing.T) {
 	setState(rs, rs.seats[1], proto.KartState{RaceDistance: 900})
 	rs.leave(rs.seats[3], OutcomeLeft, "", goAt.Add(10*time.Second))
 	rs.leave(rs.seats[4], OutcomeModKick, "", goAt.Add(20*time.Second))
-	rs.onFinished(rs.seats[2], &proto.Finished{FinishMs: 60000, LapMs: laps}, goAt.Add(60*time.Second))
+	rs.onFinished(rs.seats[2], &proto.Finished{FinishMs: 60000, LapMs: laps, Slot: proto.OwnSlot}, goAt.Add(60*time.Second))
 	rs.tick(goAt.Add(89 * time.Second))
 	if env.finishedN != 0 {
 		t.Fatal("ended before first finisher + 30 s")
@@ -788,8 +810,8 @@ func TestRaceEnd(t *testing.T) {
 	// Everybody finished: ends at once, ordered by finish time.
 	rs, env, _ = newTestRace(2, Spec{})
 	goAt = startRace(t, rs)
-	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 61000, LapMs: laps}, goAt.Add(61*time.Second))
-	rs.onFinished(rs.seats[1], &proto.Finished{FinishMs: 60500, LapMs: laps}, goAt.Add(61200*time.Millisecond))
+	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 61000, LapMs: laps, Slot: proto.OwnSlot}, goAt.Add(61*time.Second))
+	rs.onFinished(rs.seats[1], &proto.Finished{FinishMs: 60500, LapMs: laps, Slot: proto.OwnSlot}, goAt.Add(61200*time.Millisecond))
 	if env.finishedN != 1 || env.placements[0].Slot != 1 || env.placements[1].Slot != 0 {
 		t.Fatalf("all finished: %+v", env.placements)
 	}
@@ -818,7 +840,7 @@ func TestBattleEnd(t *testing.T) {
 	for i, h := range []uint8{3, 5, 1, 0} {
 		setState(rs, rs.seats[i], proto.KartState{Health: h})
 	}
-	rs.onEliminatedSelf(rs.seats[2], &proto.EliminatedSelf{AttackerSlot: 0, Tick: 600}, goAt.Add(10*time.Second))
+	rs.onEliminatedSelf(rs.seats[2], &proto.EliminatedSelf{AttackerSlot: 0, Tick: 600, Slot: proto.OwnSlot}, goAt.Add(10*time.Second))
 	if e := env.of(0, proto.PushEliminated); len(e) != 4 || e[0].(*proto.Eliminated).Slot != 2 {
 		t.Fatalf("Eliminated %v", e)
 	}
@@ -832,7 +854,7 @@ func TestBattleEnd(t *testing.T) {
 	if !rs.seats[3].eliminated || len(rs.seats[3].strikes) != 1 || env.finishedN != 0 {
 		t.Fatal("silent zero health not eliminated")
 	}
-	rs.onEliminatedSelf(rs.seats[0], &proto.EliminatedSelf{AttackerSlot: 1}, goAt.Add(20*time.Second))
+	rs.onEliminatedSelf(rs.seats[0], &proto.EliminatedSelf{AttackerSlot: 1, Slot: proto.OwnSlot}, goAt.Add(20*time.Second))
 	if env.finishedN != 1 {
 		t.Fatal("battle with one survivor did not end")
 	}
@@ -855,25 +877,36 @@ func TestBattleEnd(t *testing.T) {
 	}
 }
 
-func TestSoloRace(t *testing.T) {
-	rs, env, _ := newTestRace(1, Spec{Solo: true, AICount: 6, Items: true, Anticheat: true})
+// TestLoneRacer: a race with one human and no AI is arbitrated like any other; a lone battle kart is not "the last
+// one alive" from the start.
+func TestLoneRacer(t *testing.T) {
+	rs, env, _ := newTestRace(1, Spec{Items: true, Anticheat: true})
 	goAt := startRace(t, rs)
-	rs.onPickup(rs.seats[0], &proto.ItemPickup{BoxID: 0}, goAt.Add(time.Second))
-	if len(env.of(0, proto.PushItemDenied))+len(env.of(0, proto.PushItemGranted)) != 0 {
-		t.Fatal("solo race arbitrated an item")
+	if rs.aiHost != nil {
+		t.Fatal("AI host without AI")
 	}
-	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 70000, Position: 3}, goAt.Add(70*time.Second))
-	want := []Placement{{Slot: 0, AccountID: acc(0), Username: "r", Position: 3, FinishMs: 70000,
+	setState(rs, rs.seats[0], proto.KartState{})
+	rs.onPickup(rs.seats[0], &proto.ItemPickup{BoxID: 0, Slot: proto.OwnSlot}, goAt.Add(time.Second))
+	if g := env.of(acc(0), proto.PushItemGranted); len(g) != 1 || g[0].(*proto.ItemGranted).Slot != 0 {
+		t.Fatalf("lone racer grant %v", g)
+	}
+	rs.onFinished(rs.seats[0], &proto.Finished{FinishMs: 70000, LapMs: []int32{1, 1, 1}, Slot: proto.OwnSlot},
+		goAt.Add(70*time.Second))
+	want := []Placement{{Slot: 0, AccountID: acc(0), Username: "r", Position: 1, FinishMs: 70000,
 		Outcome: OutcomeFinished}}
 	if !slices.Equal(env.placements, want) {
 		t.Fatalf("%+v", env.placements)
 	}
 
-	rs, env, _ = newTestRace(1, Spec{Solo: true, AICount: 6})
-	startRace(t, rs)
-	rs.end(t0.Add(10 * time.Second))
-	if len(env.placements) != 1 || env.placements[0].Outcome != OutcomeDNF || env.placements[0].Position != 7 {
-		t.Fatalf("%+v", env.placements)
+	rs, env, _ = newTestRace(1, Spec{Mode: ModeBattle})
+	goAt = startRace(t, rs)
+	rs.tick(goAt.Add(time.Minute))
+	if env.finishedN != 0 {
+		t.Fatal("a lone battle kart ended the battle")
+	}
+	rs.tick(goAt.Add(battleTimeLimit))
+	if env.finishedN != 1 || env.placements[0].Outcome != OutcomeFinished {
+		t.Fatalf("lone battle at the time limit: %+v", env.placements)
 	}
 }
 

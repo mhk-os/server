@@ -8,9 +8,12 @@ import (
 	"github.com/mhk-os/server/internal/proto"
 )
 
-// seat is one racer's place in a race. Fields are owned by the race goroutine unless marked otherwise.
+// seat is one kart's place in a race. Fields are owned by the race goroutine unless marked otherwise. AI seats
+// (ai true) have no account, token, key or address: the AI host reports for them, AiProgress fills their state's
+// lap, raceDistance and health, and they never load, leave, get struck or count as observers.
 type seat struct {
 	slot  uint8
+	ai    bool
 	racer Racer
 	token uint64
 	key   []byte
@@ -58,8 +61,6 @@ type seat struct {
 	usableAt  time.Time // grant + roulette: earlier uses are rejected (cooldown)
 	strikes   []time.Time
 	strikeWhy []string
-
-	soloPosition uint8
 }
 
 // rtt returns the server-measured round trip; ok is false before the first sample.

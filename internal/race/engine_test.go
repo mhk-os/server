@@ -327,7 +327,7 @@ func TestRaceIntegration(t *testing.T) {
 	time.Sleep(time.Until(goMsg.Go) + 50*time.Millisecond)
 
 	// Pickups: bot 0 sits on box 0 and gets its fixed egg; bot 1 is denied the taken box and a far one.
-	bots[0].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 0, Tick: 10})
+	bots[0].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 0, Tick: 10, Slot: proto.OwnSlot})
 	var granted proto.ItemGranted
 	bots[0].take(proto.PushItemGranted, &granted, nil)
 	if granted.PowerupID != "mhk2.egg" || granted.Charges != 3 || granted.Tick != 10 {
@@ -341,12 +341,12 @@ func TestRaceIntegration(t *testing.T) {
 		}
 	}
 	var denied proto.ItemDenied
-	bots[1].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 0})
+	bots[1].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 0, Slot: proto.OwnSlot})
 	bots[1].take(proto.PushItemDenied, &denied, nil)
 	if denied.Reason != proto.DenyNotAvailable {
 		t.Fatalf("denied %+v", denied)
 	}
-	bots[1].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 1}) // 50 m from box 1
+	bots[1].notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 1, Slot: proto.OwnSlot}) // 50 m from box 1
 	bots[1].take(proto.PushItemDenied, &denied, nil)
 	if denied.Reason != proto.DenyTooFar {
 		t.Fatalf("denied %+v", denied)
@@ -355,7 +355,7 @@ func TestRaceIntegration(t *testing.T) {
 	// Uses: relayed to the others; bot 1 holds nothing.
 	use1, use2 := uint32(1<<24|1), uint32(1<<24|2)
 	bots[0].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: use1, Tick: 20, Rot: proto.Quat{0, 0, 0, 1},
-		TargetSlot: proto.NoSlot})
+		TargetSlot: proto.NoSlot, Slot: proto.OwnSlot})
 	var used proto.ItemUsed
 	for _, b := range racing[1:] {
 		b.take(proto.PushItemUsed, &used, func() bool { return used.UseID == use1 })
@@ -365,7 +365,7 @@ func TestRaceIntegration(t *testing.T) {
 	}
 	bots[0].none(proto.PushItemUsed)
 	var rejected proto.ItemUseRejected
-	bots[1].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: 2<<24 | 1, TargetSlot: proto.NoSlot})
+	bots[1].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: 2<<24 | 1, TargetSlot: proto.NoSlot, Slot: proto.OwnSlot})
 	bots[1].take(proto.PushItemUseRejected, &rejected, nil)
 	if rejected.Reason != proto.RejectNotHeld {
 		t.Fatalf("rejected %+v", rejected)
@@ -394,7 +394,7 @@ func TestRaceIntegration(t *testing.T) {
 	}
 
 	// Hits: two eligible observers see bot 1 hit, bot 1 stays silent → HitForce; it then confirms.
-	bots[0].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: use2, Tick: 50, TargetSlot: 1})
+	bots[0].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: use2, Tick: 50, TargetSlot: 1, Slot: proto.OwnSlot})
 	bots[1].take(proto.PushItemUsed, &used, func() bool { return used.UseID == use2 })
 	for _, i := range []int{0, 2} {
 		racing[i].notify(proto.NotifyHitSeen, &proto.HitSeen{RaceID: raceID, VictimSlot: 1, AttackerSlot: 0, UseID: use2,
@@ -406,7 +406,7 @@ func TestRaceIntegration(t *testing.T) {
 		t.Fatalf("force %+v", force)
 	}
 	bots[1].notify(proto.NotifyHitTaken, &proto.HitTaken{RaceID: raceID, AttackerSlot: 0, UseID: use2,
-		EffectID: "mhk2.hit.shotdown", Tick: 70})
+		EffectID: "mhk2.hit.shotdown", Tick: 70, Slot: proto.OwnSlot})
 	var applied proto.HitApplied
 	for _, i := range []int{0, 2} {
 		racing[i].take(proto.PushHitApplied, &applied, nil)
@@ -444,10 +444,10 @@ func TestRaceIntegration(t *testing.T) {
 	// Finishes: the race ends when both remaining racers finished.
 	laps := []int32{20000, 20000, 20000}
 	bots[1].notify(proto.NotifyFinished, &proto.Finished{RaceID: raceID, FinishMs: int32(time.Since(goMsg.Go).Milliseconds()),
-		LapMs: laps})
+		LapMs: laps, Slot: proto.OwnSlot})
 	time.Sleep(20 * time.Millisecond)
 	bots[0].notify(proto.NotifyFinished, &proto.Finished{RaceID: raceID, FinishMs: int32(time.Since(goMsg.Go).Milliseconds()),
-		LapMs: laps})
+		LapMs: laps, Slot: proto.OwnSlot})
 	var pf proto.PlayerFinished
 	bots[0].take(proto.PushPlayerFinished, &pf, func() bool { return pf.Slot == 1 })
 	placements := recv(t, cb.finished)
@@ -501,7 +501,7 @@ func TestRaceIntegrationAnticheatOff(t *testing.T) {
 		b.notify(proto.NotifyCheatReport, &proto.CheatReport{RaceID: raceID, SuspectSlot: 2, Reason: proto.FlagReason(1)})
 	}
 	// Server checks still arbitrate but never strike.
-	bots[1].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: 2<<24 | 1, TargetSlot: proto.NoSlot})
+	bots[1].notify(proto.NotifyItemUse, &proto.ItemUse{RaceID: raceID, UseID: 2<<24 | 1, TargetSlot: proto.NoSlot, Slot: proto.OwnSlot})
 	var rejected proto.ItemUseRejected
 	bots[1].take(proto.PushItemUseRejected, &rejected, nil)
 	state := inspect(t, h.eng, raceID, func(rs *raceState) [2]int {
@@ -524,5 +524,80 @@ func TestRaceIntegrationAnticheatOff(t *testing.T) {
 	st, err := h.st.AccountStats(context.Background(), bots[2].acc)
 	if err != nil || st.CheatKicks != 0 {
 		t.Fatalf("cheat kicks %d %v", st.CheatKicks, err)
+	}
+}
+
+// TestRaceIntegrationAI: two AI karts and two bots over real TCP and UDP. Only humans get RaceSetup (AI slots
+// flagged, the first human hosts), the host's AiProgress datagrams rank the AI karts, its AI pickups reach every
+// racer, and the second bot takes over hosting when the first leaves.
+func TestRaceIntegrationAI(t *testing.T) {
+	h := startHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	bots := []*bot{newBot(t, h), newBot(t, h)}
+	racers := []Racer{{AI: true, CharacterID: "mhk2.lola", KartID: "mhk2.kart"},
+		{AI: true, CharacterID: "mhk2.hank", KartID: "mhk2.kart"}, bots[0].racer(), bots[1].racer()}
+	if _, err := h.eng.Start(Spec{TrackID: "mhk2.egypt"}, []Racer{{AccountID: 5, AI: true}}, Callbacks{}); err == nil {
+		t.Fatal("AI racer with an account accepted")
+	}
+	if _, err := h.eng.Start(Spec{TrackID: "mhk2.egypt"}, racers[:2], Callbacks{}); err == nil {
+		t.Fatal("race without humans accepted")
+	}
+	cb, callbacks := newCallbacks()
+	raceID, err := h.eng.Start(Spec{LobbyID: 79, TrackID: "mhk2.egypt", Items: true, Anticheat: true}, racers,
+		callbacks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bots {
+		b.joinUDP(ctx)
+		g := b.setup.Grid
+		if b.setup.AIHost != 2 || b.setup.YourSlot != uint8(i+2) || len(g) != 4 || !g[0].AI || !g[1].AI || g[2].AI ||
+			g[0].AccountID != 0 || g[1].CharacterID != "mhk2.hank" || g[3].AccountID != b.acc && i == 1 {
+			t.Fatalf("bot %d setup %+v", i, b.setup)
+		}
+		b.notify(proto.NotifyRaceLoaded, integrationLoaded(raceID))
+	}
+	recv(t, cb.going)
+	var goMsg proto.RaceGo
+	for _, b := range bots {
+		b.take(proto.PushRaceGo, &goMsg, nil)
+	}
+	time.Sleep(time.Until(goMsg.Go) + 50*time.Millisecond)
+
+	host := bots[0]
+	host.udp.SendAiProgress(proto.AiProgressEntry{Slot: 0, Lap: 1, RaceDistance: 120, Health: 9},
+		proto.AiProgressEntry{Slot: 1, Lap: 1, RaceDistance: 80})
+	bots[1].udp.SendAiProgress(proto.AiProgressEntry{Slot: 1, RaceDistance: 5000}) // not the host: ignored
+	eventually(t, "AI progress", func() bool {
+		return inspect(t, h.eng, raceID, func(rs *raceState) bool {
+			return rs.seats[0].state.RaceDistance == 120 && rs.seats[1].state.RaceDistance == 80
+		})
+	})
+	host.notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 1, Tick: 30, Slot: 1})
+	var granted proto.ItemGranted
+	for _, b := range bots {
+		b.take(proto.PushItemGranted, &granted, nil)
+		if granted.Slot != 1 || granted.BoxID != 1 || granted.PowerupID == "" {
+			t.Fatalf("AI grant %+v", granted)
+		}
+	}
+	// The host leaves: the other bot hosts from now on.
+	h.eng.Remove(raceID, host.acc, OutcomeLeft, "")
+	var newHost proto.AiHost
+	bots[1].take(proto.PushAiHost, &newHost, nil)
+	if newHost.RaceID != raceID || newHost.Slot != 3 {
+		t.Fatalf("AiHost %+v", newHost)
+	}
+	h.eng.EndEarly(raceID)
+	placements := recv(t, cb.finished)
+	var got []string
+	for _, p := range placements {
+		got = append(got, fmt.Sprintf("%d:%v:%s:%d", p.Slot, p.AI, p.CharacterID, p.Outcome))
+	}
+	// DNF by distance: the AI karts from AiProgress (120, 80 m), the bot's states at 0 m; the leaver last.
+	want := []string{"0:true:mhk2.lola:1", "1:true:mhk2.hank:1", "3:false:mhk2.moorhuhn:1", "2:false:mhk2.moorhuhn:2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("placements %v, want %v", got, want)
 	}
 }

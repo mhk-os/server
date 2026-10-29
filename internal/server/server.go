@@ -134,8 +134,9 @@ type Server struct {
 	nextID    atomic.Uint64
 	wg        sync.WaitGroup
 
-	closeHooks []func(*Conn)
-	goneHooks  []func(accountID uint64)
+	closeHooks  []func(*Conn)
+	goneHooks   []func(accountID uint64)
+	renameHooks []func(accountID uint64, username string)
 }
 
 // New returns a server with the connection, account, profile, achievement, time-trial and moderation handlers
@@ -190,6 +191,12 @@ func (s *Server) OnClose(fn func(c *Conn)) { s.closeHooks = append(s.closeHooks,
 // (closed, logged out or logged in as another account): lobbies and races drop the player then. A player online
 // twice keeps their lobby while one connection survives. Register before Serve.
 func (s *Server) OnAccountGone(fn func(accountID uint64)) { s.goneHooks = append(s.goneHooks, fn) }
+
+// OnAccountRenamed registers fn, called after an account changed its username (ChangeUsername), so places that
+// copied the name (lobbies) show the new one. Register before Serve.
+func (s *Server) OnAccountRenamed(fn func(accountID uint64, username string)) {
+	s.renameHooks = append(s.renameHooks, fn)
+}
 
 // unbound records the end of c's activity for accountID and runs the OnAccountGone hooks when c was the account's
 // last connection.

@@ -173,6 +173,17 @@ type SetCountry struct {
 func (m *SetCountry) Encode(w *wire.Writer)       { w.String(m.Country) }
 func (m *SetCountry) Decode(r *wire.Reader) error { m.Country = r.String(MaxCountry); return r.Err() }
 
+// ChangeUsername is request 29; the response is the renamed Account.
+type ChangeUsername struct {
+	Username string
+}
+
+func (m *ChangeUsername) Encode(w *wire.Writer) { w.String(m.Username) }
+func (m *ChangeUsername) Decode(r *wire.Reader) error {
+	m.Username = r.String(MaxUsernameField)
+	return r.Err()
+}
+
 // Account is the public view of an account.
 type Account struct {
 	ID            uint64

@@ -308,6 +308,27 @@ func (c *Client) SetCountry(ctx context.Context, country string) (*proto.Account
 	return &a, nil
 }
 
+func (c *Client) ChangeUsername(ctx context.Context, username string) (*proto.Account, error) {
+	var a proto.Account
+	if err := c.Request(ctx, proto.TypeChangeUsername, &proto.ChangeUsername{Username: username}, &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// WaitAccountUpdated waits for the AccountUpdated push.
+func (c *Client) WaitAccountUpdated(ctx context.Context) (*proto.Account, error) {
+	p, err := c.WaitPush(ctx, proto.PushAccountUpdated)
+	if err != nil {
+		return nil, err
+	}
+	var a proto.Account
+	if err := a.Decode(wire.NewReader(p.Body)); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
 // WaitPush waits for the next push of type typ, skipping others.
 func (c *Client) WaitPush(ctx context.Context, typ proto.Type) (*Push, error) {
 	for {

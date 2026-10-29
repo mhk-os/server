@@ -22,6 +22,7 @@ const (
 	PushPlayerLeftRace    Type = 524
 	PushEliminated        Type = 525
 	PushBridgeTriggered   Type = 526
+	PushAiHost            Type = 527
 )
 
 // Race notifies (client → server, kind 3).
@@ -41,16 +42,17 @@ const (
 
 // Limits of the race messages.
 const (
-	MaxRacers      = 10
+	MaxRacers      = 50 // karts per race, humans and AI
 	MaxItemBoxes   = 512
 	MaxPool        = 128
 	MaxEffects     = 1024
 	MaxCheatDetail = 256
 	UDPKeySize     = 32
 	PoolWeights    = 11
-	NoSlot         = 255 // targetSlot / attackerSlot "none"
+	NoSlot         = 255 // targetSlot / attackerSlot / aiHost "none"
+	OwnSlot        = 255 // the slot field of race notifies: the sender's own kart
 
-	raceSlotMinSize = 1 + 8 + 1 + 1 + 1 + 1 + 1
+	raceSlotMinSize = 1 + 8 + 1 + 1 + 1 + 1 + 1 + 1
 	boxInfoMinSize  = 12 + 2 + 1
 	poolMinSize     = 1 + 1 + 1 + PoolWeights*4
 	specialMinSize  = 1 + 1
@@ -102,7 +104,7 @@ func readQuat(r *wire.Reader) (q Quat) {
 	return q
 }
 
-// RaceSlot is one entry of RaceSetup.grid.
+// RaceSlot is one entry of RaceSetup.grid. AI slots have AccountID 0, Username "", Country "" and Platform 0.
 type RaceSlot struct {
 	Slot        uint8
 	AccountID   uint64
@@ -111,6 +113,7 @@ type RaceSlot struct {
 	CharacterID string
 	KartID      string
 	Platform    uint8 // Platform* constant of the racer's device
+	AI          bool
 }
 
 func (m *RaceSlot) Encode(w *wire.Writer) {
@@ -121,6 +124,7 @@ func (m *RaceSlot) Encode(w *wire.Writer) {
 	w.String(m.CharacterID)
 	w.String(m.KartID)
 	w.U8(m.Platform)
+	w.Bool(m.AI)
 }
 
 func (m *RaceSlot) Decode(r *wire.Reader) error {
@@ -131,6 +135,7 @@ func (m *RaceSlot) Decode(r *wire.Reader) error {
 	m.CharacterID = r.String(MaxContentID)
 	m.KartID = r.String(MaxContentID)
 	m.Platform = r.U8()
+	m.AI = r.Bool()
 	return r.Err()
 }
 
@@ -145,8 +150,7 @@ type RaceSetup struct {
 	Items       bool
 	ItemOdds    []ItemOdds
 	Anticheat   bool
-	Solo        bool
-	AICount     uint8
+	AIHost      uint8 // grid slot of the AI host, NoSlot = no AI in the race
 	Seed        uint64
 	Grid        []RaceSlot
 	YourSlot    uint8
@@ -167,8 +171,7 @@ func (m *RaceSetup) Encode(w *wire.Writer) {
 	w.Bool(m.Items)
 	EncodeItemOdds(w, m.ItemOdds)
 	w.Bool(m.Anticheat)
-	w.Bool(m.Solo)
-	w.U8(m.AICount)
+	w.U8(m.AIHost)
 	w.U64(m.Seed)
 	w.Count(len(m.Grid))
 	for i := range m.Grid {
@@ -192,8 +195,7 @@ func (m *RaceSetup) Decode(r *wire.Reader) error {
 	m.Items = r.Bool()
 	m.ItemOdds = DecodeItemOdds(r)
 	m.Anticheat = r.Bool()
-	m.Solo = r.Bool()
-	m.AICount = r.U8()
+	m.AIHost = r.U8()
 	m.Seed = r.U64()
 	m.Grid = make([]RaceSlot, r.Count(MaxRacers, raceSlotMinSize))
 	for i := range m.Grid {
@@ -221,13 +223,14 @@ func (m *RaceGo) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// ItemGranted is push 514 (to the picker only).
+// ItemGranted is push 514: to the picker only (Slot = its own slot), or for an AI kart to every racer.
 type ItemGranted struct {
 	RaceID    uint64
 	BoxID     uint16
 	PowerupID string
 	Charges   uint8
 	Tick      uint32
+	Slot      uint8
 }
 
 func (m *ItemGranted) Encode(w *wire.Writer) {
@@ -236,6 +239,7 @@ func (m *ItemGranted) Encode(w *wire.Writer) {
 	w.String(m.PowerupID)
 	w.U8(m.Charges)
 	w.U32(m.Tick)
+	w.U8(m.Slot)
 }
 
 func (m *ItemGranted) Decode(r *wire.Reader) error {
@@ -244,6 +248,7 @@ func (m *ItemGranted) Decode(r *wire.Reader) error {
 	m.PowerupID = r.String(MaxContentID)
 	m.Charges = r.U8()
 	m.Tick = r.U32()
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -270,18 +275,25 @@ func (m *ItemBoxTaken) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// ItemDenied is push 516.
+// ItemDenied is push 516: to the picker (Slot = its own slot) or to the AI host (Slot = the AI kart's).
 type ItemDenied struct {
 	RaceID uint64
 	BoxID  uint16
 	Reason uint8
+	Slot   uint8
 }
 
-func (m *ItemDenied) Encode(w *wire.Writer) { w.U64(m.RaceID); w.U16(m.BoxID); w.U8(m.Reason) }
+func (m *ItemDenied) Encode(w *wire.Writer) {
+	w.U64(m.RaceID)
+	w.U16(m.BoxID)
+	w.U8(m.Reason)
+	w.U8(m.Slot)
+}
 func (m *ItemDenied) Decode(r *wire.Reader) error {
 	m.RaceID = r.U64()
 	m.BoxID = r.U16()
 	m.Reason = r.U8()
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -519,6 +531,19 @@ func (m *BridgeTriggered) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
+// AiHost is push 527: the racer that now reports for the AI karts (the previous host left the race).
+type AiHost struct {
+	RaceID uint64
+	Slot   uint8
+}
+
+func (m *AiHost) Encode(w *wire.Writer) { w.U64(m.RaceID); w.U8(m.Slot) }
+func (m *AiHost) Decode(r *wire.Reader) error {
+	m.RaceID = r.U64()
+	m.Slot = r.U8()
+	return r.Err()
+}
+
 // ItemBoxInfo describes one item box of the loaded track; its box id is its index in RaceLoaded.Boxes.
 type ItemBoxInfo struct {
 	Pos           Vec3
@@ -646,12 +671,14 @@ func (m *RaceLoaded) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// ItemPickup is notify 529.
+// ItemPickup is notify 529. Slot is OwnSlot for the sender's kart or, from the AI host, an AI slot (also in the
+// other kart notifies).
 type ItemPickup struct {
 	RaceID uint64
 	BoxID  uint16
 	Tick   uint32
 	Pos    Vec3
+	Slot   uint8
 }
 
 func (m *ItemPickup) Encode(w *wire.Writer) {
@@ -659,6 +686,7 @@ func (m *ItemPickup) Encode(w *wire.Writer) {
 	w.U16(m.BoxID)
 	w.U32(m.Tick)
 	writeVec3(w, m.Pos)
+	w.U8(m.Slot)
 }
 
 func (m *ItemPickup) Decode(r *wire.Reader) error {
@@ -666,6 +694,7 @@ func (m *ItemPickup) Decode(r *wire.Reader) error {
 	m.BoxID = r.U16()
 	m.Tick = r.U32()
 	m.Pos = readVec3(r)
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -678,6 +707,7 @@ type ItemUse struct {
 	Rot        Quat
 	Backwards  bool
 	TargetSlot uint8
+	Slot       uint8
 }
 
 func (m *ItemUse) Encode(w *wire.Writer) {
@@ -688,6 +718,7 @@ func (m *ItemUse) Encode(w *wire.Writer) {
 	writeQuat(w, m.Rot)
 	w.Bool(m.Backwards)
 	w.U8(m.TargetSlot)
+	w.U8(m.Slot)
 }
 
 func (m *ItemUse) Decode(r *wire.Reader) error {
@@ -698,6 +729,7 @@ func (m *ItemUse) Decode(r *wire.Reader) error {
 	m.Rot = readQuat(r)
 	m.Backwards = r.Bool()
 	m.TargetSlot = r.U8()
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -708,6 +740,7 @@ type HitTaken struct {
 	UseID        uint32 // 0 = track hazard or zone
 	EffectID     string
 	Tick         uint32
+	Slot         uint8
 }
 
 func (m *HitTaken) Encode(w *wire.Writer) {
@@ -716,6 +749,7 @@ func (m *HitTaken) Encode(w *wire.Writer) {
 	w.U32(m.UseID)
 	w.String(m.EffectID)
 	w.U32(m.Tick)
+	w.U8(m.Slot)
 }
 
 func (m *HitTaken) Decode(r *wire.Reader) error {
@@ -724,6 +758,7 @@ func (m *HitTaken) Decode(r *wire.Reader) error {
 	m.UseID = r.U32()
 	m.EffectID = r.String(MaxContentID)
 	m.Tick = r.U32()
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -762,7 +797,7 @@ type Finished struct {
 	FinishMs int32
 	LapMs    []int32
 	Tick     uint32
-	Position uint8 // solo races: place among all karts including AI; 0 otherwise
+	Slot     uint8
 }
 
 func (m *Finished) Encode(w *wire.Writer) {
@@ -770,7 +805,7 @@ func (m *Finished) Encode(w *wire.Writer) {
 	w.I32(m.FinishMs)
 	writeLapMs(w, m.LapMs)
 	w.U32(m.Tick)
-	w.U8(m.Position)
+	w.U8(m.Slot)
 }
 
 func (m *Finished) Decode(r *wire.Reader) error {
@@ -778,7 +813,7 @@ func (m *Finished) Decode(r *wire.Reader) error {
 	m.FinishMs = r.I32()
 	m.LapMs = readLapMs(r)
 	m.Tick = r.U32()
-	m.Position = r.U8()
+	m.Slot = r.U8()
 	return r.Err()
 }
 
@@ -836,13 +871,21 @@ type EliminatedSelf struct {
 	RaceID       uint64
 	AttackerSlot uint8
 	Tick         uint32
+	Slot         uint8
 }
 
-func (m *EliminatedSelf) Encode(w *wire.Writer) { w.U64(m.RaceID); w.U8(m.AttackerSlot); w.U32(m.Tick) }
+func (m *EliminatedSelf) Encode(w *wire.Writer) {
+	w.U64(m.RaceID)
+	w.U8(m.AttackerSlot)
+	w.U32(m.Tick)
+	w.U8(m.Slot)
+}
+
 func (m *EliminatedSelf) Decode(r *wire.Reader) error {
 	m.RaceID = r.U64()
 	m.AttackerSlot = r.U8()
 	m.Tick = r.U32()
+	m.Slot = r.U8()
 	return r.Err()
 }
 

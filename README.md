@@ -42,7 +42,8 @@ go run ./cmd/mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass k
 ```
 
 `dump-manifests` writes the pack manifests players reported most for that `contentVersion` (the game must have
-announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` joins a public lobby instead of
+announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` (1–20; 11–20 are the AI versions
+of 1–10) joins a public lobby instead of
 a room code, `-n` starts that many bots (`bot1` … `bot3`, registered when missing), `-character`/`-kart` default to
 the ghost's, and `-platform NAME` sets the Hello platform (a Unity `RuntimePlatform` name such as `Android` or
 `WindowsPlayer`; default `mhk-bot`, an unknown device) to test device icons. Bots ping over TCP every 15 s
@@ -51,7 +52,14 @@ Random), drive the ghost's path from GO, send `Finished` at its finish time and 
 track data, so each sends a unique `RaceLoaded` hash: with
 one human (or bots only) nobody has a content majority and everybody races with the lowest grid slot's content
 (when that is a bot, the server knows no item boxes and denies the human's pickups); with two or more humans the
-bots leave as desync.
+bots leave as desync. `-loaded FILE` (the hex of a `RaceLoaded` body a game client sent on the track the races use)
+makes bots send that content instead, so they agree with the game and the race has its item boxes.
+
+Bots race in lobbies and rooms with AI karts too and ignore everything about them. A bot never reports for the AI
+karts (it simulates none): when a bot has the lowest human grid slot it is the AI host (it logs a warning), so the AI
+karts take no items and never finish. `-hand-over 15s` makes a hosting bot leave such a race 15 s after GO and join
+the lobby again for the next one: the server elects the next human (`AiHost`), which tests the hand-over and makes the
+editor the AI host for the rest of the race.
 
 ## Configuration
 
@@ -120,6 +128,9 @@ time-trial runs ranked under a new anonymous account (`anon-` + 10 hex digits, r
 `Anonymous`; hidden as "Deleted by the player" when they ask for it). The audit log keeps the old username, and the
 anonymous account is listed by `account list` and works with `account show`, `run list --account` and
 `account delete`.
+
+Players change their username in the game (`ChangeUsername`, 3 times per 30 days). Each change is in the audit log
+(`account.rename`, "from <old> to <new>"), so `admin audit` shows who a renamed account was.
 
 ## Deployment
 

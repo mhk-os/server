@@ -22,6 +22,8 @@ var (
 	ErrNotFound = errors.New("store: not found")
 	// ErrUsernameTaken means another account already uses the username (case-insensitively).
 	ErrUsernameTaken = errors.New("store: username taken")
+	// ErrRenameLimited means the account already changed its username as often as RenameAccount allows.
+	ErrRenameLimited = errors.New("store: username change limit reached")
 )
 
 // TokenHash is the SHA-256 of a session token; the token itself is never stored.
@@ -106,6 +108,7 @@ const (
 	ActionDisableAccount = "account.disable"
 	ActionEnableAccount  = "account.enable"
 	ActionDeleteAccount  = "account.delete"
+	ActionRenameAccount  = "account.rename"
 )
 
 // AccountFilter narrows ListAccounts.
@@ -123,6 +126,7 @@ type Accounts interface {
 	TouchLogin(ctx context.Context, id uint64, at time.Time) error
 	TouchActive(ctx context.Context, id uint64, at time.Time) error
 	DeleteOwnAccount(ctx context.Context, id uint64, hideRuns bool, act Action) (anonymous string, err error)
+	RenameAccount(ctx context.Context, id uint64, username string, limit RenameLimit, act Action) (*Account, error)
 }
 
 // Sessions persists login sessions.

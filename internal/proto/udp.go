@@ -17,10 +17,11 @@ const (
 	UDPHeaderSize  = 1 + 8 + 4
 	UDPMacSize     = 8
 
-	UDPPing  uint8 = 1
-	UDPPong  uint8 = 2
-	UDPState uint8 = 3
-	UDPWorld uint8 = 4
+	UDPPing       uint8 = 1
+	UDPPong       uint8 = 2
+	UDPState      uint8 = 3
+	UDPWorld      uint8 = 4
+	UDPAiProgress uint8 = 5
 )
 
 // KartState flag bits.
@@ -291,6 +292,50 @@ func (m *UDPWorldPayload) Decode(r *wire.Reader) error {
 		e.Slot = r.U8()
 		e.RTTMs = r.U16()
 		e.State.Decode(r)
+		if r.Err() != nil {
+			break
+		}
+		m.Entries = append(m.Entries, e)
+	}
+	return r.Err()
+}
+
+// AiProgressEntry is one AI kart's progress in an AiProgress datagram.
+type AiProgressEntry struct {
+	Slot         uint8
+	Lap          uint8
+	RaceDistance float32
+	Health       uint8
+}
+
+// AiProgressEntrySize is the encoded size of one AiProgressEntry.
+const AiProgressEntrySize = 1 + 1 + 4 + 1
+
+// UDPAiProgressPayload is the payload of type 5: the AI host's AI karts.
+type UDPAiProgressPayload struct {
+	Entries []AiProgressEntry
+}
+
+func (m *UDPAiProgressPayload) Encode(w *wire.Writer) {
+	w.U8(uint8(len(m.Entries)))
+	for _, e := range m.Entries {
+		w.U8(e.Slot)
+		w.U8(e.Lap)
+		w.F32(e.RaceDistance)
+		w.U8(e.Health)
+	}
+}
+
+// Decode reads the payload, reusing the storage of m.Entries.
+func (m *UDPAiProgressPayload) Decode(r *wire.Reader) error {
+	n := int(r.U8())
+	m.Entries = m.Entries[:0]
+	if r.Remaining() < n*AiProgressEntrySize {
+		r.Fail(wire.ErrTruncated)
+		return r.Err()
+	}
+	for range n {
+		e := AiProgressEntry{Slot: r.U8(), Lap: r.U8(), RaceDistance: r.FiniteF32(), Health: r.U8()}
 		if r.Err() != nil {
 			break
 		}

@@ -93,7 +93,7 @@ Must be the first request of a connection; anything else first closes the connec
 | Field | Type | |
 | ------- | ------ | - |
 | magic | u32 | `0x4F4B484D` (bytes `M H K O`) |
-| protocol | u16 | **1** |
+| protocol | u16 | **2** |
 | gameCommit | string ≤ 40 | `BuildInfo.Commit` |
 | gameBuild | i32 | `BuildInfo.Number` |
 | contentVersion | i32 | `ContentVersion.Current` |
@@ -130,9 +130,9 @@ shutting down). The client does not reconnect automatically after `AccountDisabl
 Rules (server-enforced, clients pre-check for messages):
 
 - **Username**: 3–20 characters of `A–Z a–z 0–9 _ . -`, first and last a letter or digit. Unique case-insensitively;
-  the account keeps the case it registered with. Reserved: `admin`, `administrator`, `moderator`, `mod`, `system`,
-  `server`, `root`, `mhk`, `mhkos`, `mhk-os`, `anonymous` and every name starting with `anon-` (anonymous accounts,
-  see `DeleteAccount`).
+  the account keeps the case it was registered or renamed with (`ChangeUsername`). Reserved: `admin`,
+  `administrator`, `moderator`, `mod`, `system`, `server`, `root`, `mhk`, `mhkos`, `mhk-os`, `anonymous` and every
+  name starting with `anon-` (anonymous accounts, see `DeleteAccount`).
 - **Password**: 8–128 characters (Unicode code points), not equal to the username ignoring case. Stored as argon2id.
 - **Country**: ISO 3166-1 alpha-2 (`DE`, `SK`, …) looked up from the registration IP (GeoIP database, `""` when
   unknown). The player may choose another one; choosing `""` returns to the IP-detected country.
@@ -202,13 +202,41 @@ Empty → empty. Revokes the session of this connection; the connection stays op
 - The account's other connections get push `Disconnect(SessionInvalid, "This account was deleted.")`; this
   connection stays open, logged out.
 
+### ChangeUsername (request 29)
+
+`username: string ≤ 64` → `Account` (renamed). Needs login. The new name follows the `Register` rules: errors
+`InvalidUsername` (message = the rule) and `UsernameTaken`; a case-only change of one's own name is allowed, the
+exact current name changes nothing (answers the account, counts toward no limit). `RateLimited` ("You have changed
+your username too often. Please try again later.") after **3 changes per account within 30 days** (case-only changes
+count); the server counts them in the audit log, so restarts keep them.
+
+- The old name is free again right away and no longer logs in; the moderation audit log gets an entry
+  `account.rename` (actor and target the account, target ref the new name, reason "username changed by the player
+  from <old> to <new>").
+- Every list shows the new name at once: profiles, `ListPlayers` (and its search), `ScoreLeaderboard`, leaderboards
+  (and their username filter), `PlayerRuns`, `MyRuns`. Runs belong to the account, not to a name: existing runs list
+  under the new name. The `playerName` signed into ghost files stays what it was at recording (files are never
+  rewritten); clients show the `RunEntry` username for downloaded runs.
+- The lobby or room the player is in pushes `LobbyState` with the new name in its member list and last results. A
+  race already running keeps the name it started with (its grid, results and the room name a private room got from
+  its owner's name are not changed).
+- The account's other connections get push `AccountUpdated` with the renamed `Account`; sessions that are not
+  connected see it on their next `Resume`.
+
+### Push: AccountUpdated (push 16)
+
+`Account`: the logged-in account changed on another connection (`ChangeUsername`). Clients replace their account
+data; older clients ignore the unknown push and get the change with their next `Resume`.
+
 ## Profiles and score
 
 Every account has a public mini-profile. **Score** grows with online races (race sets, battle sets, championship
-rooms): after each race the server adds the race's points (the position points of `RaceResultRow.points`: 15, 12,
-10, 8, 7, 6, 5, 4, 3, 2, DNF 0) to the score of every human racer. Solo races against AI award nothing, kicked racers
-get nothing. The same race also counts `races` (every human who raced it, whatever the outcome), `wins` (position 1,
-finished) and `podiums` (position 1–3, finished). **Rank** = 1 + the number of accounts with a higher score, among
+rooms): after each race with at least **two human racers** the server adds the race's points (the position points
+of `RaceResultRow.points`: 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 for places 1–10, 1 for every later finished place, DNF 0)
+to the score of every human racer; places count AI karts like humans. A race with one human (against AI or alone)
+awards nothing, AI drivers have no score, kicked racers get nothing. The same race also counts `races` (every human
+who raced it, whatever the outcome), `wins` (position 1, finished) and `podiums` (position 1–3, finished). **Rank** =
+1 + the number of accounts with a higher score, among
 accounts with score > 0 that are not disabled (equal scores share a rank); 0 = unranked (score 0 or disabled).
 **Last active** is the last login, resume or end of a logged-in connection; `online` is true while the account has a
 logged-in connection. A player may take their profile off the players list (`ListPlayers`, default: listed); it stays
@@ -313,9 +341,9 @@ for the 2000 most unlocked achievements (most first, ties by id).
 - **Run**: one uploaded ghost file (`.mhkghost`, the game's own format, see the game repo
   `Packages/org.mhkose.sdk/Runtime/Ghosts/GhostFile.cs`, `GhostHeaderCodec.cs`, `GhostBodyCodec.cs`,
   `GhostChannelCodec.cs`). The server parses and validates the whole file; the owner is the uploading account, never
-  the `playerName`/`playerId` inside the file. Identified by `runId` (u64). The file's header `id` (32 hex) is unique
-  across the server: the same account uploading it again gets the existing run back (`duplicate`), another account
-  gets `Forbidden`.
+  the `playerName`/`playerId` inside the file, and runs show the account's current name (see `ChangeUsername`).
+  Identified by `runId` (u64). The file's header `id` (32 hex) is unique across the server: the same account
+  uploading it again gets the existing run back (`duplicate`), another account gets `Forbidden`.
 - **Board**: runs that are comparable: same `trackId` (case-insensitive), `engineClass` (0–2), `laps`, `contentVersion`
   and `trackHash`. A new content version or changed track content therefore starts a new board; older boards
   stay browsable ("archived" in the client: any board whose `contentVersion`/`trackHash` differs from the client's own).
@@ -513,19 +541,21 @@ accounts. `reason` is shown to the affected player where applicable.
 
 ### Overview
 
-- Up to **10 players** per lobby and race. Every client simulates its **own kart** (client authority over its own
-  motion) and renders the others from UDP snapshots. Kart-vs-kart contacts are resolved by each client against
-  kinematic stand-ins of the others.
-- The server decides everything that has a single truth: lobby phases, which track, the GO instant, item box
-  pickups and item rolls, which items a player holds, hit arbitration, finish order, points, kicks.
+- Up to **50 players** per lobby and up to **50 karts** per race: the humans plus AI drivers (see "AI drivers").
+  Every client simulates its **own kart** (client authority over its own motion) and renders the other humans from
+  UDP snapshots; every client simulates every AI kart itself. Kart-vs-kart contacts are resolved by each client
+  against kinematic stand-ins of the other humans.
+- The server decides everything that has a single truth: lobby phases, which track, the GO instant, the AI drivers,
+  item box pickups and item rolls, which items a racer (human or AI) holds, hit arbitration, finish order, points,
+  kicks.
 - Clients simulate projectiles locally from the use events; the server keeps them in sync by the **median** of the
   positions clients report and flags outliers.
 - **Anticheat** (lobbies with anticheat on): every member races with identical content (see "Content agreement"),
-  so each observer's own definitions are the racers'. Clients check other karts' motion with the plausibility engine
+  so each observer's own definitions are the racers'. Clients check other humans' motion with the plausibility engine
   (the ghost validator's core) and report; the server kicks on reports from enough distinct eligible observers and
   stores every report for moderators. Server-side checks (items held, pickup distance, projectile outliers, ignored
   hits) add strikes. Accounts that were ever kicked for cheating have their reports ignored forever. Nobody is banned
-  by this; moderators can still disable accounts.
+  by this; moderators can still disable accounts. AI karts are never checked, reported or struck.
 - An anticheat-off lobby skips report processing, strikes and kicks; item and hit arbitration still run so the race
   stays consistent.
 
@@ -537,10 +567,12 @@ accounts. `reason` is shown to the affected player where applicable.
 | observed racer's RTT for a check or report to count | ≤ 200 ms, except Speed and Acceleration (any RTT: latency does not change those magnitudes, and a faked RTT must not shield them) |
 | client: report a kart after | 3 strikes within 10 s from its own checks |
 | server: kick a racer for cheating when within 15 s | distinct eligible reporters ≥ max(2, ⌈eligible observers / 2⌉) |
-| eligible observers | other racers in the race, RTT ≤ 200 ms, never kicked for cheating |
+| eligible observers | other human racers in the race, RTT ≤ 200 ms, never kicked for cheating |
 | server strikes (item use without holding it, pickup too far, projectile outlier, ignored forced hit) | kick at 5 within 30 s |
-| projectile outlier | > max(4 m, 3 × median absolute deviation) from the component-wise median, ≥ 3 reporters |
+| projectile outlier | > max(4 m, 3 × median absolute deviation) from the component-wise median, ≥ 3 reporters; never for an AI kart's projectile (corrected only) |
 | unknown content | ≥ 2 distinct reporters about racer X → X leaves the race; exactly 1 reporter → the reporter leaves the race (desync); neither counts as cheating unless the item is absent from the catalog majority of X's pack version (fabricated) |
+
+Reports, hit claims and unknown-content reports about an AI slot are ignored.
 
 ### Content agreement
 
@@ -586,43 +618,97 @@ Anticheat lobbies additionally require identical content:
 
 ### Public lobby categories (u8)
 
-| # | Mode | Packs | Anticheat |
-| --- | ------ | ------- | ----------- |
-| 1 | Races | mhk2, mhk3, mhke, mhkt | on |
-| 2 | Races | mhk2, mhk3, mhke, mhkt | off |
-| 3 | Races | mhk2, mhk3, mhke, mhkt, tincan | on |
-| 4 | Races | mhk2, mhk3, mhke, mhkt, tincan | off |
-| 5 | Battles | mhk2, mhk3, mhke, mhkt | on |
-| 6 | Battles | mhk2, mhk3, mhke, mhkt | off |
-| 7 | Battles | mhk2, mhk3, mhke, mhkt, tincan | on |
-| 8 | Battles | mhk2, mhk3, mhke, mhkt, tincan | off |
-| 9 | Races | mhk2 | on |
-| 10 | Races | mhk2 | off |
+| # | Mode | Packs | Anticheat | AI |
+| --- | ------ | ------- | ----------- | ---- |
+| 1 | Races | mhk2, mhk3, mhke, mhkt | on | no |
+| 2 | Races | mhk2, mhk3, mhke, mhkt | off | no |
+| 3 | Races | mhk2, mhk3, mhke, mhkt, tincan | on | no |
+| 4 | Races | mhk2, mhk3, mhke, mhkt, tincan | off | no |
+| 5 | Battles | mhk2, mhk3, mhke, mhkt | on | no |
+| 6 | Battles | mhk2, mhk3, mhke, mhkt | off | no |
+| 7 | Battles | mhk2, mhk3, mhke, mhkt, tincan | on | no |
+| 8 | Battles | mhk2, mhk3, mhke, mhkt, tincan | off | no |
+| 9 | Races | mhk2 | on | no |
+| 10 | Races | mhk2 | off | no |
+| 11–20 | as category − 10 | | | fills every free slot |
+
+Categories 11–20 are the AI versions of 1–10 (same mode, packs and anticheat; names end in "+ AI"): `maxAi` =
+`maxPlayers` − 1, so AI karts fill every slot no human takes (2 humans in a 10-kart lobby race 8 AI).
 
 Instances exist per (category, `contentVersion`) and, in anticheat categories, per content set (the manifest hashes
 of the category's packs and of `game`): `ListLobbies` and `QuickJoin` use the caller's, so players with different
 versions of a pack race in different instances. Per key there is always one instance with a free slot; when all are
-full a new one opens; an empty instance closes while another one of its key has room. Public lobbies race at
-**150cc** (engine class 2), track laps, items on with default odds. Flow, while at least **two humans** are in the
-lobby: **Voting** (20 s or until everyone voted: each player votes a track/arena or Random; one vote is drawn at
-random) → Loading → Countdown → Racing → Results (10 s) → after **4 races** SetResults (15 s, points reset) → Voting.
-With one human the lobby waits (phase Waiting, nothing starts by itself). Players joining during a race wait for the
-next one. Points per race by position: 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 (DNF 0); battles rank survivors by health,
-then eliminated players by reverse elimination order.
+full a new one opens; an empty instance closes while another one of its key has room. Public lobbies hold
+**10 players**, race at **150cc** (engine class 2), track laps, items on with default odds. Flow, while at least
+**two humans** are in the lobby (**one** in AI categories): **Voting** (20 s or until everyone voted: each player
+votes a track/arena or Random; one vote is drawn at random) → Loading → Countdown → Racing → Results (10 s) → after
+**4 races** SetResults (15 s, points reset, the AI drivers are drawn again) → Voting. Otherwise the lobby waits
+(phase Waiting, nothing starts by itself). Players joining during a race wait for the next one. Points per race by
+position (AI karts included): 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 for places 1–10, 1 for every later finished place
+(DNF 0); battles rank survivors by health, then eliminated racers by reverse elimination order.
 
-**AI** only on request while a player is alone: the lone member of a public lobby, or the owner of a private room who
-is alone, may start a race (`StartRace`, own track pick or `""` = random lobby track) against AI their own client
-simulates (no item/anticheat arbitration): 6 AI opponents in public lobbies, `maxPlayers − 1` in private rooms with
-`aiWhenAlone` (none without). Such solo races award no points and do not count towards a set. If someone joins during
-one, the server tells the solo racer (`SoloRaceJoinWaiting`) and they may end it early (`EndRaceEarly`); afterwards a
-public lobby starts Voting with the humans only, a private room waits for its owner.
+**Alone in a lobby without AI**: the lone member of a waiting public lobby of categories 1–10 may start a **solo
+race** (`StartRace`, own track pick or `""` = random lobby track) against **6 AI drivers**. A solo race is outside
+the set: no points (`RaceResultRow.points` 0), the set does not advance (`RaceSetup.setRace`/`setSize` 0) and no
+results phase follows. Whenever exactly one human races (a solo race, a private room's owner alone, the lone player
+of an AI lobby) and someone joins the lobby, the server tells that racer (`SoloRaceJoinWaiting`) and the racer may
+end the race early (`EndRaceEarly`: every kart still driving is DNF); afterwards the lobby carries on as after any
+race.
 
 ### Private rooms
 
 Created by a player with `RoomSettings`; joined by **code** (6 chars of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`) or link
-`mhkos://join/<code>`. The owner changes settings while waiting, starts races, may kick members. When the owner
-leaves, the longest-present member becomes owner; an empty room closes. Joining follows the content rules above
-(anticheat rooms: the room's content set).
+`mhkos://join/<code>`. The owner changes settings while waiting, starts races (also alone: against the room's AI,
+or alone without AI; these races belong to the set), may kick members. When the owner leaves, the longest-present
+member becomes owner; an empty room closes. Joining follows the content rules above (anticheat rooms: the room's
+content set).
+
+**Championship rooms** (`mode` 2) race either a cup (`cupId`, the owner's client starts the cup's tracks in order)
+or a **custom track list** (`cupId` `""`, `trackIds`: 1–35 race tracks of the room's content, duplicates allowed,
+in race order). The set is the list: `racesPerSet` = the track count (the server sets it), and race n of the set
+runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`, any other track is `BadRequest`.
+
+### AI drivers
+
+- **How many**: `RoomSettings.maxAi` (0 = no AI, at most `maxPlayers` − 1). A race has every racing human (members
+  with a loadout) plus min(`maxAi`, `maxPlayers` − humans) AI karts: room size 10 with up to 5 AI → 4 humans race
+  5 AI (9 karts), 6 humans race 4 AI (10 karts). A solo race (see above) has 6.
+- **Drivers**: the lobby keeps its AI drivers for a whole set (`LobbyState.aiDrivers`), so the same drivers race
+  every race of the set and collect set points. A race uses the first n drivers; when it needs more than the set has
+  (a new set starts with none), the server draws more: the character from the characters that are lobby content and
+  that the catalog lists for every racing human (the deciding manifests of the lobby packs and `game`, ids sorted
+  ordinally), shuffled by the server RNG with characters no racing human chose first, repeating when there are more
+  AI than characters; the kart a uniform random draw from the karts of that common content (any driver on any kart,
+  as the game's `AiRoster`). A driver whose character or kart is not common content of a race's humans is drawn
+  again before that race (its set points stay). Solo races draw 6 drivers for that race only. With no common
+  character or kart the race has no AI.
+- **Grid**: AI karts take the front of the grid (slots 0…n−1 in driver order), the humans follow in join order
+  shuffled. `RaceSlot.ai` marks AI slots: `accountId` 0, `username` `""` (clients show the character's name),
+  `country` `""`, `platform` 0.
+- **Simulation**: every client simulates every AI kart locally with its normal AI driver. AI positions are never
+  streamed between clients (only the AI host tells the server their progress, UDP `AiProgress`); clients' AI karts
+  diverge and that is accepted: plausibility checks, cheat reports, hit claims, unknown-content reports and server
+  strikes never concern an AI slot.
+- **AI host**: one racer reports for every AI kart: the human with the lowest grid slot still in the race
+  (`RaceSetup.aiHost`; when the host leaves the race the server elects the next one and pushes `AiHost`; finishing or
+  being eliminated does not end hosting). The host's client sends the AI karts' item box pickups (`ItemPickup`), item
+  uses (`ItemUse`, use id `(aiSlot + 1) << 24 | n`, n counted per AI slot), hits taken (`HitTaken`), battle
+  eliminations (`EliminatedSelf`), finishes (`Finished`) and the end of their projectiles (`ProjectileGone`), each
+  with the AI kart's slot in the notify's `slot` field, and their progress (`AiProgress`, 10 Hz). Such notifies from
+  anybody else, or naming a human's slot, are ignored. The server arbitrates them like a human's (box availability,
+  held item, roulette cooldown; no pickup distance check: it has no AI positions; never a strike; finish times it
+  cannot believe are replaced by its clock) and broadcasts the outcome: `ItemGranted` (with the AI slot) to every
+  racer, `ItemDenied` to the host, `ItemUsed` and `HitApplied` to everyone but the host, `PlayerFinished` and
+  `Eliminated` to everyone.
+- **Replay**: every client applies those events to its own AI kart of that slot: `ItemGranted` puts the item into
+  its inventory (the box is taken), `ItemUsed` spawns the use from the reported pose and spends a charge,
+  `HitApplied` applies the effect, `Eliminated` takes the kart out of the battle, `PlayerFinished` finishes it with
+  the reported time when it still drives. On clients that are not the host, AI drivers never take boxes, use items or
+  take hits from item uses by themselves; track hazards and zones act on every client's AI karts locally, so a
+  `HitApplied` with `useId` 0 for an AI slot is not replayed. A new host goes on from its own AI karts.
+- **Results**: AI rows rank with the humans (`RaceResultRow.ai`, `accountId` 0, `username` `""`, `characterId`),
+  earn position points and set points like humans (kept in `LobbyState.aiDrivers`); account score is for humans only
+  (see "Profiles and score").
 
 ### Common structures
 
@@ -633,18 +719,19 @@ leaves, the longest-present member becomes owner; an empty room closes. Joining 
 | Field | Type | |
 | ------- | ------ | - |
 | name | string ≤ 32 | |
-| mode | u8 | 0 race set, 1 battle set, 2 championship (cup) |
+| mode | u8 | 0 race set, 1 battle set, 2 championship (cup or custom track list) |
 | packs | list<string ≤ 64> ≤ 32 | content packs of the room |
 | anticheat | bool | default true in the client |
 | engineClass | u8 | 0–2 |
 | laps | u8 | 0 = each track's default, else 1–99 |
 | items | bool | |
 | itemOdds | list<(powerupId: string ≤ 96, percent: f32)> ≤ 64 | empty = default odds |
-| aiWhenAlone | bool | AI opponents while the owner is alone |
-| maxPlayers | u8 | 2–10 |
-| trackPick | u8 | 0 owner picks, 1 vote (championship rooms are always 0: the owner's client starts each cup track in order) |
-| racesPerSet | u8 | 1–16 (championship: the cup's track count) |
-| cupId | string ≤ 96 | championship only |
+| maxAi | u8 | most AI karts in a race: 0 = no AI, at most `maxPlayers` − 1 (see "AI drivers") |
+| maxPlayers | u8 | 2–50: humans plus AI karts in a race, and the most members |
+| trackPick | u8 | 0 owner picks, 1 vote (championship rooms are always 0: the owner's client starts each track in order) |
+| racesPerSet | u8 | 1–16; championship: the cup's track count (1–16), with a custom list the track count (set by the server) |
+| cupId | string ≤ 96 | championship with a cup; `""` with a custom list and in other modes |
+| trackIds | list<string ≤ 96> ≤ 35 | championship without a cup: 1–35 race tracks of the room's content in race order, duplicates allowed; empty otherwise |
 
 `LobbySummary`:
 
@@ -658,13 +745,14 @@ leaves, the longest-present member becomes owner; an empty room closes. Joining 
 | mode | u8 | as RoomSettings.mode |
 | anticheat | bool | |
 | packs | list<string ≤ 64> ≤ 32 | |
-| players | u8 | |
+| players | u8 | humans in the lobby |
 | maxPlayers | u8 | |
 | phase | u8 | 0 Waiting, 1 Voting, 2 Loading, 3 Countdown, 4 Racing, 5 Results, 6 SetResults |
 | contentVersion | i32 | |
 | engineClass | u8 | 0–2 |
 | setRace | u8 | as `LobbyState.setRace` |
 | setSize | u8 | as `LobbyState.setSize` |
+| maxAi | u8 | as `RoomSettings.maxAi` (0 = no AI) |
 
 `LobbyMember`:
 
@@ -691,18 +779,21 @@ leaves, the longest-present member becomes owner; an empty room closes. Joining 
 | summary | LobbySummary | |
 | code | string ≤ 8 | private rooms (members only), else `""` |
 | settings | RoomSettings | effective settings (public lobbies too) |
-| members | list<LobbyMember> ≤ 10 | |
+| members | list<LobbyMember> ≤ 50 | |
 | phaseEnds | time | 0 = no timer |
 | setRace | u8 | 1-based race number in the set, 0 between sets |
 | setSize | u8 | |
-| votes | list<(accountId: u64, trackId: string ≤ 96)> ≤ 10 | `""` = Random |
+| votes | list<(accountId: u64, trackId: string ≤ 96)> ≤ 50 | `""` = Random |
 | trackId | string ≤ 96 | drawn/current track, `""` before the draw |
 | raceId | u64 | current race, 0 = none |
-| lastResults | list<RaceResultRow> ≤ 10 | of the previous race, for the results phases |
+| lastResults | list<RaceResultRow> ≤ 50 | of the previous race, for the results phases |
+| aiDrivers | list<AiDriver> ≤ 49 | the set's AI drivers in grid order (see "AI drivers"); empty between sets |
 
-`RaceResultRow`: `slot: u8`, `accountId: u64`, `username: string ≤ 20`, `position: u8` (1-based),
-`finishMs: i32` (0 = DNF), `points: i32`, `setPoints: i32`, `outcome: u8` (0 finished, 1 DNF, 2 left,
-3 kicked: cheating, 4 kicked: moderator, 5 desync), `ai: bool`.
+`AiDriver`: `characterId: string ≤ 96`, `kartId: string ≤ 96`, `setPoints: i32`.
+
+`RaceResultRow`: `slot: u8`, `accountId: u64` (0 = AI), `username: string ≤ 20` (`""` for AI),
+`position: u8` (1-based), `finishMs: i32` (0 = DNF), `points: i32`, `setPoints: i32`, `outcome: u8` (0 finished,
+1 DNF, 2 left, 3 kicked: cheating, 4 kicked: moderator, 5 desync), `ai: bool`, `characterId: string ≤ 96`.
 
 ### Content messages
 
@@ -729,13 +820,13 @@ answer `BadRequest` "content not announced". Needs login.
 | 259 | JoinLobby | `lobbyId: u64`, `code: string ≤ 8` (one of them; code wins when non-empty) | `LobbyState` |
 | 260 | QuickJoin | `category: u8` | `LobbyState` (the fullest public instance with room, of the caller's content set in anticheat categories) |
 | 261 | CreateRoom | `RoomSettings` | `LobbyState` |
-| 262 | UpdateRoom | `RoomSettings` | empty (owner, Waiting only) |
+| 262 | UpdateRoom | `RoomSettings` | empty (owner, Waiting only; the set's AI drivers are drawn again) |
 | 263 | LeaveLobby | empty | empty |
 | 264 | SetLoadout | `characterId: string ≤ 96`, `kartId: string ≤ 96` | empty (must be lobby content; choosing anything also re-applies the content rules of joining) |
 | 265 | SetReady | `ready: bool` | empty |
 | 266 | Vote | `trackId: string ≤ 96` (`""` = Random) | empty (Voting phase, lobby content) |
-| 267 | StartRace | `trackId: string ≤ 96` (alone: a solo AI race on that track, `""` = random lobby track; with others: the track in owner-pick rooms, `""` in vote rooms) | empty (owner of a private room; the lone member of a public lobby while it waits) |
-| 268 | EndRaceEarly | empty | empty (the solo racer of an AI race) |
+| 267 | StartRace | `trackId: string ≤ 96` (a solo race on that track, `""` = random lobby track; private rooms: the track in owner-pick rooms (`""` = random, championships with a cup must name the cup's next track), `""` in vote rooms (opens the voting), the listed track or `""` in custom-list championships) | empty (owner of a private room, also alone; the lone member of a waiting public lobby without AI) |
+| 268 | EndRaceEarly | empty | empty (the only human racer of the current race) |
 | 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty. Both kicks remove the member from the lobby for 10 min and, during a race, from the race (`PlayerLeftRace`). Room owners kick within their private room (outcome left); moderators kick anywhere (outcome kicked: moderator; audit-logged) |
 
 Join errors: `NotFound`, `Forbidden` (full, kicked from this lobby in the last 10 min, or in an anticheat lobby a
@@ -750,7 +841,7 @@ answer replaces the state).
 | ------ | ------ | ------ |
 | 256 | LobbyState | `LobbyState` (after every change) |
 | 257 | LobbyLeft | `reason: u8` (0 left, 1 kicked by owner, 2 kicked by moderator, 3 lobby closed), `message: string ≤ 256` |
-| 258 | SoloRaceJoinWaiting | `username: string ≤ 20` (someone waits while you race alone against AI) |
+| 258 | SoloRaceJoinWaiting | `username: string ≤ 20` (someone waits while you are the only human racing) |
 
 ### Race messages (TCP)
 
@@ -760,19 +851,20 @@ Server → client pushes:
 | ------ | ------ | ------ |
 | 512 | RaceSetup | `RaceSetup` |
 | 513 | RaceGo | `raceId: u64`, `go: time` (server clock instant of GO; the countdown shows the 3 s before it) |
-| 514 | ItemGranted | `raceId: u64`, `boxId: u16`, `powerupId: string ≤ 96`, `charges: u8`, `tick: u32` (only to the picker) |
-| 515 | ItemBoxTaken | `raceId: u64`, `slot: u8`, `boxId: u16`, `tick: u32` (to everyone else) |
-| 516 | ItemDenied | `raceId: u64`, `boxId: u16`, `reason: u8` (1 box not available, 2 too far, 3 cannot receive) |
-| 517 | ItemUsed | `raceId: u64`, `slot: u8`, `useId: u32`, `powerupId: string ≤ 96`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8` (255 none) (to everyone else) |
+| 514 | ItemGranted | `raceId: u64`, `boxId: u16`, `powerupId: string ≤ 96`, `charges: u8`, `tick: u32`, `slot: u8` (the kart that gets it: the receiver's own slot, sent only to the picker; or an AI slot, sent to every racer) |
+| 515 | ItemBoxTaken | `raceId: u64`, `slot: u8`, `boxId: u16`, `tick: u32` (a human took it; to everyone else) |
+| 516 | ItemDenied | `raceId: u64`, `boxId: u16`, `reason: u8` (1 box not available, 2 too far, 3 cannot receive), `slot: u8` (the kart that asked: own or, to the AI host, an AI slot) |
+| 517 | ItemUsed | `raceId: u64`, `slot: u8`, `useId: u32`, `powerupId: string ≤ 96`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8` (255 none) (to everyone but the sender) |
 | 518 | ItemUseRejected | `raceId: u64`, `useId: u32`, `reason: u8` (1 not held, 2 cooldown) |
 | 519 | ProjectileCorrect | `raceId: u64`, `useId: u32`, `tick: u32`, `pos: vec3`, `vel: vec3` |
-| 520 | HitApplied | `raceId: u64`, `victimSlot: u8`, `attackerSlot: u8` (255 none), `useId: u32`, `effectId: string ≤ 96`, `tick: u32` |
-| 521 | HitForce | `raceId: u64`, `attackerSlot: u8`, `useId: u32`, `effectId: string ≤ 96` (to the victim: apply it) |
+| 520 | HitApplied | `raceId: u64`, `victimSlot: u8`, `attackerSlot: u8` (255 none), `useId: u32`, `effectId: string ≤ 96`, `tick: u32` (to everyone but the sender) |
+| 521 | HitForce | `raceId: u64`, `attackerSlot: u8`, `useId: u32`, `effectId: string ≤ 96` (to the victim: apply it; never for AI) |
 | 522 | PlayerFinished | `raceId: u64`, `slot: u8`, `finishMs: i32`, `lapMs: list<i32> ≤ 99` |
-| 523 | RaceResults | `raceId: u64`, `rows: list<RaceResultRow> ≤ 16`, `setDone: bool` |
+| 523 | RaceResults | `raceId: u64`, `rows: list<RaceResultRow> ≤ 50`, `setDone: bool` |
 | 524 | PlayerLeftRace | `raceId: u64`, `slot: u8`, `outcome: u8` (as RaceResultRow.outcome), `message: string ≤ 256` |
 | 525 | Eliminated | `raceId: u64`, `slot: u8`, `attackerSlot: u8`, `tick: u32` (battle) |
 | 526 | BridgeTriggered | `raceId: u64`, `bridgeId: u16`, `tick: u32` |
+| 527 | AiHost | `raceId: u64`, `slot: u8` (the new AI host, see "AI drivers") |
 
 `RaceSetup`:
 
@@ -787,45 +879,45 @@ Server → client pushes:
 | items | bool | |
 | itemOdds | list<(string ≤ 96, f32)> ≤ 64 | as RoomSettings |
 | anticheat | bool | |
-| solo | bool | exactly one human: race against AI locally, no arbitration |
-| aiCount | u8 | AI opponents in a solo race |
+| aiHost | u8 | grid slot of the AI host, 255 = no AI in the race |
 | seed | u64 | race seed for deterministic cosmetic randomness |
-| grid | list<RaceSlot> ≤ 10 | start order: grid slot = list index |
+| grid | list<RaceSlot> ≤ 50 | start order: grid slot = list index (AI first) |
 | yourSlot | u8 | |
 | udpPort | u16 | |
 | udpToken | u64 | |
 | udpKey | bytes ≤ 32 | 32 bytes HMAC key |
-| setRace | u8 | |
+| setRace | u8 | 0 = outside the set (solo race) |
 | setSize | u8 | |
 
 `RaceSlot`: `slot: u8`, `accountId: u64`, `username: string ≤ 20`, `country: string ≤ 2`,
-`characterId: string ≤ 96`, `kartId: string ≤ 96`, `platform: u8` (as `LobbyMember.platform`).
+`characterId: string ≤ 96`, `kartId: string ≤ 96`, `platform: u8` (as `LobbyMember.platform`), `ai: bool`.
 
 Hello `platform` values the server maps (Unity `RuntimePlatform` names, editors included): `WindowsPlayer`,
 `WindowsEditor` → 1; `OSXPlayer`, `OSXEditor` → 2; `LinuxPlayer`, `LinuxEditor` → 3; `Android` → 4; `IPhonePlayer` → 5;
 anything else → 0.
 
-Client → server notifies (TCP, kind 3; the server ignores those for a race the sender is not in):
+Client → server notifies (TCP, kind 3; the server ignores those for a race the sender is not in). `slot` (u8) names
+the kart the notify is about: 255 = the sender's own kart, an AI slot from the AI host (see "AI drivers").
 
 | Type | Name | Body |
 | ------ | ------ | ------ |
 | 528 | RaceLoaded | `RaceLoaded` |
-| 529 | ItemPickup | `raceId: u64`, `boxId: u16`, `tick: u32`, `pos: vec3` |
-| 530 | ItemUse | `raceId: u64`, `useId: u32`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8` |
-| 531 | HitTaken | `raceId: u64`, `attackerSlot: u8`, `useId: u32` (0 = track hazard/zone), `effectId: string ≤ 96`, `tick: u32` |
+| 529 | ItemPickup | `raceId: u64`, `boxId: u16`, `tick: u32`, `pos: vec3`, `slot: u8` |
+| 530 | ItemUse | `raceId: u64`, `useId: u32`, `tick: u32`, `pos: vec3`, `rot: quat`, `backwards: bool`, `targetSlot: u8`, `slot: u8` |
+| 531 | HitTaken | `raceId: u64`, `attackerSlot: u8`, `useId: u32` (0 = track hazard/zone), `effectId: string ≤ 96`, `tick: u32`, `slot: u8` |
 | 532 | HitSeen | `raceId: u64`, `victimSlot: u8`, `attackerSlot: u8`, `useId: u32`, `effectId: string ≤ 96`, `tick: u32` |
-| 533 | Finished | `raceId: u64`, `finishMs: i32`, `lapMs: list<i32> ≤ 99`, `tick: u32`, `position: u8` (solo races: the racer's place among all karts incl. AI; 0 otherwise) |
+| 533 | Finished | `raceId: u64`, `finishMs: i32`, `lapMs: list<i32> ≤ 99`, `tick: u32`, `slot: u8` |
 | 534 | CheatReport | `raceId: u64`, `suspectSlot: u8`, `reason: u8` (FlagReason), `tick: u32`, `detail: string ≤ 256` |
 | 535 | UnknownContent | `raceId: u64`, `slot: u8`, `kind: u8`, `id: string ≤ 96` |
-| 536 | EliminatedSelf | `raceId: u64`, `attackerSlot: u8`, `tick: u32` |
+| 536 | EliminatedSelf | `raceId: u64`, `attackerSlot: u8`, `tick: u32`, `slot: u8` |
 | 537 | BridgeTrigger | `raceId: u64`, `bridgeId: u16`, `tick: u32` |
 | 538 | ProjectileGone | `raceId: u64`, `useId: u32`, `tick: u32` |
 
 `RaceLoaded`: `raceId: u64`, `trackHash: string ≤ 32`, `laps: u8` (laps of this race, resolved from the track default when `RaceSetup.laps` is 0), `boxes: list<ItemBoxInfo> ≤ 512`,
-`pool: list<PoolEntry> ≤ 128`, `specials: list<(slot: u8, powerupId: string ≤ 96)> ≤ 10` (the special powerup of
-each racer's character that is lobby content; a special of another pack, e.g. a cross-pack reference resolved only
-where that pack is installed, is left out), `rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024` (status effect
-ids, the index table of UDP states).
+`pool: list<PoolEntry> ≤ 128`, `specials: list<(slot: u8, powerupId: string ≤ 96)> ≤ 50` (the special powerup of
+each racer's character, AI included, that is lobby content; a special of another pack, e.g. a cross-pack reference
+resolved only where that pack is installed, is left out), `rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024`
+(status effect ids, the index table of UDP states).
 
 - `ItemBoxInfo`: `pos: vec3`, `respawnTenths: u16` (respawn time in 0.1 s), `fixed: string ≤ 96` (`""` random,
   a powerup id, `@special`, or a status effect id: boxes that apply an effect are not arbitrated). Box ids are the
@@ -841,10 +933,11 @@ canonical hashes) among the racers; racers that differ leave the race (`PlayerLe
 their pack commit equals the majority's, get a content strike. A racer that did not send `RaceLoaded` within 45 s
 leaves the race. The server then sends `RaceGo` with GO = now + 3.5 s.
 
-Item roll: position fraction f = (position − 1) / (racers − 1) from the latest `raceDistance`s (finished racers in
-finish order; battles and single racers use 0.5); weight = linear interpolation of the 11 weights at f; a weighted
-random draw (server RNG) among entries with weight > 0. `@special` boxes grant the slot's special powerup (random
-draw when it has none).
+Item roll: position fraction f = (position − 1) / (karts − 1) over every kart still in the race, AI included,
+ranked by the latest `raceDistance`s (humans from their states, AI from `AiProgress`; finished karts in finish
+order; battles and single karts use 0.5); weight = linear interpolation of the 11 weights at f; a weighted random
+draw (server RNG) among entries with weight > 0. `@special` boxes grant the slot's special powerup (random draw when
+it has none).
 
 ### Realtime UDP
 
@@ -865,8 +958,9 @@ datagrams (latest valid one wins).
 | ------ | ----------- | --------- |
 | 1 Ping | c → s | `clientTime: time`, `echoServerTime: time` (`serverTime` of the newest Pong received, 0 = none yet), `echoHoldMs: u16` (ms between receiving that Pong and sending this Ping, clamped to 65535). Sent 4×/s during loading and races; doubles as keepalive. The server's RTT sample = receive time − `echoServerTime` − `echoHoldMs` (ignored when the echo is 0, in the future or older than 5 s), smoothed with EWMA α = 1/8; it feeds `World.rttMs` and eligibility |
 | 2 Pong | s → c | `clientTime: time`, `serverTime: time` |
-| 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` |
-| 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other racer) |
+| 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` (as many as fit the datagram; the rest go with the next state) |
+| 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other human racer; split over as many World datagrams as needed, each a whole entry list with its own `seq`) |
+| 5 AiProgress | c → s | `n: u8` + n × (`slot: u8`, `lap: u8`, `raceDistance: f32`, `health: u8`): the AI host's AI karts (10 Hz, as many as fit, the rest in the next datagram); ignored from anybody else. Feeds item rolls, DNF ranking and battle survivor ranking |
 
 `KartState` (sent at 30 Hz):
 
@@ -890,39 +984,46 @@ Clocks: clients estimate the server clock offset from Ping/Pong (minimum-RTT sam
 start the race at GO in server time. Ticks are counted locally from GO at 60 Hz; remote karts are rendered about
 100 ms behind the newest received tick.
 
-`useId` = `(slot + 1) << 24 | n` with n the player's own use counter (1-based) in this race: unique without a
-round trip. A client must not use an item before its `ItemGranted` arrived.
+`useId` = `(slot + 1) << 24 | n` with n the kart's own use counter (1-based) in this race: unique without a
+round trip (AI karts: counted by the AI host per AI slot). A client must not use an item before its `ItemGranted`
+arrived.
 
 ### Race rules (server)
 
-- **Grid**: racers in the lobby with a loadout, in join order shuffled by the race seed; at most 10. Waiting players
-  and players without a loadout (character and kart) sit the race out.
-- **Hits**: the victim's client decides hits on its own kart and applies them at once, then sends `HitTaken`; the
-  server forwards `HitApplied` to everyone else (once per victim and `useId`). Observers that see a projectile hit
-  another kart send `HitSeen` and do not apply it. If, within victim RTT + 300 ms of the first claim, the server holds
-  claims from ≥ max(2, ⌈eligible observers / 2⌉) distinct eligible observers but no `HitTaken`, it sends `HitForce` to
-  the victim (a legit client applies it and answers with `HitTaken`) and adds an "ignored hit" strike when the victim
-  still does not confirm within another RTT + 300 ms (anticheat lobbies only).
+- **Grid**: the lobby's racing humans (members with a loadout; waiting players and players without a loadout
+  (character and kart) sit the race out) in join order shuffled, behind the race's AI karts (see "AI drivers"); at
+  most 50 karts.
+- **Hits**: the victim's client decides hits on its own kart (the AI host: on AI karts) and applies them at once,
+  then sends `HitTaken`; the server forwards `HitApplied` to everyone else (once per victim and `useId`). Observers
+  that see a projectile hit another human's kart send `HitSeen` and do not apply it. If, within victim RTT + 300 ms
+  of the first claim, the server holds claims from ≥ max(2, ⌈eligible observers / 2⌉) distinct eligible observers
+  but no `HitTaken`, it sends `HitForce` to the victim (a legit client applies it and answers with `HitTaken`) and
+  adds an "ignored hit" strike when the victim still does not confirm within another RTT + 300 ms (anticheat lobbies
+  only). Claims about AI karts are ignored.
 - **Projectiles**: positions reported at ticks t_i are compared at the newest tick T after extrapolating
   `pos + vel × (T − t_i) / 60`; `ProjectileCorrect` goes to everyone when the reports spread more than 2 m from the
-  median; clients blend towards the corrected state. `ProjectileGone` from the owner or a majority of reporters ends
-  tracking.
-- **Finish**: a `Finished` whose time disagrees with the server's clock since GO by more than RTT + 1 s, or whose lap
-  count differs from the race's, is a server strike and the finish is taken at the server's receive time. The race
-  ends when every racer finished, left or was eliminated, 30 s after the first finisher, or after 20 min; unfinished
-  racers are DNF. Battles end when ≤ 1 racer is alive or after 4 min.
-- **Battles**: the victim reports its own elimination (`EliminatedSelf`); observers' kart states carry health; a racer
-  at health 0 in a majority of observers' views for 2 s without `EliminatedSelf` gets a strike and is eliminated.
+  median; clients blend towards the corrected state. `ProjectileGone` from the owner (the AI host for AI uses) or a
+  majority of reporters ends tracking.
+- **Finish**: a human's `Finished` whose time disagrees with the server's clock since GO by more than RTT + 1 s, or
+  whose lap count differs from the race's, is a server strike and the finish is taken at the server's receive time
+  (AI finishes: the same correction, never a strike). The race ends when every kart finished, left or was
+  eliminated, 30 s after the first finisher (human or AI), when no human is left in the race, or after 20 min;
+  unfinished karts are DNF, ranked by `raceDistance`. Battles end when ≤ 1 kart is alive (of a battle that started
+  with two or more karts: a lone kart battles until the time limit or `EndRaceEarly`), when no human racer is
+  alive, or after 4 min; survivors rank by health (AI: from `AiProgress`).
+- **Battles**: the victim reports its own elimination (`EliminatedSelf`; AI karts: the AI host); observers' kart
+  states carry health; a human at health 0 in a majority of observers' views for 2 s without `EliminatedSelf` gets a
+  strike and is eliminated.
 - **Collapsing bridges**: the first `BridgeTrigger` (lowest tick, then arrival) of a bridge wins and is broadcast.
 - **Disconnects**: a racer whose control connection drops leaves the race (outcome left); others remove the kart.
+  AI karts never leave.
 - **Kicks**: a cheating kick writes `cheat_kicks` (account, lobby, race, reason, reporters) and removes the racer from
   the race (outcome kicked: cheating); they stay in the lobby and may race again next race. Moderator kicks remove
   from race and lobby for 10 min and write the audit log.
-- **Cheat reports**: every `CheatReport` about another racer of the race is stored in `cheat_reports` (lobby, race,
-  reporter, suspect, reason, detail, time, whether it counted and why not), at most 100 per reporter and race, so
-  moderators can review races where no kick was possible (`mhk-server admin cheat-reports [--account U]
+- **Cheat reports**: every `CheatReport` about another human racer of the race is stored in `cheat_reports` (lobby,
+  race, reporter, suspect, reason, detail, time, whether it counted and why not), at most 100 per reporter and race,
+  so moderators can review races where no kick was possible (`mhk-server admin cheat-reports [--account U]
   [--limit N]`). A report counts in a running anticheat race from an eligible reporter about a racer still in it;
-  the suspect's RTT must be ≤ 200 ms except for Speed and Acceleration reports.
-- **Solo races** (`solo`): nothing is arbitrated; the client sends `Finished` with its `position` among the AI, the
-  server records that placement (AI rows are not reported) and ends the race when it arrives (or on `EndRaceEarly`:
-  DNF).
+  the suspect's RTT must be ≤ 200 ms except for Speed and Acceleration reports. Reports about AI slots are dropped.
+- **Races with one human** are arbitrated like any other (the human is the AI host); see "Alone in a lobby without
+  AI" for solo races and `EndRaceEarly`.

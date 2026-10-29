@@ -7,7 +7,7 @@ const (
 	// Magic opens every Hello: the bytes "MHKO" read as a little-endian u32.
 	Magic uint32 = 0x4F4B484D
 	// Version is the protocol revision; bump it only for incompatible changes.
-	Version uint16 = 1
+	Version uint16 = 2
 	// DefaultPort serves both the TCP control connection and (phase 3) UDP realtime.
 	DefaultPort = 7350
 )
@@ -44,6 +44,7 @@ const (
 	TypeDeleteAccount     Type = 26
 	TypeSyncAchievements  Type = 27
 	TypeAchievementShares Type = 28
+	TypeChangeUsername    Type = 29
 
 	TypeModHideRun        Type = 64
 	TypeModUnhideRun      Type = 65
@@ -66,7 +67,8 @@ const (
 
 // Push types.
 const (
-	PushDisconnect Type = 1
+	PushDisconnect     Type = 1
+	PushAccountUpdated Type = 16
 )
 
 // Range is an inclusive block of message types reserved for one area.

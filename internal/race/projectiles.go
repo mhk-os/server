@@ -14,9 +14,15 @@ import (
 type projectile struct {
 	pending     map[uint8]pendingReport // latest report per reporter of the current window
 	windowStart time.Time               // arrival of the window's first report
+	lastAt      time.Time               // the use, or the latest report
 	reporters   map[uint8]bool          // everyone who ever reported it
 	gone        map[uint8]bool          // ProjectileGone senders
 	struck      map[uint8]bool          // reporters already struck as outliers for this projectile
+}
+
+func newProjectile(now time.Time) *projectile {
+	return &projectile{pending: map[uint8]pendingReport{}, lastAt: now, reporters: map[uint8]bool{},
+		gone: map[uint8]bool{}, struck: map[uint8]bool{}}
 }
 
 // addReport files a report into the current window; a window lasts one report period (0.5 s) so it holds one
@@ -27,6 +33,7 @@ func (p *projectile) addReport(slot uint8, r pendingReport, now time.Time) {
 	}
 	p.pending[slot] = r
 	p.reporters[slot] = true
+	p.lastAt = now
 }
 
 type pendingReport struct {
@@ -34,6 +41,8 @@ type pendingReport struct {
 	eligible bool // reporter eligible when it reported
 }
 
+// onProjectileGone ends tracking when the owner (the AI host for an AI kart's use) or a majority of reporters
+// say the projectile is gone.
 func (rs *raceState) onProjectileGone(s *seat, m *proto.ProjectileGone, now time.Time) {
 	if !rs.arbitrated() {
 		return
@@ -44,18 +53,33 @@ func (rs *raceState) onProjectileGone(s *seat, m *proto.ProjectileGone, now time
 	}
 	p := u.proj
 	p.gone[s.slot] = true
-	ended := s.slot == u.owner || 2*len(p.gone) > len(p.reporters)
-	rs.debug("projectile gone", s, "use", m.UseID, "gone", len(p.gone), "reporters", len(p.reporters), "ended", ended)
+	owner := s.slot == u.owner || (rs.seats[u.owner].ai && s == rs.aiHost)
+	ended := owner || 2*len(p.gone) > len(p.reporters)
+	rs.debug("projectile gone", s, "use", m.UseID, "gone", len(p.gone), "reporters", len(p.reporters), "owner", owner,
+		"ended", ended)
 	if ended {
-		u.proj = nil
+		rs.untrack(m.UseID, u)
 	}
 }
 
-// tickProjectiles judges each live projectile's report window once it is 0.5 s old.
+func (rs *raceState) untrack(useID uint32, u *use) {
+	u.proj = nil
+	delete(rs.live, useID)
+}
+
+// tickProjectiles judges each live projectile's report window once it is 0.5 s old. Projectiles nobody reported
+// for projectileSilence are gone without anyone saying so (their reporters left, or missed the end).
 func (rs *raceState) tickProjectiles(now time.Time) {
-	for useID, u := range rs.uses {
+	for useID, u := range rs.live {
 		p := u.proj
-		if p == nil || len(p.pending) == 0 || now.Sub(p.windowStart) < projectileEvery {
+		if len(p.pending) == 0 {
+			if now.Sub(p.lastAt) >= projectileSilence {
+				rs.debug("projectile silent, tracking ended", nil, "use", useID)
+				rs.untrack(useID, u)
+			}
+			continue
+		}
+		if now.Sub(p.windowStart) < projectileEvery {
 			continue
 		}
 		reports := make([]pendingReport, 0, len(p.pending))
@@ -74,6 +98,11 @@ func (rs *raceState) tickProjectiles(now time.Time) {
 		if res.correct {
 			rs.pushAll(proto.PushProjectileCorrect, &proto.ProjectileCorrect{RaceID: rs.id, UseID: useID,
 				Tick: res.tick, Pos: res.pos, Vel: res.vel}, nil)
+		}
+		// An AI kart's projectile flies in every client's own copy of the race (AI karts diverge by design): its
+		// reports are corrected towards the median but a far one is never a strike.
+		if rs.seats[u.owner].ai {
+			continue
 		}
 		for _, i := range res.outliers {
 			if s := rs.seats[slots[i]]; !p.struck[s.slot] {

@@ -280,7 +280,7 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	solo := s.waitStart(t, 1)
-	if !solo.spec.Solo || solo.spec.AICount != 6 || solo.spec.TrackID != "mhk2.rome" {
+	if len(aiOf(solo.racers)) != 6 || solo.spec.SetRace != 0 || solo.spec.TrackID != "mhk2.rome" {
 		t.Fatalf("solo race %+v", solo.spec)
 	}
 	solo.cb.Finished(solo.id, []race.Placement{{AccountID: a.id, Username: a.name, Position: 2, FinishMs: 80_000}})
@@ -436,7 +436,7 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 	}
 	call := s.waitStart(t, 1)
 	if call.spec.TrackID != "mhk3.paris" || call.spec.Laps != 4 || call.spec.EngineClass != 1 || len(call.racers) != 1 ||
-		call.racers[0].AccountID != guest.id || call.spec.Solo {
+		call.racers[0].AccountID != guest.id || call.spec.SetRace != 1 {
 		t.Fatalf("private race %+v %+v", call.spec, call.racers)
 	}
 	call.cb.Finished(call.id, []race.Placement{{AccountID: guest.id, Username: guest.name, Position: 1, FinishMs: 5}})

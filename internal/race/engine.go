@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -127,22 +128,29 @@ func (e *Engine) Close() {
 // ErrInvalidRace is returned by Start for racer lists the protocol cannot express.
 var ErrInvalidRace = errors.New("race: invalid racers")
 
-// Start creates a race, pushes RaceSetup to every racer and runs it.
+// Start creates a race, pushes RaceSetup to every human racer and runs it. AI racers get seats without account,
+// token or key; the lowest human slot reports for them (RaceSetup.aiHost).
 func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) {
-	if len(racers) == 0 || len(racers) > proto.MaxRacers || (spec.Solo && len(racers) != 1) {
-		return 0, fmt.Errorf("%w: %d racers (solo %v)", ErrInvalidRace, len(racers), spec.Solo)
+	if len(racers) == 0 || len(racers) > proto.MaxRacers {
+		return 0, fmt.Errorf("%w: %d karts", ErrInvalidRace, len(racers))
 	}
-	ids := make([]uint64, len(racers))
-	for i, r := range racers {
-		for _, id := range ids[:i] {
-			if id == r.AccountID {
-				return 0, fmt.Errorf("%w: account %d twice", ErrInvalidRace, id)
-			}
+	var ids []uint64 // humans
+	for _, r := range racers {
+		switch {
+		case r.AI && r.AccountID != 0:
+			return 0, fmt.Errorf("%w: AI racer with account %d", ErrInvalidRace, r.AccountID)
+		case r.AI:
+			continue
+		case r.AccountID == 0 || slices.Contains(ids, r.AccountID):
+			return 0, fmt.Errorf("%w: account %d missing or twice", ErrInvalidRace, r.AccountID)
 		}
-		ids[i] = r.AccountID
+		ids = append(ids, r.AccountID)
+	}
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("%w: no human racer", ErrInvalidRace)
 	}
 	kicked := map[uint64]bool{}
-	if e.cfg.Kicks != nil && spec.Anticheat && !spec.Solo {
+	if e.cfg.Kicks != nil && spec.Anticheat {
 		ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
 		k, err := e.cfg.Kicks.CheatKicked(ctx, ids)
 		cancel()
@@ -158,6 +166,10 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 		states: make(chan stateIn, stateQueue), done: make(chan struct{})}
 	seats := make([]*seat, len(racers))
 	for i, r := range racers {
+		if r.AI {
+			seats[i] = &seat{slot: uint8(i), ai: true, racer: r}
+			continue
+		}
 		key := make([]byte, proto.UDPKeySize)
 		rand.Read(key)
 		seats[i] = &seat{slot: uint8(i), racer: r, key: key, everKicked: kicked[r.AccountID],
@@ -168,6 +180,9 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 
 	e.mu.Lock()
 	for _, s := range seats {
+		if s.ai {
+			continue
+		}
 		for s.token == 0 || e.tokens[s.token].seat != nil {
 			var b [8]byte
 			rand.Read(b[:])
@@ -182,24 +197,28 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 	grid := make([]proto.RaceSlot, len(racers))
 	for i, r := range racers {
 		grid[i] = proto.RaceSlot{Slot: uint8(i), AccountID: r.AccountID, Username: r.Username, Country: r.Country,
-			CharacterID: r.CharacterID, KartID: r.KartID, Platform: r.Platform}
+			CharacterID: r.CharacterID, KartID: r.KartID, Platform: r.Platform, AI: r.AI}
 	}
 	raceSeed := binary.LittleEndian.Uint64(seed[:8]) ^ binary.LittleEndian.Uint64(seed[8:16])
+	aiHost := run.rs.aiHostSlot()
 	for _, s := range seats {
+		if s.ai {
+			continue
+		}
 		e.cfg.Hub.Push(s.racer.AccountID, proto.PushRaceSetup, &proto.RaceSetup{
 			RaceID: id, LobbyID: spec.LobbyID, TrackID: spec.TrackID, Mode: spec.Mode, EngineClass: spec.EngineClass,
-			Laps: spec.Laps, Items: spec.Items, ItemOdds: spec.ItemOdds, Anticheat: spec.Anticheat, Solo: spec.Solo,
-			AICount: spec.AICount, Seed: raceSeed, Grid: grid, YourSlot: s.slot, UDPPort: e.udpPort,
+			Laps: spec.Laps, Items: spec.Items, ItemOdds: spec.ItemOdds, Anticheat: spec.Anticheat, AIHost: aiHost,
+			Seed: raceSeed, Grid: grid, YourSlot: s.slot, UDPPort: e.udpPort,
 			UDPToken: s.token, UDPKey: s.key, SetRace: spec.SetRace, SetSize: spec.SetSize,
 		})
 		e.log.Debug("race setup", "race", id, "slot", s.slot, "account", s.racer.AccountID, "user", s.racer.Username,
 			"character", s.racer.CharacterID, "kart", s.racer.KartID, "track", spec.TrackID, "mode", spec.Mode,
-			"laps", spec.Laps, "items", spec.Items, "anticheat", spec.Anticheat, "solo", spec.Solo,
+			"laps", spec.Laps, "items", spec.Items, "anticheat", spec.Anticheat, "aiHost", aiHost,
 			"everKicked", s.everKicked, "udpPort", e.udpPort)
 	}
 	e.wg.Go(run.loop)
-	e.log.Info("race started", "race", id, "lobby", spec.LobbyID, "track", spec.TrackID, "racers", len(racers),
-		"solo", spec.Solo)
+	e.log.Info("race started", "race", id, "lobby", spec.LobbyID, "track", spec.TrackID, "karts", len(racers),
+		"humans", len(ids), "ai", len(racers)-len(ids), "aiHost", aiHost, "setRace", spec.SetRace)
 	return id, nil
 }
 
@@ -336,14 +355,15 @@ func (e *Engine) readUDP() {
 			pong = binary.LittleEndian.AppendUint64(pong, uint64(now.UnixMilli()))
 			pong = s.pongMac.Seal(pong)
 			e.cfg.UDP.WriteToUDPAddrPort(pong, addr)
-		case proto.UDPState:
+		case proto.UDPState, proto.UDPAiProgress:
 			if !s.replay.accept(h.Seq, true) {
 				continue
 			}
 			e.learnAddr(ref, addr)
 			select {
-			case ref.run.states <- stateIn{seat: s, payload: bytes.Clone(payload), at: now}:
-			default: // the race is behind; a newer state follows within 33 ms
+			case ref.run.states <- stateIn{seat: s, payload: bytes.Clone(payload), at: now,
+				ai: h.Type == proto.UDPAiProgress}:
+			default: // the race is behind; a newer datagram follows within 33 ms (AiProgress: 100 ms)
 			}
 		}
 	}
@@ -373,6 +393,7 @@ type stateIn struct {
 	seat    *seat
 	payload []byte
 	at      time.Time
+	ai      bool // AiProgress, else State
 }
 
 func (r *runner) call(f func(time.Time)) {
@@ -399,7 +420,11 @@ func (r *runner) loop() {
 		case f := <-r.calls:
 			f(time.Now())
 		case in := <-r.states:
-			r.rs.onState(in.seat, in.payload, in.at)
+			if in.ai {
+				r.rs.onAiProgress(in.seat, in.payload, in.at)
+			} else {
+				r.rs.onState(in.seat, in.payload, in.at)
+			}
 		case <-t.C:
 			r.rs.tick(time.Now())
 		case <-r.e.stop:

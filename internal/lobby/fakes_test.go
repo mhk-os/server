@@ -154,6 +154,7 @@ type fakeCatalog struct {
 	ann     map[uint64]content.Announcement
 	items   map[string][]proto.ManifestItem // by lowercase pack
 	differs map[uint64]string               // account → pack whose copy differs
+	hidden  map[uint64]map[string]bool      // account → item ids its catalog does not list
 }
 
 func newFakeCatalog() *fakeCatalog {
@@ -167,14 +168,17 @@ func newFakeCatalog() *fakeCatalog {
 	return &fakeCatalog{
 		ann: map[uint64]content.Announcement{},
 		items: map[string][]proto.ManifestItem{
-			"game": slices.Concat(it(proto.ContentCharacter, "game.huhn"), it(proto.ContentKart, "game.kart")),
+			"game": slices.Concat(it(proto.ContentCharacter, "game.huhn", "game.hank", "game.ida"),
+				it(proto.ContentKart, "game.kart")),
 			"mhk2": slices.Concat(it(proto.ContentTrack, "mhk2.rome", "mhk2.alps"), it(proto.ContentArena, "mhk2.arena"),
-				it(proto.ContentKart, "mhk2.speedy"), it(proto.ContentPowerup, "mhk2.rocket"),
+				it(proto.ContentCharacter, "mhk2.lola"), it(proto.ContentKart, "mhk2.speedy"),
+				it(proto.ContentPowerup, "mhk2.rocket"),
 				it(proto.ContentCup, "mhk2.cup")),
 			"mhk3":   it(proto.ContentTrack, "mhk3.paris"),
 			"tincan": it(proto.ContentKart, "tincan.can"),
 		},
 		differs: map[uint64]string{},
+		hidden:  map[uint64]map[string]bool{},
 	}
 }
 
@@ -219,7 +223,7 @@ func (c *fakeCatalog) Items(id uint64, pack string, kind uint8) []string {
 	}
 	var out []string
 	for _, it := range c.items[strings.ToLower(pack)] {
-		if it.Kind == kind {
+		if it.Kind == kind && !c.hidden[id][it.ID] {
 			out = append(out, it.ID)
 		}
 	}

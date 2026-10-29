@@ -23,6 +23,7 @@ const (
 	msgBadCountry         = "Unknown country code."
 	msgWrongPassword      = "Wrong password."
 	msgAccountDeleted     = "This account was deleted."
+	msgRenameLimited      = "You have changed your username too often. Please try again later."
 )
 
 // auditAccountDeleted is the audit log reason of DeleteAccount; the store appends what happened to the runs.
@@ -93,6 +94,7 @@ func (s *Server) registerAccounts() {
 	s.Handle(proto.TypeLogout, true, s.handleLogout)
 	s.Handle(proto.TypeSetCountry, true, s.handleSetCountry)
 	s.Handle(proto.TypeDeleteAccount, true, s.handleDeleteAccount)
+	s.Handle(proto.TypeChangeUsername, true, s.handleChangeUsername)
 }
 
 // loggedIn binds c to the session and records the account's activity.
@@ -182,6 +184,42 @@ func (s *Server) handleSetCountry(ctx context.Context, c *Conn, r *wire.Reader) 
 	}
 	c.updateAccount(acct)
 	a := acct.Proto()
+	return &a, nil
+}
+
+// handleChangeUsername renames the logged-in account. Its other connections get push AccountUpdated, every
+// connection's cached account takes the new name and the OnAccountRenamed hooks update lobbies.
+func (s *Server) handleChangeUsername(ctx context.Context, c *Conn, r *wire.Reader) (proto.Message, error) {
+	var req proto.ChangeUsername
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	prev := c.Account()
+	if prev == nil {
+		return nil, Errorf(proto.StatusNotLoggedIn, "Please log in first.")
+	}
+	acct, err := s.deps.Auth.ChangeUsername(ctx, prev.ID, req.Username)
+	if errors.Is(err, auth.ErrRenameLimited) {
+		return nil, Errorf(proto.StatusRateLimited, msgRenameLimited)
+	}
+	if err != nil {
+		return nil, authError(err)
+	}
+	a := acct.Proto()
+	c.updateAccount(acct)
+	if acct.Username == prev.Username {
+		return &a, nil
+	}
+	for _, other := range s.hub.AccountConns(acct.ID) {
+		if other != c {
+			other.updateAccount(acct)
+			other.Push(proto.PushAccountUpdated, &a)
+		}
+	}
+	for _, fn := range s.renameHooks {
+		fn(acct.ID, acct.Username)
+	}
+	c.log.Info("username changed", "account", acct.ID, "from", prev.Username, "to", acct.Username)
 	return &a, nil
 }
 

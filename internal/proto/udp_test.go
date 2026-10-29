@@ -131,7 +131,7 @@ func TestStateAndWorldRoundTrip(t *testing.T) {
 func TestRaceMessagesRoundTrip(t *testing.T) {
 	msgs := []struct{ in, out Message }{
 		{&RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "mhk2.egypt", Mode: 1, EngineClass: 2, Laps: 3, Items: true,
-			ItemOdds: []ItemOdds{{"mhk2.rocket", 50}}, Anticheat: true, AICount: 0, Seed: 99,
+			ItemOdds: []ItemOdds{{"mhk2.rocket", 50}}, Anticheat: true, AIHost: NoSlot, Seed: 99,
 			Grid: []RaceSlot{{Slot: 0, AccountID: 5, Username: "a", Country: "DE", CharacterID: "c", KartID: "k",
 				Platform: PlatformLinux}},
 			YourSlot: 0, UDPPort: 7350, UDPToken: 42, UDPKey: bytes.Repeat([]byte{1}, 32), SetRace: 1, SetSize: 4},
@@ -142,10 +142,10 @@ func TestRaceMessagesRoundTrip(t *testing.T) {
 			Pool:     []PoolEntry{{PowerupID: "p", Charges: 1, BattleCharges: 3, Weights: [11]float32{1, 2}}},
 			Specials: []Special{{Slot: 0, PowerupID: "s"}}, Rules: ItemRules{ReplacesHeld: true, RouletteMs: 900},
 			Effects: []string{"e1", "e2"}}, &RaceLoaded{}},
-		{&Finished{RaceID: 1, FinishMs: 61000, LapMs: []int32{20000, 21000, 20000}, Tick: 3660, Position: 2},
+		{&Finished{RaceID: 1, FinishMs: 61000, LapMs: []int32{20000, 21000, 20000}, Tick: 3660, Slot: OwnSlot},
 			&Finished{}},
 		{&ItemUse{RaceID: 1, UseID: 1<<24 | 3, Tick: 9, Pos: Vec3{1, 1, 1}, Rot: Quat{0, 0, 0, 1}, Backwards: true,
-			TargetSlot: NoSlot}, &ItemUse{}},
+			TargetSlot: NoSlot, Slot: OwnSlot}, &ItemUse{}},
 		{&HitSeen{RaceID: 1, VictimSlot: 2, AttackerSlot: 1, UseID: 7, EffectID: "x", Tick: 4}, &HitSeen{}},
 		{&CheatReport{RaceID: 1, SuspectSlot: 3, Reason: FlagReason(1), Tick: 2, Detail: "speed"}, &CheatReport{}},
 		{&PlayerLeftRace{RaceID: 1, Slot: 2, Outcome: 3, Message: "bye"}, &PlayerLeftRace{}},
@@ -158,5 +158,57 @@ func TestRaceMessagesRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(m.in, m.out) {
 			t.Fatalf("%T: %+v, want %+v", m.in, m.out, m.in)
 		}
+	}
+}
+
+// TestRaceMessageBytes pins the v2 layouts of the race messages (the C# codec tests assert the same hex).
+func TestRaceMessageBytes(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, UDPKeySize)
+	setup := RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "t", Mode: 0, EngineClass: 2, Laps: 3, Items: true,
+		ItemOdds: []ItemOdds{}, Anticheat: true, AIHost: 1, Seed: 5,
+		Grid: []RaceSlot{{Slot: 0, CharacterID: "c", KartID: "k", AI: true},
+			{Slot: 1, AccountID: 9, Username: "u", Country: "DE", CharacterID: "c", KartID: "k", Platform: 2}},
+		YourSlot: 1, UDPPort: 7350, UDPToken: 0x42, UDPKey: key, SetRace: 1, SetSize: 4}
+	pinHex(t, &setup, strings.Join([]string{
+		"0100000000000000", "0200000000000000", "0174", // raceId, lobbyId, trackId
+		"00", "02", "03", "01", "00", "01", // mode, engineClass, laps, items, itemOdds, anticheat
+		"01", "0500000000000000", "02", // aiHost, seed, grid count
+		"00" + "0000000000000000" + "00" + "00" + "0163" + "016b" + "00" + "01",       // AI slot 0
+		"01" + "0900000000000000" + "0175" + "024445" + "0163" + "016b" + "02" + "00", // human slot 1
+		"01", "b61c", "4200000000000000", "20" + strings.Repeat("07", 32), // yourSlot, udpPort, udpToken, udpKey
+		"01", "04", // setRace, setSize
+	}, ""))
+	for _, c := range []struct {
+		m   Message
+		hex string
+	}{
+		{&ItemGranted{RaceID: 1, BoxID: 2, PowerupID: "p", Charges: 3, Tick: 4, Slot: 5},
+			"0100000000000000" + "0200" + "0170" + "03" + "04000000" + "05"},
+		{&ItemDenied{RaceID: 1, BoxID: 2, Reason: 3, Slot: 4}, "0100000000000000" + "0200" + "03" + "04"},
+		{&AiHost{RaceID: 1, Slot: 7}, "0100000000000000" + "07"},
+		{&ItemPickup{RaceID: 1, BoxID: 2, Tick: 3, Pos: Vec3{1, 0, 0}, Slot: OwnSlot},
+			"0100000000000000" + "0200" + "03000000" + "0000803f" + "00000000" + "00000000" + "ff"},
+		{&ItemUse{RaceID: 1, UseID: 1<<24 | 2, Tick: 3, Rot: Quat{0, 0, 0, 1}, Backwards: true, TargetSlot: NoSlot,
+			Slot: 0}, "0100000000000000" + "02000001" + "03000000" + strings.Repeat("00", 12) +
+			strings.Repeat("00", 12) + "0000803f" + "01" + "ff" + "00"},
+		{&HitTaken{RaceID: 1, AttackerSlot: 2, UseID: 3<<24 | 1, EffectID: "e", Tick: 4, Slot: 0},
+			"0100000000000000" + "02" + "01000003" + "0165" + "04000000" + "00"},
+		{&Finished{RaceID: 1, FinishMs: 60000, LapMs: []int32{20000}, Tick: 3600, Slot: 1},
+			"0100000000000000" + "60ea0000" + "01" + "204e0000" + "100e0000" + "01"},
+		{&EliminatedSelf{RaceID: 1, AttackerSlot: NoSlot, Tick: 9, Slot: 2},
+			"0100000000000000" + "ff" + "09000000" + "02"},
+		{&UDPAiProgressPayload{Entries: []AiProgressEntry{{Slot: 0, Lap: 2, RaceDistance: 1234.5, Health: 100},
+			{Slot: 3, Lap: 1, RaceDistance: 0.5, Health: 0}}},
+			"02" + "00" + "02" + "00509a44" + "64" + "03" + "01" + "0000003f" + "00"},
+	} {
+		pinHex(t, c.m, c.hex)
+	}
+	var p UDPAiProgressPayload
+	if err := p.Decode(wire.NewReader([]byte{2, 0, 2, 0, 0, 0, 0, 1})); err == nil {
+		t.Fatal("truncated AiProgress accepted")
+	}
+	nan := []byte{1, 0, 1, 0, 0, 0xc0, 0x7f, 0}
+	if err := p.Decode(wire.NewReader(nan)); err == nil {
+		t.Fatal("NaN raceDistance accepted")
 	}
 }

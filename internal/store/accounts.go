@@ -83,6 +83,60 @@ func (s *Store) SetCountryUser(ctx context.Context, id uint64, country *string) 
 	return s.execOne(ctx, "UPDATE accounts SET country_user = ? WHERE id = ?", toNull(country), id)
 }
 
+// RenameLimit caps username changes: at most Max ActionRenameAccount entries of the account in the audit log since
+// Since. Max <= 0 never limits.
+type RenameLimit struct {
+	Max   int
+	Since time.Time
+}
+
+// RenameAccount changes the account's username (unique case-insensitively, so a case-only change of its own name
+// passes) and writes act to the audit log in the same transaction, with TargetRef set to the new name and " from
+// <old> to <new>" appended to its Reason. The same name is no change and returns the account untouched. Errors:
+// ErrNotFound, ErrUsernameTaken, ErrRenameLimited.
+func (s *Store) RenameAccount(ctx context.Context, id uint64, username string, limit RenameLimit,
+	act Action) (*Account, error) {
+	var acct *Account
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		// Locking the row serializes concurrent changes, so the limit count below holds.
+		a, err := scanAccount(tx.QueryRowContext(ctx, "SELECT "+accountColumns+" FROM accounts WHERE id = ? FOR UPDATE",
+			id))
+		if err != nil {
+			return err
+		}
+		acct = a
+		if a.Username == username {
+			return nil
+		}
+		if limit.Max > 0 {
+			var n int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM moderation_actions WHERE target_account_id = ?
+				AND action = ? AND created_at > ?`, id, ActionRenameAccount, limit.Since).Scan(&n); err != nil {
+				return err
+			}
+			if n >= limit.Max {
+				return ErrRenameLimited
+			}
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE accounts SET username = ?, username_lower = ? WHERE id = ?", username,
+			strings.ToLower(username), id)
+		if isDuplicate(err) {
+			return ErrUsernameTaken
+		}
+		if err != nil {
+			return err
+		}
+		act.TargetAccount, act.TargetRef = &id, username
+		act.Reason += fmt.Sprintf(" from %s to %s", a.Username, username)
+		a.Username = username
+		return recordAction(ctx, tx, act)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return acct, nil
+}
+
 func (s *Store) TouchLogin(ctx context.Context, id uint64, at time.Time) error {
 	return s.execOne(ctx, "UPDATE accounts SET last_login_at = ? WHERE id = ?", at, id)
 }

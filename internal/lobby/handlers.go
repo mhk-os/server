@@ -32,6 +32,7 @@ func (m *Manager) Register(srv *server.Server) {
 	h(proto.TypeEndRaceEarly, m.handleEndRaceEarly)
 	h(proto.TypeKickMember, m.handleKick)
 	srv.OnAccountGone(m.Leave)
+	srv.OnAccountRenamed(m.Rename)
 }
 
 // player identifies the caller; lobby requests need a completed ContentHello on this connection.

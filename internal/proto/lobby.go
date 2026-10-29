@@ -45,9 +45,11 @@ const (
 	MaxLobbyName      = 64
 	MaxRoomPacks      = 32
 	MaxLobbies        = 500
-	MaxLobbyMembers   = 10
+	MaxLobbyMembers   = 50
 	MaxRoomCode       = 8
-	MaxRaceRows       = 16
+	MaxRaceRows       = 50
+	MaxAIDrivers      = 49 // LobbyState.aiDrivers: every kart but one human
+	MaxCustomTracks   = 35 // RoomSettings.trackIds of a custom-list championship
 	MaxKickReason     = 256
 	MaxLobbyMessage   = 256
 
@@ -55,10 +57,11 @@ const (
 	strikeMinSize        = 1 + 1
 	manifestItemMinSize  = 1 + 1 + 1
 	packManifestMinSize  = 1 + 1 + 4 + 1 + 1
-	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 1
+	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 1 + 1
 	lobbyMemberMinSize   = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 4 + 8 + 1
 	lobbyVoteMinSize     = 8 + 1
-	raceResultRowMinSize = 1 + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1
+	raceResultRowMinSize = 1 + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 1
+	aiDriverMinSize      = 1 + 1 + 4
 )
 
 // Manifest item kinds.
@@ -283,11 +286,12 @@ type RoomSettings struct {
 	Laps        uint8
 	Items       bool
 	ItemOdds    []ItemOdds
-	AIWhenAlone bool
+	MaxAI       uint8 // most AI karts in a race, 0 = no AI, at most MaxPlayers − 1
 	MaxPlayers  uint8
 	TrackPick   uint8
 	RacesPerSet uint8
 	CupID       string
+	TrackIDs    []string // championship without a cup: the custom track list in race order
 }
 
 func (m *RoomSettings) Encode(w *wire.Writer) {
@@ -299,11 +303,12 @@ func (m *RoomSettings) Encode(w *wire.Writer) {
 	w.U8(m.Laps)
 	w.Bool(m.Items)
 	EncodeItemOdds(w, m.ItemOdds)
-	w.Bool(m.AIWhenAlone)
+	w.U8(m.MaxAI)
 	w.U8(m.MaxPlayers)
 	w.U8(m.TrackPick)
 	w.U8(m.RacesPerSet)
 	w.String(m.CupID)
+	encodeStrings(w, m.TrackIDs)
 }
 
 func (m *RoomSettings) Decode(r *wire.Reader) error {
@@ -315,11 +320,12 @@ func (m *RoomSettings) Decode(r *wire.Reader) error {
 	m.Laps = r.U8()
 	m.Items = r.Bool()
 	m.ItemOdds = DecodeItemOdds(r)
-	m.AIWhenAlone = r.Bool()
+	m.MaxAI = r.U8()
 	m.MaxPlayers = r.U8()
 	m.TrackPick = r.U8()
 	m.RacesPerSet = r.U8()
 	m.CupID = r.String(MaxContentID)
+	m.TrackIDs = decodeStrings(r, MaxCustomTracks, MaxTrackID)
 	return r.Err()
 }
 
@@ -340,6 +346,7 @@ type LobbySummary struct {
 	EngineClass    uint8
 	SetRace        uint8 // as LobbyState.SetRace
 	SetSize        uint8
+	MaxAI          uint8 // as RoomSettings.MaxAI
 }
 
 func (m *LobbySummary) Encode(w *wire.Writer) {
@@ -358,6 +365,7 @@ func (m *LobbySummary) Encode(w *wire.Writer) {
 	w.U8(m.EngineClass)
 	w.U8(m.SetRace)
 	w.U8(m.SetSize)
+	w.U8(m.MaxAI)
 }
 
 func (m *LobbySummary) Decode(r *wire.Reader) error {
@@ -376,6 +384,7 @@ func (m *LobbySummary) Decode(r *wire.Reader) error {
 	m.EngineClass = r.U8()
 	m.SetRace = r.U8()
 	m.SetSize = r.U8()
+	m.MaxAI = r.U8()
 	return r.Err()
 }
 
@@ -455,17 +464,18 @@ type LobbyVote struct {
 	TrackID   string
 }
 
-// RaceResultRow is one racer's result with the points the lobby gave.
+// RaceResultRow is one racer's result with the points the lobby gave. AI rows have AccountID 0 and Username "".
 type RaceResultRow struct {
-	Slot      uint8
-	AccountID uint64
-	Username  string
-	Position  uint8
-	FinishMs  int32
-	Points    int32
-	SetPoints int32
-	Outcome   uint8
-	AI        bool
+	Slot        uint8
+	AccountID   uint64
+	Username    string
+	Position    uint8
+	FinishMs    int32
+	Points      int32
+	SetPoints   int32
+	Outcome     uint8
+	AI          bool
+	CharacterID string
 }
 
 func (m *RaceResultRow) Encode(w *wire.Writer) {
@@ -478,6 +488,7 @@ func (m *RaceResultRow) Encode(w *wire.Writer) {
 	w.I32(m.SetPoints)
 	w.U8(m.Outcome)
 	w.Bool(m.AI)
+	w.String(m.CharacterID)
 }
 
 func (m *RaceResultRow) Decode(r *wire.Reader) error {
@@ -490,6 +501,7 @@ func (m *RaceResultRow) Decode(r *wire.Reader) error {
 	m.SetPoints = r.I32()
 	m.Outcome = r.U8()
 	m.AI = r.Bool()
+	m.CharacterID = r.String(MaxContentID)
 	return r.Err()
 }
 
@@ -508,6 +520,13 @@ func decodeRows(r *wire.Reader, max int) []RaceResultRow {
 	return rows
 }
 
+// AIDriver is one AI driver of the lobby's current set (LobbyState.aiDrivers, in grid order).
+type AIDriver struct {
+	CharacterID string
+	KartID      string
+	SetPoints   int32
+}
+
 // LobbyState is push 256 and the answer of JoinLobby, QuickJoin and CreateRoom.
 type LobbyState struct {
 	Summary     LobbySummary
@@ -521,6 +540,7 @@ type LobbyState struct {
 	TrackID     string
 	RaceID      uint64
 	LastResults []RaceResultRow
+	AIDrivers   []AIDriver
 }
 
 func (m *LobbyState) Encode(w *wire.Writer) {
@@ -542,6 +562,12 @@ func (m *LobbyState) Encode(w *wire.Writer) {
 	w.String(m.TrackID)
 	w.U64(m.RaceID)
 	encodeRows(w, m.LastResults)
+	w.Count(len(m.AIDrivers))
+	for _, d := range m.AIDrivers {
+		w.String(d.CharacterID)
+		w.String(d.KartID)
+		w.I32(d.SetPoints)
+	}
 }
 
 func (m *LobbyState) Decode(r *wire.Reader) error {
@@ -562,7 +588,13 @@ func (m *LobbyState) Decode(r *wire.Reader) error {
 	}
 	m.TrackID = r.String(MaxTrackID)
 	m.RaceID = r.U64()
-	m.LastResults = decodeRows(r, MaxLobbyMembers)
+	m.LastResults = decodeRows(r, MaxRaceRows)
+	m.AIDrivers = make([]AIDriver, r.Count(MaxAIDrivers, aiDriverMinSize))
+	for i := range m.AIDrivers {
+		m.AIDrivers[i].CharacterID = r.String(MaxContentID)
+		m.AIDrivers[i].KartID = r.String(MaxContentID)
+		m.AIDrivers[i].SetPoints = r.I32()
+	}
 	return r.Err()
 }
 
@@ -658,7 +690,7 @@ func (m *LobbyLeft) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// SoloRaceJoinWaiting is push 258 to the racer of a solo AI race: Username joined and waits.
+// SoloRaceJoinWaiting is push 258 to the only human of a race: Username joined the lobby and waits.
 type SoloRaceJoinWaiting struct {
 	Username string
 }

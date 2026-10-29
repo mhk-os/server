@@ -21,6 +21,7 @@ func messages() []Message {
 		&Credentials{Username: "Hans_Huhn", Password: "pässwörd!"},
 		&Resume{Token: "tok"},
 		&SetCountry{Country: "DE"},
+		&ChangeUsername{Username: "Hans.Huhn"},
 		&Account{ID: 7, Username: "Hans", Country: "SK", CountryFromIP: true, Role: RoleModerator, Created: when},
 		&Session{Token: "t", Expires: when, Account: Account{ID: 1, Username: "abc", Created: when}},
 		&Disconnect{Status: StatusAccountDisabled, Message: "cheating"},
@@ -54,10 +55,10 @@ func TestRoundTrips(t *testing.T) {
 
 // TestHelloBytes pins the exact encoding so the C# codec can assert the same bytes.
 func TestHelloBytes(t *testing.T) {
-	h := &Hello{Magic: Magic, Protocol: 1, GameCommit: "ab", GameBuild: 2, ContentVersion: 3, ModAPI: 4, Platform: "W"}
+	h := &Hello{Magic: Magic, Protocol: 2, GameCommit: "ab", GameBuild: 2, ContentVersion: 3, ModAPI: 4, Platform: "W"}
 	want := []byte{
 		'M', 'H', 'K', 'O', // magic
-		0x01, 0x00, // protocol
+		0x02, 0x00, // protocol
 		0x02, 'a', 'b', // gameCommit
 		0x02, 0, 0, 0, // gameBuild
 		0x03, 0, 0, 0, // contentVersion
@@ -113,7 +114,8 @@ func TestRanges(t *testing.T) {
 			t.Errorf("%d not in connection range", typ)
 		}
 	}
-	for _, typ := range []Type{TypeRegister, TypeLogin, TypeResume, TypeLogout, TypeSetCountry} {
+	for _, typ := range []Type{TypeRegister, TypeLogin, TypeResume, TypeLogout, TypeSetCountry, TypeChangeUsername,
+		PushAccountUpdated} {
 		if !RangeAccounts.Contains(typ) {
 			t.Errorf("%d not in accounts range", typ)
 		}

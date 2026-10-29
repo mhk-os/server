@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +30,7 @@ import (
 	"github.com/mhk-os/server/internal/ghost"
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/store"
+	"github.com/mhk-os/server/internal/wire"
 )
 
 func main() {
@@ -52,7 +54,7 @@ func run(ctx context.Context, args []string) error {
 	user := fs.String("user", "", "username; with -n > 1 the bots are <user>1 … <user>N (registered when missing)")
 	pass := fs.String("pass", "", "password")
 	join := fs.String("join", "", "private room code to join")
-	quick := fs.Int("quick", 0, "public lobby category to quick-join (1-10)")
+	quick := fs.Int("quick", 0, "public lobby category to quick-join (1-20; 11-20 are the AI versions of 1-10)")
 	character := fs.String("character", "", "character id (default: the ghost's)")
 	kart := fs.String("kart", "", "kart id (default: the ghost's)")
 	ghostPath := fs.String("ghost", "", ".mhkghost file to replay in every race")
@@ -60,14 +62,19 @@ func run(ctx context.Context, args []string) error {
 	n := fs.Int("n", 1, "number of bots")
 	platform := fs.String("platform", "mhk-bot",
 		"Hello platform, a Unity RuntimePlatform name such as Android or WindowsPlayer (shown as the player's device)")
+	handOver := fs.Duration("hand-over", 0,
+		"as the AI host of a race with AI, leave it this long after GO and rejoin the lobby (0 = never): the next human hosts")
+	loadedPath := fs.String("loaded", "",
+		"file with the hex of a RaceLoaded a game client sent on the races' track: bots agree with that content")
 	keepAlive := fs.Duration("keepalive", 15*time.Second, "TCP Ping interval (the server drops connections silent for 45 s)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *user == "" || *pass == "" || *ghostPath == "" || *manifests == "" || (*join == "") == (*quick == 0) ||
-		*n < 1 || *quick < 0 || *quick > 255 || *keepAlive <= 0 || len(*platform) > proto.MaxPlatform {
+		*n < 1 || *quick < 0 || *quick > 20 || *keepAlive <= 0 || len(*platform) > proto.MaxPlatform {
 		fs.Usage()
-		return errors.New("need -user, -pass, -ghost, -manifests and exactly one of -join or -quick (and -platform ≤ 32 bytes)")
+		return errors.New("need -user, -pass, -ghost, -manifests and exactly one of -join or -quick 1-20 " +
+			"(and -platform ≤ 32 bytes)")
 	}
 	addr, host, tlsConf, err := parseServer(*server)
 	if err != nil {
@@ -87,7 +94,12 @@ func run(ctx context.Context, args []string) error {
 	}
 	cfg := &botConfig{addr: addr, host: host, tls: tlsConf, pass: *pass, join: strings.ToUpper(*join),
 		quick: uint8(*quick), character: *character, kart: *kart, trackID: g.TrackID, replay: newReplay(g, frames),
-		manifests: mf, keepAlive: *keepAlive, platform: *platform}
+		manifests: mf, keepAlive: *keepAlive, platform: *platform, handOver: *handOver}
+	if *loadedPath != "" {
+		if cfg.loaded, err = readLoaded(*loadedPath); err != nil {
+			return err
+		}
+	}
 	if cfg.character == "" {
 		cfg.character = g.CharacterID
 	}
@@ -109,6 +121,23 @@ func run(ctx context.Context, args []string) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// readLoaded decodes a RaceLoaded body written as hex (the race id in it is replaced per race).
+func readLoaded(path string) (*proto.RaceLoaded, error) {
+	text, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(string(text)))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	var m proto.RaceLoaded
+	if err := m.Decode(wire.NewReader(b)); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &m, nil
 }
 
 // parseServer accepts tcp://host:port, tls://host:port and bare host:port (plaintext: a development tool).

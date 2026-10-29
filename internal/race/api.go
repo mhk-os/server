@@ -24,7 +24,8 @@ const (
 	ModeBattle uint8 = 1
 )
 
-// Racer is a human taking part, in grid order (slot = index in the slice given to Start).
+// Racer is one kart taking part, in grid order (slot = index in the slice given to Start): a human, or an AI
+// driver (AI true, AccountID 0, no username, country or platform) that the AI host's client reports for.
 type Racer struct {
 	AccountID   uint64
 	Username    string
@@ -32,6 +33,7 @@ type Racer struct {
 	CharacterID string
 	KartID      string
 	Platform    uint8 // proto.Platform* of the racer's connection, shown in RaceSlot
+	AI          bool
 }
 
 // Spec is what the lobby decided for one race.
@@ -45,22 +47,21 @@ type Spec struct {
 	ItemOdds    []proto.ItemOdds
 	Packs       []string // the lobby's packs; specials of other packs (except "game") are dropped from RaceLoaded
 	Anticheat   bool
-	Solo        bool  // exactly one human: AI opponents simulated by that client, nothing arbitrated
-	AICount     uint8 // AI opponents of a solo race
-	SetRace     uint8
+	SetRace     uint8 // 0 = outside the set (solo race)
 	SetSize     uint8
 }
 
-// Placement is one racer's result. Position is 1-based over every racer including AI rows of solo races (AI rows
-// have AccountID 0 and AI true); Points are assigned by the lobby.
+// Placement is one kart's result. Position is 1-based over every kart, AI included (AI rows have AccountID 0,
+// Username "" and AI true); Points are assigned by the lobby.
 type Placement struct {
-	Slot      uint8
-	AccountID uint64
-	Username  string
-	Position  uint8
-	FinishMs  int32 // 0 = did not finish
-	Outcome   Outcome
-	AI        bool
+	Slot        uint8
+	AccountID   uint64
+	Username    string
+	Position    uint8
+	FinishMs    int32 // 0 = did not finish
+	Outcome     Outcome
+	AI          bool
+	CharacterID string
 }
 
 // Callbacks tell the lobby about a race's progress. They are called from the race's own goroutine; they must not
@@ -85,11 +86,11 @@ type Catalog interface {
 // Races is what lobbies use. The implementation (Engine) also registers the race notify handlers on the server and
 // serves UDP; HelloOk announces its UDPPort.
 type Races interface {
-	// Start creates a race and pushes RaceSetup to every racer. racers are in grid order.
+	// Start creates a race and pushes RaceSetup to every human racer. racers are in grid order, AI included.
 	Start(spec Spec, racers []Racer, cb Callbacks) (raceID uint64, err error)
 	// Remove takes a racer out of a running race (disconnect, moderator kick); others get PlayerLeftRace.
 	Remove(raceID, accountID uint64, outcome Outcome, message string)
-	// EndEarly ends a race now (the solo racer chose to end its AI race); unfinished racers are DNF.
+	// EndEarly ends a race now (its only human chose to end it); unfinished karts are DNF.
 	EndEarly(raceID uint64)
 	// UDPPort is the realtime port to announce, 0 when UDP is not serving.
 	UDPPort() uint16

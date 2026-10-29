@@ -37,12 +37,24 @@ func TestListOpensOneInstancePerCategory(t *testing.T) {
 	}
 	for i, s := range list {
 		c := categories[i+1]
+		wantAI := uint8(0)
+		if c.ai {
+			wantAI = 9
+		}
 		if s.Category != uint8(i+1) || s.Instance != 1 || s.Kind != proto.LobbyPublic ||
 			s.ContentVersion != testContentVersion || s.MaxPlayers != 10 || s.Mode != c.mode ||
 			s.Anticheat != c.anticheat || !slices.Equal(s.Packs, c.packs) ||
 			s.Phase != proto.PhaseWaiting || s.Name != c.name+" #1" || s.EngineClass != 2 || s.SetRace != 0 ||
-			s.SetSize != 4 {
+			s.SetSize != 4 || s.MaxAI != wantAI || c.ai != (i+1 > aiCategories) {
 			t.Fatalf("summary %d: %+v", i, s)
+		}
+	}
+	// Categories 11–20 are the AI twins of 1–10.
+	for cat := 1; cat <= aiCategories; cat++ {
+		c, twin := categories[cat], categories[cat+aiCategories]
+		if twin.mode != c.mode || twin.anticheat != c.anticheat || !slices.Equal(twin.packs, c.packs) || c.ai ||
+			!strings.HasSuffix(twin.name, " + AI") || len(twin.name) > proto.MaxRoomName {
+			t.Fatalf("category %d twin %+v", cat, twin)
 		}
 	}
 	// Listing again does not open more; another content version gets its own instances.
@@ -114,7 +126,7 @@ func TestQuickJoinPicksFullest(t *testing.T) {
 	if s.Summary.Instance != 2 {
 		t.Fatal("QuickJoin moved a member")
 	}
-	wantStatus(t, errOnly(e.m.QuickJoin(e.player(21), 11)), proto.StatusBadRequest, "category")
+	wantStatus(t, errOnly(e.m.QuickJoin(e.player(21), 21)), proto.StatusBadRequest, "category")
 }
 
 func TestJoinErrors(t *testing.T) {
@@ -210,7 +222,7 @@ func TestPublicSet(t *testing.T) {
 		must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
 		call := e.races.last()
 		if call.spec.TrackID != "mhk2.rome" || call.spec.EngineClass != 2 || !call.spec.Items || !call.spec.Anticheat ||
-			call.spec.Solo || call.spec.SetRace != n || call.spec.SetSize != 4 || len(call.racers) != 2 ||
+			call.spec.SetRace != n || call.spec.SetSize != 4 || len(call.racers) != 2 ||
 			call.spec.Mode != race.ModeRace || call.spec.Laps != 0 {
 			t.Fatalf("race %d spec %+v racers %+v", n, call.spec, call.racers)
 		}
@@ -263,7 +275,7 @@ func TestPublicSet(t *testing.T) {
 }
 
 func TestPointsTable(t *testing.T) {
-	want := []int32{15, 12, 10, 8, 7, 6, 5, 4, 3, 2, 0}
+	want := []int32{15, 12, 10, 8, 7, 6, 5, 4, 3, 2, 1, 1, 1}
 	for i, w := range want {
 		if got := points(race.Placement{Position: uint8(i + 1)}); got != w {
 			t.Errorf("position %d: %d points", i+1, got)
@@ -275,8 +287,8 @@ func TestPointsTable(t *testing.T) {
 			t.Errorf("outcome %d scores", o)
 		}
 	}
-	if points(race.Placement{Position: 1, AI: true}) != 0 {
-		t.Error("AI scores")
+	if points(race.Placement{Position: 1, AI: true}) != 15 || points(race.Placement{Position: 50, AI: true}) != 1 {
+		t.Error("AI karts score like humans")
 	}
 }
 
@@ -421,8 +433,8 @@ func TestSoloRace(t *testing.T) {
 	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"), proto.StatusBadRequest, "not a track")
 	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps"))
 	call := e.races.last()
-	if !call.spec.Solo || call.spec.AICount != 6 || len(call.racers) != 1 || call.spec.TrackID != "mhk2.alps" ||
-		call.spec.SetRace != 0 || call.spec.SetSize != 0 {
+	if ai, humans := aiOf(call.racers), humansOf(call.racers); len(ai) != 6 || len(humans) != 1 ||
+		call.spec.TrackID != "mhk2.alps" || call.spec.SetRace != 0 || call.spec.SetSize != 0 || call.racers[6].AI {
 		t.Fatalf("solo spec %+v", call.spec)
 	}
 	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, ""), proto.StatusBadRequest, "waits")
@@ -460,7 +472,7 @@ func TestSoloRace(t *testing.T) {
 	must(t, e.m.SetLoadout(Player{AccountID: 2}, "game.huhn", "game.kart"))
 	must(t, e.m.Vote(Player{AccountID: 1}, ""))
 	must(t, e.m.Vote(Player{AccountID: 2}, ""))
-	if call := e.races.last(); call.spec.Solo || call.spec.AICount != 0 || len(call.racers) != 2 ||
+	if call := e.races.last(); len(aiOf(call.racers)) != 0 || len(call.racers) != 2 ||
 		call.spec.SetRace != 1 || call.spec.SetSize != 4 {
 		t.Fatalf("second race %+v", call.spec)
 	}
@@ -474,7 +486,8 @@ func TestSoloRaceAloneAgain(t *testing.T) {
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
 	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
 	call := e.races.last()
-	if call.spec.TrackID != "mhk2.arena" || call.spec.Mode != race.ModeBattle || !call.spec.Solo {
+	if call.spec.TrackID != "mhk2.arena" || call.spec.Mode != race.ModeBattle || call.spec.SetRace != 0 ||
+		len(aiOf(call.racers)) != 6 {
 		t.Fatalf("solo battle %+v", call.spec)
 	}
 	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}})
@@ -537,7 +550,7 @@ func TestLeaveDuringRace(t *testing.T) {
 func room() proto.RoomSettings {
 	return proto.RoomSettings{Name: "  ", Mode: proto.RoomRaceSet, Packs: []string{"mhk2"}, Anticheat: true,
 		EngineClass: 1, Items: true, ItemOdds: []proto.ItemOdds{{PowerupID: "mhk2.rocket", Percent: 100}},
-		AIWhenAlone: true, MaxPlayers: 4, TrackPick: proto.PickOwner, RacesPerSet: 2}
+		MaxAI: 3, MaxPlayers: 4, TrackPick: proto.PickOwner, RacesPerSet: 2}
 }
 
 func TestPrivateRoom(t *testing.T) {
@@ -568,7 +581,7 @@ func TestPrivateRoom(t *testing.T) {
 	must(t, e.m.SetReady(Player{AccountID: 2}, true))
 	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, "mhk2.rome"), proto.StatusForbidden, "owner")
 	upd := room()
-	upd.MaxPlayers = 2
+	upd.MaxPlayers, upd.MaxAI = 2, 1
 	wantStatus(t, e.m.UpdateRoom(owner, upd), proto.StatusBadRequest, "3 players")
 	wantStatus(t, e.m.UpdateRoom(Player{AccountID: 2}, room()), proto.StatusForbidden, "owner")
 	wantStatus(t, e.m.StartRace(owner, "mhk2.rome"), proto.StatusBadRequest, "character")
@@ -576,8 +589,9 @@ func TestPrivateRoom(t *testing.T) {
 	wantStatus(t, e.m.StartRace(owner, "mhk3.paris"), proto.StatusBadRequest, "not a track")
 	must(t, e.m.StartRace(owner, "mhk2.rome"))
 	call := e.races.last()
-	if call.spec.TrackID != "mhk2.rome" || call.spec.EngineClass != 1 || len(call.racers) != 1 ||
-		call.racers[0].AccountID != 2 || call.spec.SetSize != 2 || len(call.spec.ItemOdds) != 1 || call.spec.Solo {
+	if h := humansOf(call.racers); call.spec.TrackID != "mhk2.rome" || call.spec.EngineClass != 1 || len(h) != 1 ||
+		h[0].AccountID != 2 || len(aiOf(call.racers)) != 3 || call.spec.SetSize != 2 ||
+		len(call.spec.ItemOdds) != 1 || call.spec.SetRace != 1 {
 		t.Fatalf("private race %+v %+v", call.spec, call.racers)
 	}
 	wantStatus(t, e.m.UpdateRoom(owner, room()), proto.StatusBadRequest, "waits")
@@ -623,7 +637,8 @@ func TestRoomValidation(t *testing.T) {
 		"engine class 3":   func(s *proto.RoomSettings) { s.EngineClass = 3 },
 		"100 laps":         func(s *proto.RoomSettings) { s.Laps = 100 },
 		"1 player":         func(s *proto.RoomSettings) { s.MaxPlayers = 1 },
-		"11 players":       func(s *proto.RoomSettings) { s.MaxPlayers = 11 },
+		"51 players":       func(s *proto.RoomSettings) { s.MaxPlayers = 51 },
+		"4 AI of 4":        func(s *proto.RoomSettings) { s.MaxAI = 4 },
 		"pick 2":           func(s *proto.RoomSettings) { s.TrackPick = 2 },
 		"0 races":          func(s *proto.RoomSettings) { s.RacesPerSet = 0 },
 		"17 races":         func(s *proto.RoomSettings) { s.RacesPerSet = 17 },
@@ -631,7 +646,20 @@ func TestRoomValidation(t *testing.T) {
 		"missing pack":     func(s *proto.RoomSettings) { s.Packs = []string{"tincan"} },
 		"foreign powerup":  func(s *proto.RoomSettings) { s.ItemOdds = []proto.ItemOdds{{PowerupID: "x.y"}} },
 		"championship cup": func(s *proto.RoomSettings) { s.Mode = proto.RoomChampionship; s.CupID = "mhk3.cup" },
-		"control name":     func(s *proto.RoomSettings) { s.Name = "a\x01" },
+		"cup and tracks": func(s *proto.RoomSettings) {
+			s.Mode, s.CupID, s.TrackIDs = proto.RoomChampionship, "mhk2.cup", []string{"mhk2.rome"}
+		},
+		"no cup, no tracks": func(s *proto.RoomSettings) { s.Mode = proto.RoomChampionship },
+		"arena in the list": func(s *proto.RoomSettings) {
+			s.Mode, s.TrackIDs = proto.RoomChampionship, []string{"mhk2.rome", "mhk2.arena"}
+		},
+		"foreign track": func(s *proto.RoomSettings) {
+			s.Mode, s.TrackIDs = proto.RoomChampionship, []string{"mhk3.paris"}
+		},
+		"36 tracks": func(s *proto.RoomSettings) {
+			s.Mode, s.TrackIDs = proto.RoomChampionship, slices.Repeat([]string{"mhk2.rome"}, 36)
+		},
+		"control name": func(s *proto.RoomSettings) { s.Name = "a\x01" },
 	} {
 		s := room()
 		mutate(&s)
@@ -654,35 +682,38 @@ func TestRoomValidation(t *testing.T) {
 	must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
 	e.ok(e.m.Join(e.player(2), 0, st.Code))
 	wantStatus(t, e.m.StartRace(p, ""), proto.StatusBadRequest, "cup")
-	// Alone (even in a championship, any pick mode): a solo race, AI fills the room, the set does not advance.
+	// Alone, the owner still names the cup's track; the race belongs to the set, against the room's AI.
 	e.m.Leave(2)
-	must(t, e.m.StartRace(p, ""))
+	wantStatus(t, e.m.StartRace(p, ""), proto.StatusBadRequest, "cup")
+	must(t, e.m.StartRace(p, "mhk2.alps"))
 	call := e.races.last()
-	if !call.spec.Solo || call.spec.AICount != 3 || call.spec.SetRace != 0 || call.spec.SetSize != 0 ||
-		!slices.Contains([]string{"mhk2.rome", "mhk2.alps"}, call.spec.TrackID) {
-		t.Fatalf("private solo %+v", call.spec)
+	if len(aiOf(call.racers)) != 3 || len(humansOf(call.racers)) != 1 || call.spec.SetRace != 1 ||
+		call.spec.SetSize != 2 || call.spec.TrackID != "mhk2.alps" {
+		t.Fatalf("private race alone %+v %+v", call.spec, call.racers)
 	}
-	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}})
 	l := e.lobbyOf(1)
-	e.waitPhase(t, l, proto.PhaseWaiting)
-	if st := e.push.lastState(t, 1); st.SetRace != 0 || st.Members[0].SetPoints != 0 {
-		t.Fatalf("solo race counted: %+v", st)
+	finish(t, e, l, call, []race.Placement{{Slot: 3, AccountID: 1, Username: "p1", Position: 1},
+		{Slot: 0, Position: 2, AI: true, CharacterID: call.racers[0].CharacterID}}, proto.PhaseResults)
+	if st := e.push.lastState(t, 1); st.SetRace != 1 || st.Members[0].SetPoints != 15 || len(st.AIDrivers) != 3 ||
+		st.AIDrivers[0].SetPoints != 12 {
+		t.Fatalf("race alone not counted: %+v", st)
 	}
 	res := e.push.of(1, proto.PushRaceResults)[0].(*proto.RaceResults)
-	if res.SetDone || res.Rows[0].Points != 0 {
-		t.Fatalf("solo results %+v", res)
+	if res.SetDone || res.Rows[0].Points != 15 || res.Rows[1].Points != 12 || !res.Rows[1].AI ||
+		res.Rows[1].CharacterID == "" {
+		t.Fatalf("results alone %+v", res)
 	}
 }
 
-func TestPrivateSoloWithoutAI(t *testing.T) {
+func TestPrivateAloneWithoutAI(t *testing.T) {
 	e := newEnv(t)
 	s := room()
-	s.AIWhenAlone = false
+	s.MaxAI = 0
 	p := e.player(1)
 	e.ok(e.m.CreateRoom(p, s))
 	must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
 	must(t, e.m.StartRace(p, ""))
-	if call := e.races.last(); !call.spec.Solo || call.spec.AICount != 0 || call.spec.TrackID != "mhk2.rome" &&
+	if call := e.races.last(); len(call.racers) != 1 || call.spec.SetRace != 1 || call.spec.TrackID != "mhk2.rome" &&
 		call.spec.TrackID != "mhk2.alps" {
 		t.Fatalf("spec %+v", call.spec)
 	}
