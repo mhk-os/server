@@ -556,9 +556,11 @@ accounts. `reason` is shown to the affected player where applicable.
   (the ghost validator's core) and report; the server kicks on reports from enough distinct eligible observers and
   stores every report for moderators. Server-side checks (items held, pickup distance, projectile outliers, ignored
   hits) add strikes. Accounts that were ever kicked for cheating have their reports ignored forever. Nobody is banned
-  by this; moderators can still disable accounts. AI karts are never checked, reported or struck.
-- An anticheat-off lobby skips report processing, strikes and kicks; item and hit arbitration still run so the race
-  stays consistent.
+  by this; moderators can still disable accounts. AI karts are never struck themselves: what they do comes from the
+  AI host, so the server checks the host's `AiStates` and counts reports about AI karts against the host (see "AI
+  drivers").
+- An anticheat-off lobby skips report processing, strikes and kicks; item and hit arbitration and the AI host's
+  plausibility check still run so the race stays consistent.
 
 ### Eligibility and thresholds
 
@@ -569,11 +571,14 @@ accounts. `reason` is shown to the affected player where applicable.
 | client: report a kart after | 3 strikes within 10 s from its own checks |
 | server: kick a racer for cheating when within 15 s | distinct eligible reporters ≥ max(2, ⌈eligible observers / 2⌉) |
 | eligible observers | other human racers in the race, RTT ≤ 200 ms, never kicked for cheating |
-| server strikes (item use without holding it, pickup too far, projectile outlier, ignored forced hit) | kick at 5 within 30 s |
+| server strikes (item use without holding it, pickup too far, projectile outlier, ignored forced hit, AI host replaced for implausible `AiStates` or AI cheat reports) | kick at 5 within 30 s |
+| AI host: implausible `AiStates` | 15 rejected states within 5 s → the AI karts go to another human, the host gets a strike (once per 5 s while nobody can take over) |
+| AI host: cheat reports about AI karts | within 15 s, distinct eligible reporters other than the host ≥ max(2, ⌈eligible observers of the host / 2⌉), over all AI karts → the AI karts go to another human, the host gets a strike |
 | projectile outlier | > max(4 m, 3 × median absolute deviation) from the component-wise median, ≥ 3 reporters; never for an AI kart's projectile (corrected only) |
 | unknown content | ≥ 2 distinct reporters about racer X → X leaves the race; exactly 1 reporter → the reporter leaves the race (desync); neither counts as cheating unless the item is absent from the catalog majority of X's pack version (fabricated) |
 
-Reports, hit claims and unknown-content reports about an AI slot are ignored.
+Hit claims and unknown-content reports about an AI slot are ignored; cheat reports about one count against the AI
+host.
 
 ### Content agreement
 
@@ -690,12 +695,13 @@ runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`
   their states (UDP `AiStates`, 30 Hz, the `KartState` a human sends of its own kart); the server relays them in
   `World` to every other human, whose clients draw the AI karts like the other humans' karts (interpolated, about
   100 ms behind), so every racer sees the same AI race. The server takes the AI karts' lap, `raceDistance` and health
-  from those states. Plausibility checks, cheat reports, hit claims, unknown-content reports and server strikes never
-  concern an AI slot.
+  from those states once they pass its plausibility check (see "AI host validation"). Hit claims, unknown-content
+  reports and server strikes never concern an AI slot; cheat reports about one concern the AI host.
 - **AI host**: one racer simulates and reports for every AI kart: the human with the lowest grid slot still in the
-  race (`RaceSetup.aiHost`). When the host leaves the race, or its `AiStates` stop for **2 s** after GO while another
-  human's own states still arrive (the lowest such slot whose latest `State` is at most 1 s old), the server elects
-  the next one and pushes `AiHost`; finishing or being eliminated does not end hosting. The host's client sends the AI
+  race (`RaceSetup.aiHost`; a human that failed AI host validation only when no other human is left). When the host
+  leaves the race, or its `AiStates` stop for **2 s** after GO while another human's own states still arrive (the
+  lowest such slot whose latest `State` is at most 1 s old), or it fails validation (below), the server elects the
+  next one and pushes `AiHost`; finishing or being eliminated does not end hosting. The host's client sends the AI
   karts' states (`AiStates`), item box pickups (`ItemPickup`), item uses (`ItemUse`, use id `(aiSlot + 1) << 24 | n`,
   n counted per AI slot), hits taken (`HitTaken`), battle eliminations (`EliminatedSelf`), finishes (`Finished`) and
   the end of their projectiles (`ProjectileGone`), each notify with the AI kart's slot in its `slot` field. Such
@@ -711,8 +717,27 @@ runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`
   finishes it with the reported time when it still drives.
 - **Takeover**: a new host simulates the AI karts on from where it draws them, with the inventories it replayed, and
   numbers an AI kart's next uses on from the highest n it saw in that kart's `ItemUsed` (the server rejects a reused
-  use id); it first sends the finishes the old host never sent. A client that stops hosting (replaced while silent)
-  follows the new host's states.
+  use id); it first sends the finishes the old host never sent. A client that stops hosting (replaced while silent or
+  after failing validation) follows the new host's states.
+- **AI host validation**: the AI karts' motion has a single source, so the server validates it instead of trusting
+  it (anticheat-off lobbies too, without strikes):
+  - **Plausibility**: each AI kart's state from the host is judged against that kart's previous accepted state from
+    the same host (the first one from a host, e.g. after a takeover, is taken as is). A tick not newer than the
+    previous one is dropped silently. A state is **rejected** (not stored, not relayed in `World`) when its tick runs
+    more than 1 s (60 ticks) ahead of the server's race clock; when, without the cut flag, it moved horizontally more
+    than 150 m/s × elapsed ticks / 60 + 10 m (height never counts: falls and launches); when its `raceDistance` grew
+    more than 150 m/s × elapsed + 50 m (cut or not); or when its lap skips one or goes back without the cut flag. A
+    cut state may move the kart anywhere (respawns). 150 m/s is about 5× a 150cc kart's top speed: above the
+    strongest stacked boosts, push zones and jumps of the shipped packs with clear headroom.
+  - **Rejections**: 15 rejected states within 5 s replace the host (`AiHost`; the lowest eligible human, other than
+    the host and never failed as one, whose own latest `State` is at most 1 s old) and strike it. Without such a
+    human the host stays, struck once per 5 s; a later rejection in that window hands over once someone can.
+  - **Reports**: a `CheatReport` naming an AI slot is about the host: stored with the host as suspect and the detail
+    prefixed `AI kart slot N: `, counted under the usual rules with the host in the suspect's place (the host's own
+    reports about AI karts are dropped). Reports about any AI kart add up per race against the current host, one
+    vote per reporter (the latest within 15 s); max(2, ⌈eligible observers of the host / 2⌉) of them replace the
+    host as above and strike it (kept and struck when nobody can take over; the votes start over). Votes reset when
+    the host changes.
 - **Results**: AI rows rank with the humans (`RaceResultRow.ai`, `accountId` 0, `username` `""`, `characterId`),
   earn position points and set points like humans (kept in `LobbyState.aiDrivers`); account score is for humans only
   (see "Profiles and score").
@@ -914,7 +939,7 @@ the kart the notify is about: 255 = the sender's own kart, an AI slot from the A
 | 531 | HitTaken | `raceId: u64`, `attackerSlot: u8`, `useId: u32` (0 = track hazard/zone), `effectId: string ≤ 96`, `tick: u32`, `slot: u8` |
 | 532 | HitSeen | `raceId: u64`, `victimSlot: u8`, `attackerSlot: u8`, `useId: u32`, `effectId: string ≤ 96`, `tick: u32` |
 | 533 | Finished | `raceId: u64`, `finishMs: i32`, `lapMs: list<i32> ≤ 99`, `tick: u32`, `slot: u8` |
-| 534 | CheatReport | `raceId: u64`, `suspectSlot: u8`, `reason: u8` (FlagReason), `tick: u32`, `detail: string ≤ 256` |
+| 534 | CheatReport | `raceId: u64`, `suspectSlot: u8` (a human's or an AI kart's slot), `reason: u8` (FlagReason), `tick: u32`, `detail: string ≤ 256` |
 | 535 | UnknownContent | `raceId: u64`, `slot: u8`, `kind: u8`, `id: string ≤ 96` |
 | 536 | EliminatedSelf | `raceId: u64`, `attackerSlot: u8`, `tick: u32`, `slot: u8` |
 | 537 | BridgeTrigger | `raceId: u64`, `bridgeId: u16`, `tick: u32` |
@@ -967,7 +992,7 @@ datagrams (latest valid one wins).
 | 2 Pong | s → c | `clientTime: time`, `serverTime: time` |
 | 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` (as many as fit the datagram; the rest go with the next state) |
 | 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other human racer and, except to the AI host, of every AI kart (`rttMs` 0); split over as many World datagrams as needed, each a whole entry list with its own `seq`) |
-| 5 AiStates | c → s | `n: u8` + n × (`slot: u8`, `KartState`): the AI host's AI karts (30 Hz, as many as fit a datagram, the rest in further ones); ignored from anybody else. Relayed in World; feeds item rolls, DNF ranking and battle survivor ranking |
+| 5 AiStates | c → s | `n: u8` + n × (`slot: u8`, `KartState`): the AI host's AI karts (30 Hz, as many as fit a datagram, the rest in further ones); ignored from anybody else. Each entry passes the plausibility check of "AI drivers" or is dropped; accepted ones are relayed in World and feed item rolls, DNF ranking and battle survivor ranking |
 
 `KartState` (sent at 30 Hz):
 
@@ -1027,10 +1052,12 @@ A client must not use an item before its `ItemGranted` arrived.
 - **Kicks**: a cheating kick writes `cheat_kicks` (account, lobby, race, reason, reporters) and removes the racer from
   the race (outcome kicked: cheating); they stay in the lobby and may race again next race. Moderator kicks remove
   from race and lobby for 10 min and write the audit log.
-- **Cheat reports**: every `CheatReport` about another human racer of the race is stored in `cheat_reports` (lobby,
+- **Cheat reports**: every `CheatReport` about another racer of the race is stored in `cheat_reports` (lobby,
   race, reporter, suspect, reason, detail, time, whether it counted and why not), at most 100 per reporter and race,
   so moderators can review races where no kick was possible (`mhk-server admin cheat-reports [--account U]
   [--limit N]`). A report counts in a running anticheat race from an eligible reporter about a racer still in it;
-  the suspect's RTT must be ≤ 200 ms except for Speed and Acceleration reports. Reports about AI slots are dropped.
+  the suspect's RTT must be ≤ 200 ms except for Speed and Acceleration reports. A report about an AI slot names the
+  AI host as suspect (detail `AI kart slot N: …`) and counts towards replacing the host, never a kick by itself (see
+  "AI drivers", "AI host validation").
 - **Races with one human** are arbitrated like any other (the human is the AI host); see "Alone in a lobby without
   AI" for solo races and `EndRaceEarly`.

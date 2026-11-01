@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"maps"
+	"math"
 	"math/rand/v2"
 	"net/netip"
 	"slices"
@@ -32,6 +32,7 @@ const (
 	strikeWindow      = 30 * time.Second
 	strikesToKick     = 5
 	maxStoredReports  = 100 // per reporter and race: bounds what a flooding client writes to cheat_reports
+	maxReportDetail   = 256 // bytes: cheat_reports.detail
 	hitGrace          = 300 * time.Millisecond
 	finishTolerance   = time.Second
 	zeroHealthLimit   = 2 * time.Second
@@ -53,6 +54,24 @@ const (
 	// whose own states arrived within aiHostFresh (tickAIHost).
 	aiHostSilence = 2 * time.Second
 	aiHostFresh   = time.Second
+
+	// AiStates plausibility (judgeAIState): each AI kart's state against its previous accepted one from the same host.
+	// aiMaxSpeed bounds horizontal motion and raceDistance growth. The fastest engine class (150cc) tops out at
+	// 105 km/h ≈ 29 m/s on flat road; top-gear redline (speed pads) and other kart profiles add some 30 % (≈ 38 m/s);
+	// the strongest stacked boosts of the shipped packs (silver feather or turbo oil 1.5 × a tincan speed pad 1.5 =
+	// 2.25) make ≈ 86 m/s, push zones (conveyors, fans) add up to ≈ 22 m/s, leapfrog/feather impulses a few m/s and a
+	// downhill jump its fall energy: ≈ 110 m/s at worst, so 150 m/s (540 km/h, 5× the plain top speed) leaves clear
+	// headroom. Height is never compared: falls and launches move a kart vertically and must never trip it.
+	aiMaxSpeed      = 150.0 // m/s
+	aiMoveSlack     = 10.0  // m on top of aiMaxSpeed × elapsed: rounding and a kart nudged between two states
+	aiDistanceSlack = 50.0  // m: raceDistance re-acquiring another branch, a respawn up to 25 m ahead (as clients allow)
+	// A state's tick may lead the server's race clock by 1 s (the host's clock offset): a tick far in the future
+	// would make any distance plausible.
+	aiTickLead = ticksPerSecond
+	// aiRejectsToHandOver rejected AI states within aiRejectWindow (half a second of one kart's 30 Hz states) hand
+	// the AI karts to another human and strike the host (once per window when nobody can take over).
+	aiRejectWindow      = 5 * time.Second
+	aiRejectsToHandOver = 15
 )
 
 // env is how a race acts on the world; the Engine implements it, unit tests record it.
@@ -141,7 +160,13 @@ type raceState struct {
 	hasAI     bool            // some seat is an AI kart
 	aiHost    *seat           // the human simulating the AI karts, nil = none (no AI or no human left)
 	aiHeard   time.Time       // the host's latest AiStates, or its election: a silent host is replaced (tickAIHost)
-	aiScratch proto.KartState // AiStates entries about no AI kart are decoded here and dropped
+	aiScratch proto.KartState // AiStates entries are decoded here and copied to the AI seat when plausible
+	// Validation of the current host (reset by setHost): its rejected states since aiRejectFrom, whether it was
+	// struck for them in that window, and cheat reports about AI karts (reporter slot → latest).
+	aiRejects       int
+	aiRejectFrom    time.Time
+	aiRejectFlagged bool
+	aiVotes         map[uint8]cheatVote
 
 	worldBuf []byte
 	log      *slog.Logger
@@ -172,23 +197,34 @@ func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *
 	return rs
 }
 
-// electHost makes the human with the lowest slot still in the race the AI host (nil without AI or humans).
+// electHost makes the human with the lowest slot still in the race the AI host (nil without AI or humans), passing
+// over humans flagged as AI hosts unless nobody else is left.
 func (rs *raceState) electHost(now time.Time) {
 	rs.aiHost = nil
 	if !rs.hasAI {
 		return
 	}
+	var flagged *seat
 	for _, s := range rs.seats {
-		if !s.ai && !s.out {
+		switch {
+		case s.ai || s.out:
+		case !s.aiFlagged:
 			rs.setHost(s, now)
 			return
+		case flagged == nil:
+			flagged = s
 		}
+	}
+	if flagged != nil {
+		rs.setHost(flagged, now)
 	}
 }
 
-// setHost makes s the AI host; its silence counts from now.
+// setHost makes s the AI host; its silence counts from now and its validation starts afresh.
 func (rs *raceState) setHost(s *seat, now time.Time) {
 	rs.aiHost, rs.aiHeard = s, now
+	rs.aiRejects, rs.aiRejectFlagged = 0, false
+	clear(rs.aiVotes)
 }
 
 // aiHostSlot is RaceSetup.aiHost: the host's slot, NoSlot without one.
@@ -199,11 +235,51 @@ func (rs *raceState) aiHostSlot() uint8 {
 	return rs.aiHost.slot
 }
 
-// announceHost tells every racer the new AI host, which took over from previous (left or silent: why).
+// announceHost tells every racer the new AI host, which took over from previous (why: left, silent, implausible or
+// reported).
 func (rs *raceState) announceHost(previous *seat, why string) {
 	rs.log.Info("new AI host", "slot", rs.aiHost.slot, "account", rs.aiHost.racer.AccountID, "previous",
 		previous.slot, "why", why)
 	rs.pushAll(proto.PushAiHost, &proto.AiHost{RaceID: rs.id, Slot: rs.aiHost.slot}, nil)
+}
+
+// successor is the human with the lowest slot, other than the host, whose own states arrived within aiHostFresh: it
+// draws the AI karts, so it can simulate them on. trusted also requires it eligible and never flagged as an AI host.
+// nil = nobody.
+func (rs *raceState) successor(trusted bool, now time.Time) *seat {
+	for _, s := range rs.seats {
+		if !s.ai && !s.out && s != rs.aiHost && s.hasState && now.Sub(s.stateAt) <= aiHostFresh &&
+			(!trusted || rs.eligible(s) && !s.aiFlagged) {
+			return s
+		}
+	}
+	return nil
+}
+
+// handOver gives the AI karts of a host that failed validation to a trusted successor and announces it (why:
+// implausible or reported). Reports whether there was one.
+func (rs *raceState) handOver(why string, now time.Time) bool {
+	next := rs.successor(true, now)
+	if next == nil {
+		return false
+	}
+	previous := rs.aiHost
+	rs.setHost(next, now)
+	rs.announceHost(previous, why)
+	return true
+}
+
+// failAIHost flags an AI host that failed validation: the AI karts go to a trusted successor (handOver) when there is
+// one, the old host never gets them back from a validation and takes a strike for reason (the usual strike rules may
+// kick it). Without a successor the host stays, struck all the same. Reports whether the host changed.
+func (rs *raceState) failAIHost(why, reason string, now time.Time) bool {
+	host := rs.aiHost
+	host.aiFlagged = true
+	handed := rs.handOver(why, now)
+	rs.log.Info("AI host flagged", "slot", host.slot, "account", host.racer.AccountID, "reason", reason,
+		"handedOver", handed)
+	rs.strike(host, reason, now)
+	return rs.aiHost != host
 }
 
 // tickAIHost replaces an AI host whose AiStates stopped while its control connection lives on (a hung game, a broken
@@ -220,13 +296,10 @@ func (rs *raceState) tickAIHost(now time.Time) {
 	if now.Sub(heard) < aiHostSilence {
 		return
 	}
-	for _, s := range rs.seats {
-		if !s.ai && !s.out && s != rs.aiHost && s.hasState && now.Sub(s.stateAt) <= aiHostFresh {
-			previous := rs.aiHost
-			rs.setHost(s, now)
-			rs.announceHost(previous, "silent")
-			return
-		}
+	if s := rs.successor(false, now); s != nil {
+		previous := rs.aiHost
+		rs.setHost(s, now)
+		rs.announceHost(previous, "silent")
 	}
 }
 
@@ -972,12 +1045,19 @@ func (rs *raceState) tickBridges(now time.Time) {
 
 // --- anticheat reports, unknown content ---
 
-// onCheatReport stores every report about another human racer (moderators review races where nobody could be
-// kicked) and counts it towards a kick when reportIgnored allows. Reports about AI karts are dropped.
+// onCheatReport stores every report about another racer (moderators review races where nobody could be kicked) and
+// counts it when reportIgnored allows. A report about a human counts towards kicking that human. A report about an AI
+// kart is about the AI host, whose states are all other racers see of that kart: it is stored with the host as suspect
+// and counts towards replacing the host (countAIVote); the host's own reports about AI karts are dropped.
 func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Time) {
-	suspect := rs.seatAt(m.SuspectSlot)
-	if suspect == nil || suspect.ai || suspect == rep {
-		rs.debug("cheat report about nobody or an AI kart", rep, "suspect", m.SuspectSlot)
+	k := rs.seatAt(m.SuspectSlot)
+	suspect, detail := k, strings.ToValidUTF8(m.Detail, "?")
+	if k != nil && k.ai {
+		suspect = rs.aiHost
+		detail = truncate(fmt.Sprintf("AI kart slot %d: %s", k.slot, detail), maxReportDetail)
+	}
+	if suspect == nil || suspect == rep {
+		rs.debug("cheat report about nobody, the reporter itself or its own AI karts", rep, "suspect", m.SuspectSlot)
 		return
 	}
 	ignored := rs.reportIgnored(rep, suspect, m.Reason)
@@ -985,11 +1065,15 @@ func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Tim
 		rep.storedReports++
 		rs.env.cheatReport(store.CheatReport{LobbyRef: formatID(rs.spec.LobbyID), RaceRef: formatID(rs.id),
 			ReporterID: rep.racer.AccountID, SuspectID: suspect.racer.AccountID, Reason: m.Reason.String(),
-			Detail: strings.ToValidUTF8(m.Detail, "?"), Counted: ignored == "", Note: ignored, CreatedAt: now})
+			Detail: detail, Counted: ignored == "", Note: ignored, CreatedAt: now})
 	}
 	if ignored != "" {
-		rs.debug("cheat report not counted", rep, "suspect", suspect.slot, "reason", m.Reason.String(), "why", ignored,
-			"reporterRttMs", rep.rttMs(), "suspectRttMs", suspect.rttMs())
+		rs.debug("cheat report not counted", rep, "suspect", suspect.slot, "about", k.slot, "reason",
+			m.Reason.String(), "why", ignored, "reporterRttMs", rep.rttMs(), "suspectRttMs", suspect.rttMs())
+		return
+	}
+	if k.ai {
+		rs.countAIVote(rep, k, m, now)
 		return
 	}
 	votes := rs.reports[suspect.slot]
@@ -998,8 +1082,42 @@ func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Tim
 		rs.reports[suspect.slot] = votes
 	}
 	votes[rep.slot] = cheatVote{at: now, reason: m.Reason}
-	var reporters []string
-	reasons := map[string]bool{}
+	reporters, reasons := rs.tally(votes, now)
+	need := rs.observerThreshold(suspect)
+	rs.debug("cheat report", rep, "suspect", suspect.slot, "reason", m.Reason.String(), "detail", m.Detail,
+		"reporters", len(reporters), "need", need)
+	if len(reporters) < need {
+		return
+	}
+	delete(rs.reports, suspect.slot)
+	rs.kickCheater(suspect, "cheat reports: "+strings.Join(reasons, ", "), strings.Join(reporters, ","), now)
+}
+
+// countAIVote counts rep's report about AI kart k against the AI host: reports about any AI kart add up, and as many
+// distinct eligible reporters within reportWindow as would kick a human (observerThreshold of the host: the humans
+// but the host) fail the host (failAIHost). Votes reset when the host changes.
+func (rs *raceState) countAIVote(rep, k *seat, m *proto.CheatReport, now time.Time) {
+	host := rs.aiHost
+	if rs.aiVotes == nil {
+		rs.aiVotes = map[uint8]cheatVote{}
+	}
+	rs.aiVotes[rep.slot] = cheatVote{at: now, reason: m.Reason}
+	reporters, reasons := rs.tally(rs.aiVotes, now)
+	need := rs.observerThreshold(host)
+	rs.debug("cheat report about an AI kart", rep, "aiSlot", k.slot, "aiHost", host.slot, "reason", m.Reason.String(),
+		"detail", m.Detail, "reporters", len(reporters), "need", need)
+	if len(reporters) < need {
+		return
+	}
+	clear(rs.aiVotes)
+	rs.log.Info("AI cheat reports", "slot", host.slot, "account", host.racer.AccountID, "reporters",
+		strings.Join(reporters, ","), "reasons", strings.Join(reasons, ","))
+	rs.failAIHost("reported", "AI cheat reports: "+strings.Join(reasons, ", "), now)
+}
+
+// tally drops votes older than reportWindow or from racers no longer eligible and returns the remaining reporters'
+// account ids and their reasons, each sorted.
+func (rs *raceState) tally(votes map[uint8]cheatVote, now time.Time) (reporters, reasons []string) {
 	for slot, v := range votes {
 		r := rs.seats[slot]
 		if now.Sub(v.at) > reportWindow || !rs.eligible(r) {
@@ -1007,18 +1125,13 @@ func (rs *raceState) onCheatReport(rep *seat, m *proto.CheatReport, now time.Tim
 			continue
 		}
 		reporters = append(reporters, formatID(r.racer.AccountID))
-		reasons[v.reason.String()] = true
-	}
-	need := rs.observerThreshold(suspect)
-	rs.debug("cheat report", rep, "suspect", suspect.slot, "reason", m.Reason.String(), "detail", m.Detail,
-		"reporters", len(reporters), "need", need)
-	if len(reporters) < need {
-		return
+		if why := v.reason.String(); !slices.Contains(reasons, why) {
+			reasons = append(reasons, why)
+		}
 	}
 	slices.Sort(reporters)
-	why := slices.Sorted(maps.Keys(reasons))
-	delete(rs.reports, suspect.slot)
-	rs.kickCheater(suspect, "cheat reports: "+strings.Join(why, ", "), strings.Join(reporters, ","), now)
+	slices.Sort(reasons)
+	return reporters, reasons
 }
 
 // reportIgnored returns why a cheat report does not count, "" when it does. Speed and acceleration reports count
@@ -1129,7 +1242,7 @@ func (rs *raceState) onState(s *seat, payload []byte, now time.Time) {
 
 // onAiStates stores the AI host's states of its AI karts (UDP AiStates): World relays them to every other human, and
 // their lap, raceDistance and health feed item rolls, DNF ranking and battle survivor ranking. Datagrams from anybody
-// else are ignored.
+// else are ignored. States judgeAIState rejects are neither stored nor relayed; too many of them replace the host.
 func (rs *raceState) onAiStates(s *seat, payload []byte, now time.Time) {
 	if s != rs.aiHost || s.out || rs.phase == phaseEnded {
 		return
@@ -1147,13 +1260,73 @@ func (rs *raceState) onAiStates(s *seat, payload []byte, now time.Time) {
 		if k == nil || !k.ai {
 			continue
 		}
+		if ok, why := rs.judgeAIState(s, k, &rs.aiScratch, now); !ok {
+			if why != "" && rs.rejectAIState(s, k, why, now) {
+				return // s no longer hosts: the rest of its datagram is void
+			}
+			continue
+		}
 		effects := k.state.Effects
 		k.state = rs.aiScratch
 		k.state.Effects = append(effects[:0], rs.aiScratch.Effects...)
-		k.hasState = true
+		k.hasState, k.stateFrom = true, s
 		k.stateRaw = append(k.stateRaw[:0], payload[start:len(payload)-r.Remaining()]...)
 	}
 	rs.aiHeard = now
+}
+
+// judgeAIState decides whether host's state st of AI kart k is plausible after k's previous state from the same host:
+// ok false with why "" is a stale or repeated tick (dropped silently), with a why an implausible state. The first
+// state from a host is a snap. A cut (respawn, teleport) may move the kart anywhere; without one it moves at most
+// aiMaxSpeed horizontally. Its race distance never grows faster than that, its lap never skips one, and goes back
+// only with a cut.
+func (rs *raceState) judgeAIState(host, k *seat, st *proto.KartState, now time.Time) (ok bool, why string) {
+	// Before GO is set there is no race clock to compare with.
+	if lead := rs.raceTick(now) + aiTickLead; !rs.goAt.IsZero() && st.Tick > lead {
+		return false, fmt.Sprintf("tick %d ahead of the race clock (at most %d)", st.Tick, lead)
+	}
+	prev := &k.state
+	if !k.hasState || k.stateFrom != host {
+		return true, ""
+	}
+	if st.Tick < prev.Tick || st.Tick == prev.Tick && st.Tick > 0 {
+		return false, ""
+	}
+	reach := aiMaxSpeed * float64(st.Tick-prev.Tick) / ticksPerSecond
+	cut := st.Flags&proto.KartCut != 0
+	dx, dz := float64(st.Pos[0]-prev.Pos[0]), float64(st.Pos[2]-prev.Pos[2])
+	switch moved, gained := math.Hypot(dx, dz), float64(st.RaceDistance-prev.RaceDistance); {
+	case !cut && moved > reach+aiMoveSlack:
+		return false, fmt.Sprintf("moved %.0f m in %d ticks without a cut", moved, st.Tick-prev.Tick)
+	case gained > reach+aiDistanceSlack:
+		return false, fmt.Sprintf("race distance +%.0f m in %d ticks", gained, st.Tick-prev.Tick)
+	case st.Lap > prev.Lap+1:
+		return false, fmt.Sprintf("lap %d after %d", st.Lap, prev.Lap)
+	case st.Lap < prev.Lap && !cut:
+		return false, fmt.Sprintf("lap %d after %d without a cut", st.Lap, prev.Lap)
+	}
+	return true, ""
+}
+
+// rejectAIState counts an implausible state of AI kart k from host: aiRejectsToHandOver within aiRejectWindow fail the
+// host (failAIHost) once per window; while nobody could take over, a later rejection in that window hands the AI karts
+// over as soon as somebody can. Reports whether the host changed.
+func (rs *raceState) rejectAIState(host, k *seat, why string, now time.Time) bool {
+	if rs.aiRejects == 0 || now.Sub(rs.aiRejectFrom) > aiRejectWindow {
+		rs.aiRejects, rs.aiRejectFrom, rs.aiRejectFlagged = 0, now, false
+	}
+	rs.aiRejects++
+	rs.debug("implausible AI state rejected", host, "aiSlot", k.slot, "why", why, "inWindow", rs.aiRejects)
+	switch {
+	case rs.aiRejects < aiRejectsToHandOver:
+		return false
+	case rs.aiRejectFlagged:
+		return rs.handOver("implausible", now)
+	}
+	rs.aiRejectFlagged = true
+	rs.log.Info("implausible AI states", "slot", host.slot, "account", host.racer.AccountID, "rejected",
+		rs.aiRejects, "last", fmt.Sprintf("AI slot %d: %s", k.slot, why))
+	return rs.failAIHost("implausible", "implausible AI states", now)
 }
 
 // world sends every human with a known address the latest states of the other humans and, except to the AI host

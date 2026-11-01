@@ -32,6 +32,7 @@ type seat struct {
 	// Race goroutine only.
 	worldMac      *proto.UDPMac
 	everKicked    bool // ever cheat-kicked: reports and claims never count
+	aiFlagged     bool // failed validation as AI host: never succeeds a failed host, elected only when nobody else is left
 	storedReports int  // cheat reports of this racer written to cheat_reports
 
 	loaded     *proto.RaceLoaded
@@ -57,6 +58,9 @@ type seat struct {
 	stateRaw []byte // the KartState bytes as received, relayed verbatim in World
 	// When the latest valid State arrived: a silent AI host hands over to a human whose states still arrive.
 	stateAt time.Time
+	// AI seats: the host whose AiStates set state. A different host's first state is taken as is (the new host
+	// simulates on from where it drew the kart); later ones are judged against the previous one.
+	stateFrom *seat
 
 	held      string // powerup id, "" = none
 	charges   uint8

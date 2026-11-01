@@ -531,7 +531,8 @@ func (m *BridgeTriggered) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// AiHost is push 527: the racer that now reports for the AI karts (the previous host left the race).
+// AiHost is push 527: the racer that now reports for the AI karts (the previous host left, went silent or failed
+// validation).
 type AiHost struct {
 	RaceID uint64
 	Slot   uint8

@@ -12,11 +12,23 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// aiStates feeds an AiStates payload from s.
+// aiStates feeds an AiStates payload from s at t0.
 func aiStates(rs *raceState, s *seat, entries ...proto.AiStateEntry) {
+	aiStatesAt(rs, s, t0, entries...)
+}
+
+// aiStatesAt feeds an AiStates payload from s at now.
+func aiStatesAt(rs *raceState, s *seat, now time.Time, entries ...proto.AiStateEntry) {
 	w := wire.NewWriter(64)
 	(&proto.UDPAiStatesPayload{Entries: entries}).Encode(w)
-	rs.onAiStates(s, w.Bytes(), t0)
+	rs.onAiStates(s, w.Bytes(), now)
+}
+
+// ownState feeds an empty State of s's own kart at now: its states arrive, so it can take the AI karts over.
+func ownState(rs *raceState, s *seat, now time.Time) {
+	w := wire.NewWriter(64)
+	(&proto.UDPStatePayload{}).Encode(w)
+	rs.onState(s, w.Bytes(), now)
 }
 
 // aiState is the AiStates entry of AI slot slot.
@@ -87,12 +99,7 @@ func TestAIHostSilence(t *testing.T) {
 	rs, env, _ := newAIRace(2, 3, Spec{})
 	goAt := startRace(t, rs)
 	host, next := rs.seats[2], rs.seats[4]
-	state := func(s *seat, at time.Time) {
-		w := wire.NewWriter(64)
-		(&proto.UDPStatePayload{}).Encode(w)
-		rs.onState(s, w.Bytes(), at)
-	}
-	state(next, goAt)
+	ownState(rs, next, goAt)
 	rs.tick(goAt.Add(time.Millisecond))
 	if rs.aiHost != host || len(env.of(0, proto.PushAiHost)) != 0 {
 		t.Fatal("host replaced at GO for the countdown before it")
@@ -102,8 +109,8 @@ func TestAIHostSilence(t *testing.T) {
 	heard := goAt.Add(time.Second)
 	rs.onAiStates(host, w.Bytes(), heard)
 	// Slot 3's states stopped long ago, slot 4's still arrive.
-	state(rs.seats[3], t0)
-	state(next, heard.Add(aiHostSilence))
+	ownState(rs, rs.seats[3], t0)
+	ownState(rs, next, heard.Add(aiHostSilence))
 	rs.tick(heard.Add(aiHostSilence - time.Millisecond))
 	if rs.aiHost != host || len(env.of(0, proto.PushAiHost)) != 0 {
 		t.Fatal("host replaced before its silence")
@@ -239,11 +246,10 @@ func TestAIUseHitsAndProjectiles(t *testing.T) {
 	if len(env.pushes) != 0 {
 		t.Fatal("non-host AI hit relayed")
 	}
-	// Hit claims, cheat reports and unknown-content reports about AI karts are ignored.
+	// Hit claims and unknown-content reports about AI karts are ignored (cheat reports: TestAICheatReports).
 	rs.uses[4<<24|3] = &use{owner: 3}
 	rs.onHitSeen(rs.seats[3], &proto.HitSeen{VictimSlot: 0, AttackerSlot: 3, UseID: 4<<24 | 3}, now)
 	rs.onHitSeen(rs.seats[4], &proto.HitSeen{VictimSlot: 0, AttackerSlot: 3, UseID: 4<<24 | 3}, now)
-	rs.onCheatReport(rs.seats[3], &proto.CheatReport{SuspectSlot: 0, Reason: proto.FlagSpeed}, now)
 	rs.onUnknownContent(rs.seats[3], &proto.UnknownContent{Slot: 0, Kind: 2, ID: "x.y"}, now)
 	rs.onUnknownContent(rs.seats[4], &proto.UnknownContent{Slot: 0, Kind: 2, ID: "x.y"}, now)
 	rs.tickHits(now.Add(time.Second))
@@ -387,7 +393,7 @@ func fiftyKarts(t testing.TB, ai int) (*raceState, *fakeEnv) {
 			entries[i] = aiState(uint8(i), proto.KartState{Tick: 100, Pos: proto.Vec3{float32(i), 1, 2}, Lap: 1,
 				RaceDistance: float32(i), Health: 100, Effects: []uint16{1, 2, 3}})
 		}
-		aiStates(rs, rs.aiHost, entries...)
+		aiStatesAt(rs, rs.aiHost, rs.goAt.Add(2*time.Second), entries...) // tick 100 is 1.7 s after GO
 	}
 	return rs, env
 }
@@ -485,5 +491,257 @@ func TestAIProjectileOutliersNotStruck(t *testing.T) {
 		if len(s.strikes) != 0 {
 			t.Fatalf("slot %d struck over an AI projectile", s.slot)
 		}
+	}
+}
+
+// relayedAI returns the state of AI slot slot in the World the race sends human to now (ok false: none).
+func relayedAI(t *testing.T, rs *raceState, env *fakeEnv, to *seat, slot uint8) (st proto.KartState, ok bool) {
+	t.Helper()
+	addr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 1000+uint16(to.slot))
+	to.addr.Store(&addr)
+	env.keepUDP, env.datagrams, env.udpTo = true, nil, nil
+	rs.world(t0)
+	for i, d := range env.datagrams {
+		if env.udpTo[i] != addr.Port() {
+			continue
+		}
+		_, payload, _ := proto.ParseUDP(d)
+		var w proto.UDPWorldPayload
+		if err := w.Decode(wire.NewReader(payload)); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range w.Entries {
+			if e.Slot == slot {
+				return e.State, true
+			}
+		}
+	}
+	return st, false
+}
+
+// The AI host's states are judged against each AI kart's previous one: implausible ones are neither taken nor
+// relayed, stale ones are dropped silently, cuts may move a kart anywhere, height never counts.
+func TestAIStatesPlausibility(t *testing.T) {
+	rs, env, _ := newAIRace(1, 2, Spec{Anticheat: true})
+	goAt := startRace(t, rs)
+	host, other, ai := rs.seats[1], rs.seats[2], rs.seats[0]
+	now := goAt.Add(10 * time.Second) // race tick 600
+	base := proto.KartState{Tick: 300, Pos: proto.Vec3{0, 0, 0}, Lap: 1, RaceDistance: 100}
+	feed := func(st proto.KartState) { aiStatesAt(rs, host, now, aiState(0, st)) }
+	feed(base) // the first state is a snap
+	at := func(tick uint32, f func(*proto.KartState)) proto.KartState {
+		st := base
+		st.Tick = tick
+		f(&st)
+		return st
+	}
+	steps := []struct {
+		name   string
+		st     proto.KartState
+		taken  bool
+		reject bool // counted as implausible (not just stale)
+	}{
+		// 0.5 s: 75 m at aiMaxSpeed + 10 m slack.
+		{"fast but plausible", at(330, func(s *proto.KartState) { s.Pos = proto.Vec3{60, 0, 50}; s.RaceDistance = 180 }), true, false},
+		{"fall", at(332, func(s *proto.KartState) { s.Pos = proto.Vec3{60, -900, 50} }), true, false},
+		{"launch", at(334, func(s *proto.KartState) { s.Pos = proto.Vec3{60, 400, 50} }), true, false},
+		{"stale tick", at(320, func(s *proto.KartState) { s.Pos = proto.Vec3{900, 0, 0} }), false, false},
+		{"repeated tick", at(334, func(s *proto.KartState) { s.Pos = proto.Vec3{900, 0, 0} }), false, false},
+		{"teleport", at(336, func(s *proto.KartState) { s.Pos = proto.Vec3{90, 400, 50} }), false, true},
+		{"respawn cut", at(338, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Flags = proto.KartCut }), true, false},
+		{"race distance leap", at(340, func(s *proto.KartState) {
+			s.Pos = proto.Vec3{-500, 3, 0}
+			s.RaceDistance = 300
+			s.Flags = proto.KartCut
+		}), false, true},
+		{"lap skipped", at(342, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Lap = 3 }), false, true},
+		{"lap back without cut", at(344, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Lap = 0 }), false, true},
+		{"lap back with cut", at(346, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Lap = 0; s.Flags = proto.KartCut }), true, false},
+		{"tick ahead of the clock", at(600+aiTickLead+1, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Lap = 0 }), false, true},
+		{"next lap", at(352, func(s *proto.KartState) { s.Pos = proto.Vec3{-500, 3, 0}; s.Lap = 1 }), true, false},
+	}
+	rejects := 0
+	for _, c := range steps {
+		before := ai.state
+		feed(c.st)
+		if c.reject {
+			rejects++
+		}
+		got, ok := relayedAI(t, rs, env, other, 0)
+		switch {
+		case c.taken && (ai.state.Tick != c.st.Tick || ai.state.Pos != c.st.Pos || !ok || got.Pos != c.st.Pos):
+			t.Fatalf("%s: not taken or not relayed (state %+v, relayed %+v)", c.name, ai.state, got)
+		case !c.taken && (ai.state.Tick != before.Tick || ai.state.Pos != before.Pos || got.Pos != before.Pos):
+			t.Fatalf("%s: taken (state %+v, relayed %+v)", c.name, ai.state, got)
+		case rs.aiRejects != rejects:
+			t.Fatalf("%s: %d rejections counted, want %d", c.name, rs.aiRejects, rejects)
+		}
+	}
+	if rs.aiHost != host || len(host.strikes) != 0 || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("a few implausible states replaced or struck the host")
+	}
+}
+
+// aiTeleports feeds n implausible AiStates (a 10 km jump each, without a cut) of AI slot 0 from s at now, after a
+// plausible first one when s has none yet.
+func aiTeleports(rs *raceState, s *seat, n int, now time.Time) {
+	tick := uint32(now.Sub(rs.goAt) * ticksPerSecond / time.Second)
+	if rs.seats[0].stateFrom != s {
+		aiStatesAt(rs, s, now, aiState(0, proto.KartState{Tick: tick - 100}))
+	}
+	for i := range n {
+		aiStatesAt(rs, s, now, aiState(0, proto.KartState{Tick: tick - 99 + uint32(i), Pos: proto.Vec3{10_000, 0, 0}}))
+	}
+}
+
+// aiRejectsToHandOver implausible states within aiRejectWindow hand the AI karts to the lowest eligible human whose
+// states arrive, strike the old host, which never gets them back from a validation; the new host's first state is a
+// snap. Rejections further apart do not add up.
+func TestAIHostImplausibleHandOver(t *testing.T) {
+	rs, env, _ := newAIRace(1, 4, Spec{Anticheat: true})
+	goAt := startRace(t, rs)
+	host := rs.seats[1]
+	now := goAt.Add(10 * time.Second)
+	rs.seats[2].rttUs.Store(300_000) // not eligible: skipped
+	for _, s := range rs.seats[1:] {
+		ownState(rs, s, now)
+	}
+	aiTeleports(rs, host, aiRejectsToHandOver-1, now)
+	aiTeleports(rs, host, aiRejectsToHandOver-1, now.Add(aiRejectWindow+time.Second))
+	if rs.aiHost != host || len(host.strikes) != 0 || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("rejections in two windows added up")
+	}
+	now = now.Add(aiRejectWindow + time.Second)
+	for _, s := range rs.seats[1:] {
+		ownState(rs, s, now)
+	}
+	aiTeleports(rs, host, 1, now)
+	h := env.of(0, proto.PushAiHost)
+	if rs.aiHost != rs.seats[3] || len(h) != 4 || h[0].(*proto.AiHost).Slot != 3 {
+		t.Fatalf("implausible host not replaced: host %d, pushes %v", rs.aiHostSlot(), h)
+	}
+	if len(host.strikes) != 1 || host.strikeWhy[0] != "implausible AI states" || !host.aiFlagged || host.out {
+		t.Fatalf("old host strikes %v, flagged %v", host.strikeWhy, host.aiFlagged)
+	}
+	if rs.aiRejects != 0 {
+		t.Fatal("the new host inherited rejections")
+	}
+	// The old host's datagrams are ignored now; the new host's first state is a snap.
+	aiTeleports(rs, host, 1, now)
+	if rs.seats[0].state.Pos[0] != 0 {
+		t.Fatal("old host's state taken")
+	}
+	snap := proto.KartState{Tick: rs.seats[0].state.Tick + 2, Pos: proto.Vec3{-3000, 0, 0}, Lap: 2, RaceDistance: 900}
+	aiStatesAt(rs, rs.seats[3], now, aiState(0, snap))
+	if rs.seats[0].state.Pos != snap.Pos || rs.aiRejects != 0 {
+		t.Fatal("new host's first state not taken as a snap")
+	}
+	// The next failure skips the flagged old host (lower slot, fresh states) for slot 4.
+	env.reset()
+	aiTeleports(rs, rs.seats[3], aiRejectsToHandOver, now.Add(time.Second))
+	if rs.aiHost != rs.seats[4] || len(rs.seats[3].strikes) != 1 {
+		t.Fatalf("second implausible host: host %d", rs.aiHostSlot())
+	}
+}
+
+// Without anybody to take over, an implausible host stays and is struck once per window; once somebody can, the next
+// rejection hands over without another strike.
+func TestAIHostImplausibleNobodyToTakeOver(t *testing.T) {
+	rs, env, _ := newAIRace(1, 2, Spec{Anticheat: true})
+	goAt := startRace(t, rs)
+	host, other := rs.seats[1], rs.seats[2]
+	now := goAt.Add(10 * time.Second)
+	ownState(rs, other, now.Add(-2*aiHostFresh)) // its states stopped
+	aiTeleports(rs, host, 3*aiRejectsToHandOver, now)
+	if rs.aiHost != host || len(env.of(0, proto.PushAiHost)) != 0 || len(host.strikes) != 1 || !host.aiFlagged {
+		t.Fatalf("host %d, strikes %d in one window", rs.aiHostSlot(), len(host.strikes))
+	}
+	later := now.Add(aiRejectWindow + time.Second)
+	aiTeleports(rs, host, aiRejectsToHandOver, later)
+	if rs.aiHost != host || len(host.strikes) != 2 {
+		t.Fatalf("next window: host %d, strikes %d", rs.aiHostSlot(), len(host.strikes))
+	}
+	ownState(rs, other, later)
+	aiTeleports(rs, host, 1, later)
+	if rs.aiHost != other || len(host.strikes) != 2 || len(env.of(0, proto.PushAiHost)) != 2 {
+		t.Fatalf("hand-over once possible: host %d, strikes %d", rs.aiHostSlot(), len(host.strikes))
+	}
+}
+
+// Cheat reports about AI karts are votes against the AI host: stored with the host as suspect, reports about any AI
+// kart add up, the host's own are dropped, the threshold is that of a kick over the humans but the host; reaching it
+// hands over and strikes the host (kept, struck, when nobody can take over). Votes reset when the host changes.
+func TestAICheatReports(t *testing.T) {
+	report := func(rs *raceState, from, about int, at time.Time) {
+		rs.onCheatReport(rs.seats[from], &proto.CheatReport{SuspectSlot: uint8(about), Reason: proto.FlagTeleport,
+			Detail: "moved"}, at)
+	}
+	rs, env, _ := newAIRace(2, 4, Spec{Anticheat: true})
+	goAt := startRace(t, rs)
+	host := rs.seats[2]
+	now := goAt.Add(10 * time.Second)
+	for _, s := range rs.seats[2:] {
+		ownState(rs, s, now)
+	}
+	report(rs, 3, 0, now)
+	report(rs, 2, 1, now) // the host about its own AI kart: dropped
+	if rs.aiHost != host || len(host.strikes) != 0 || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("one report replaced or struck the host")
+	}
+	if r := env.reports; len(r) != 1 || r[0].SuspectID != acc(2) || r[0].ReporterID != acc(3) ||
+		r[0].Detail != "AI kart slot 0: moved" || !r[0].Counted || r[0].Reason != "Teleport" {
+		t.Fatalf("stored reports %+v", r)
+	}
+	// Eligible observers of the host: 3, 4, 5 → max(2, 2) = 2; a report about the other AI kart completes it.
+	report(rs, 4, 1, now)
+	h := env.of(0, proto.PushAiHost)
+	if rs.aiHost != rs.seats[3] || len(h) != 4 || h[0].(*proto.AiHost).Slot != 3 {
+		t.Fatalf("reported host not replaced: host %d", rs.aiHostSlot())
+	}
+	if len(host.strikes) != 1 || host.strikeWhy[0] != "AI cheat reports: Teleport" || host.out || len(env.kicks) != 0 {
+		t.Fatalf("old host strikes %v kicks %v", host.strikeWhy, env.kicks)
+	}
+	if len(rs.seats[0].strikes) != 0 || rs.seats[0].out {
+		t.Fatal("AI kart struck")
+	}
+
+	// Votes reset on a host change: 5's vote against host 3 does not count against host 4.
+	env.reset()
+	report(rs, 5, 0, now)
+	rs.leave(rs.seats[3], OutcomeLeft, "", now)
+	if rs.aiHost != rs.seats[4] {
+		t.Fatalf("host %d after leave", rs.aiHostSlot())
+	}
+	report(rs, 2, 0, now)
+	if rs.aiHost != rs.seats[4] || len(rs.seats[4].strikes) != 0 {
+		t.Fatal("a vote against the previous host counted")
+	}
+	report(rs, 5, 1, now)
+	if rs.aiHost == rs.seats[4] || len(rs.seats[4].strikes) != 1 {
+		t.Fatal("two votes against the current host did not count")
+	}
+
+	// Nobody to take over: the host stays, struck; the votes start over.
+	rs, env, _ = newAIRace(1, 3, Spec{Anticheat: true})
+	goAt = startRace(t, rs)
+	now = goAt.Add(10 * time.Second)
+	host = rs.seats[1]
+	report(rs, 2, 0, now)
+	report(rs, 3, 0, now)
+	if rs.aiHost != host || len(host.strikes) != 1 || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatalf("nobody to take over: host %d strikes %d", rs.aiHostSlot(), len(host.strikes))
+	}
+	report(rs, 2, 0, now)
+	if len(host.strikes) != 1 {
+		t.Fatal("votes did not start over")
+	}
+
+	// Anticheat off: stored, never counted.
+	rs, env, _ = newAIRace(1, 3, Spec{})
+	goAt = startRace(t, rs)
+	report(rs, 2, 0, goAt)
+	report(rs, 3, 0, goAt)
+	if len(env.reports) != 2 || env.reports[0].Counted || len(rs.aiVotes) != 0 {
+		t.Fatalf("anticheat off: %+v", env.reports)
 	}
 }
