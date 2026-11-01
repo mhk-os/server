@@ -208,9 +208,16 @@ func (rs *raceState) announceHost(previous *seat, why string) {
 
 // tickAIHost replaces an AI host whose AiStates stopped while its control connection lives on (a hung game, a broken
 // UDP path): every other racer draws the AI karts from those states. Without a human whose own states still arrive
-// the host stays.
+// the host stays. The silence counts from GO at the earliest: a host elected at setup has no AI karts to report yet.
 func (rs *raceState) tickAIHost(now time.Time) {
-	if rs.aiHost == nil || now.Before(rs.goAt) || now.Sub(rs.aiHeard) < aiHostSilence {
+	if rs.aiHost == nil || rs.goAt.IsZero() || now.Before(rs.goAt) {
+		return
+	}
+	heard := rs.aiHeard
+	if heard.Before(rs.goAt) {
+		heard = rs.goAt
+	}
+	if now.Sub(heard) < aiHostSilence {
 		return
 	}
 	for _, s := range rs.seats {

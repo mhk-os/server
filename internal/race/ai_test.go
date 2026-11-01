@@ -81,7 +81,8 @@ func TestAIHostElection(t *testing.T) {
 }
 
 // A host whose AiStates stop for 2 s after GO hands the AI karts to the lowest human whose own states still arrive;
-// the new host gets the same grace, and without such a human the silent host stays.
+// the new host gets the same grace, and without such a human the silent host stays. A host elected at setup is not
+// silent at GO: its silence counts from GO.
 func TestAIHostSilence(t *testing.T) {
 	rs, env, _ := newAIRace(2, 3, Spec{})
 	goAt := startRace(t, rs)
@@ -90,6 +91,11 @@ func TestAIHostSilence(t *testing.T) {
 		w := wire.NewWriter(64)
 		(&proto.UDPStatePayload{}).Encode(w)
 		rs.onState(s, w.Bytes(), at)
+	}
+	state(next, goAt)
+	rs.tick(goAt.Add(time.Millisecond))
+	if rs.aiHost != host || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("host replaced at GO for the countdown before it")
 	}
 	w := wire.NewWriter(64)
 	(&proto.UDPAiStatesPayload{Entries: []proto.AiStateEntry{aiState(0, proto.KartState{Tick: 60})}}).Encode(w)
