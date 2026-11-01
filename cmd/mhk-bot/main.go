@@ -63,7 +63,8 @@ func run(ctx context.Context, args []string) error {
 	platform := fs.String("platform", "mhk-bot",
 		"Hello platform, a Unity RuntimePlatform name such as Android or WindowsPlayer (shown as the player's device)")
 	handOver := fs.Duration("hand-over", 0,
-		"as the AI host of a race with AI, leave it this long after GO and rejoin the lobby (0 = never): the next human hosts")
+		"as the AI host of a race with AI, leave it this long after GO (under 2 s: the server replaces a silent host then) "+
+			"and rejoin the lobby (0 = never): the next human hosts")
 	loadedPath := fs.String("loaded", "",
 		"file with the hex of a RaceLoaded a game client sent on the races' track: bots agree with that content")
 	keepAlive := fs.Duration("keepalive", 15*time.Second, "TCP Ping interval (the server drops connections silent for 45 s)")

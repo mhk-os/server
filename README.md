@@ -55,11 +55,12 @@ one human (or bots only) nobody has a content majority and everybody races with 
 bots leave as desync. `-loaded FILE` (the hex of a `RaceLoaded` body a game client sent on the track the races use)
 makes bots send that content instead, so they agree with the game and the race has its item boxes.
 
-Bots race in lobbies and rooms with AI karts too and ignore everything about them. A bot never reports for the AI
-karts (it simulates none): when a bot has the lowest human grid slot it is the AI host (it logs a warning), so the AI
-karts take no items and never finish. `-hand-over 15s` makes a hosting bot leave such a race 15 s after GO and join
-the lobby again for the next one: the server elects the next human (`AiHost`), which tests the hand-over and makes the
-editor the AI host for the rest of the race.
+Bots race in lobbies and rooms with AI karts too and ignore everything about them. A bot never simulates the AI karts
+(it sends no `AiStates`): when a bot has the lowest human grid slot it is the AI host at first (it logs a warning), and
+2 s after GO the server hands the AI karts to the next human whose states arrive (`AiHost`), e.g. the editor, which
+tests the hand-over of a silent host; with bots only the AI karts stand still. `-hand-over 1s` makes a hosting bot
+leave such a race 1 s after GO (before it counts as silent) and join the lobby again for the next one: the server
+elects the next human (`AiHost`), which tests the hand-over of a host that leaves.
 
 ## Configuration
 

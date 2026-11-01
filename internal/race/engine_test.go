@@ -528,8 +528,8 @@ func TestRaceIntegrationAnticheatOff(t *testing.T) {
 }
 
 // TestRaceIntegrationAI: two AI karts and two bots over real TCP and UDP. Only humans get RaceSetup (AI slots
-// flagged, the first human hosts), the host's AiProgress datagrams rank the AI karts, its AI pickups reach every
-// racer, and the second bot takes over hosting when the first leaves.
+// flagged, the first human hosts), the host's AiStates datagrams rank the AI karts and reach the other bot in World,
+// its AI pickups reach every racer, and the second bot takes over hosting when the first leaves.
 func TestRaceIntegrationAI(t *testing.T) {
 	h := startHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -566,13 +566,28 @@ func TestRaceIntegrationAI(t *testing.T) {
 	time.Sleep(time.Until(goMsg.Go) + 50*time.Millisecond)
 
 	host := bots[0]
-	host.udp.SendAiProgress(proto.AiProgressEntry{Slot: 0, Lap: 1, RaceDistance: 120, Health: 9},
-		proto.AiProgressEntry{Slot: 1, Lap: 1, RaceDistance: 80})
-	bots[1].udp.SendAiProgress(proto.AiProgressEntry{Slot: 1, RaceDistance: 5000}) // not the host: ignored
-	eventually(t, "AI progress", func() bool {
+	host.udp.SendAiStates(
+		proto.AiStateEntry{Slot: 0, State: proto.KartState{Tick: 60, Lap: 1, RaceDistance: 120, Health: 9}},
+		proto.AiStateEntry{Slot: 1, State: proto.KartState{Tick: 60, Lap: 1, RaceDistance: 80}})
+	// Not the host: ignored.
+	bots[1].udp.SendAiStates(proto.AiStateEntry{Slot: 1, State: proto.KartState{Tick: 61, RaceDistance: 5000}})
+	eventually(t, "AI states", func() bool {
 		return inspect(t, h.eng, raceID, func(rs *raceState) bool {
 			return rs.seats[0].state.RaceDistance == 120 && rs.seats[1].state.RaceDistance == 80
 		})
+	})
+	eventually(t, "AI states in World", func() bool {
+		w, _ := bots[1].udp.World()
+		if w == nil {
+			return false
+		}
+		ai := 0
+		for _, e := range w.Entries {
+			if e.Slot < 2 && e.State.Tick == 60 {
+				ai++
+			}
+		}
+		return ai == 2
 	})
 	host.notify(proto.NotifyItemPickup, &proto.ItemPickup{RaceID: raceID, BoxID: 1, Tick: 30, Slot: 1})
 	var granted proto.ItemGranted
@@ -595,7 +610,7 @@ func TestRaceIntegrationAI(t *testing.T) {
 	for _, p := range placements {
 		got = append(got, fmt.Sprintf("%d:%v:%s:%d", p.Slot, p.AI, p.CharacterID, p.Outcome))
 	}
-	// DNF by distance: the AI karts from AiProgress (120, 80 m), the bot's states at 0 m; the leaver last.
+	// DNF by distance: the AI karts from AiStates (120, 80 m), the bot's states at 0 m; the leaver last.
 	want := []string{"0:true:mhk2.lola:1", "1:true:mhk2.hank:1", "3:false:mhk2.moorhuhn:1", "2:false:mhk2.moorhuhn:2"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("placements %v, want %v", got, want)

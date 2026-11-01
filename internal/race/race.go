@@ -48,6 +48,11 @@ const (
 	ticksPerSecond    = 60
 	specialBox        = "@special"
 	gamePack          = "game" // the built-in pack: content of every lobby
+
+	// An AI host whose AiStates stop for aiHostSilence after GO hands the AI karts to the human with the lowest slot
+	// whose own states arrived within aiHostFresh (tickAIHost).
+	aiHostSilence = 2 * time.Second
+	aiHostFresh   = time.Second
 )
 
 // env is how a race acts on the world; the Engine implements it, unit tests record it.
@@ -133,9 +138,10 @@ type raceState struct {
 	firstFinish time.Time
 	elimCount   int
 
-	hasAI    bool  // some seat is an AI kart
-	aiHost   *seat // the human reporting for the AI karts, nil = none (no AI or no human left)
-	progress proto.UDPAiProgressPayload
+	hasAI     bool            // some seat is an AI kart
+	aiHost    *seat           // the human simulating the AI karts, nil = none (no AI or no human left)
+	aiHeard   time.Time       // the host's latest AiStates, or its election: a silent host is replaced (tickAIHost)
+	aiScratch proto.KartState // AiStates entries about no AI kart are decoded here and dropped
 
 	worldBuf []byte
 	log      *slog.Logger
@@ -162,22 +168,27 @@ func newRaceState(id uint64, spec Spec, seats []*seat, e env, cat Catalog, log *
 		log:       log.With("race", id),
 	}
 	rs.hasAI = slices.ContainsFunc(seats, func(s *seat) bool { return s.ai })
-	rs.electHost()
+	rs.electHost(now)
 	return rs
 }
 
 // electHost makes the human with the lowest slot still in the race the AI host (nil without AI or humans).
-func (rs *raceState) electHost() {
+func (rs *raceState) electHost(now time.Time) {
 	rs.aiHost = nil
 	if !rs.hasAI {
 		return
 	}
 	for _, s := range rs.seats {
 		if !s.ai && !s.out {
-			rs.aiHost = s
+			rs.setHost(s, now)
 			return
 		}
 	}
+}
+
+// setHost makes s the AI host; its silence counts from now.
+func (rs *raceState) setHost(s *seat, now time.Time) {
+	rs.aiHost, rs.aiHeard = s, now
 }
 
 // aiHostSlot is RaceSetup.aiHost: the host's slot, NoSlot without one.
@@ -186,6 +197,30 @@ func (rs *raceState) aiHostSlot() uint8 {
 		return proto.NoSlot
 	}
 	return rs.aiHost.slot
+}
+
+// announceHost tells every racer the new AI host, which took over from previous (left or silent: why).
+func (rs *raceState) announceHost(previous *seat, why string) {
+	rs.log.Info("new AI host", "slot", rs.aiHost.slot, "account", rs.aiHost.racer.AccountID, "previous",
+		previous.slot, "why", why)
+	rs.pushAll(proto.PushAiHost, &proto.AiHost{RaceID: rs.id, Slot: rs.aiHost.slot}, nil)
+}
+
+// tickAIHost replaces an AI host whose AiStates stopped while its control connection lives on (a hung game, a broken
+// UDP path): every other racer draws the AI karts from those states. Without a human whose own states still arrive
+// the host stays.
+func (rs *raceState) tickAIHost(now time.Time) {
+	if rs.aiHost == nil || now.Before(rs.goAt) || now.Sub(rs.aiHeard) < aiHostSilence {
+		return
+	}
+	for _, s := range rs.seats {
+		if !s.ai && !s.out && s != rs.aiHost && s.hasState && now.Sub(s.stateAt) <= aiHostFresh {
+			previous := rs.aiHost
+			rs.setHost(s, now)
+			rs.announceHost(previous, "silent")
+			return
+		}
+	}
 }
 
 // kart resolves the slot field of a kart notify from s: OwnSlot is s's own kart, an AI slot counts only from the AI
@@ -447,11 +482,9 @@ func (rs *raceState) leave(s *seat, outcome Outcome, message string, now time.Ti
 	s.held, s.charges = "", 0
 	rs.env.dropSeat(s)
 	if s == rs.aiHost {
-		rs.electHost()
+		rs.electHost(now)
 		if rs.aiHost != nil {
-			rs.log.Info("new AI host", "slot", rs.aiHost.slot, "account", rs.aiHost.racer.AccountID, "previous",
-				s.slot)
-			rs.pushAll(proto.PushAiHost, &proto.AiHost{RaceID: rs.id, Slot: rs.aiHost.slot}, nil)
+			rs.announceHost(s, "left")
 		}
 	}
 	if rs.phase == phaseLoading {
@@ -508,7 +541,7 @@ func (rs *raceState) deny(s, k *seat, box uint16, reason uint8, why string, args
 }
 
 // onPickup arbitrates a box pickup of the sender's kart or, from the AI host, of an AI kart. AI pickups have no
-// distance check (the server has no AI positions) and never strike; their grant goes to every racer.
+// distance check (their host is trusted with them) and never strike; their grant goes to every racer.
 func (rs *raceState) onPickup(s *seat, m *proto.ItemPickup, now time.Time) {
 	k := rs.kart(s, m.Slot)
 	if k == nil {
@@ -1070,7 +1103,7 @@ func (rs *raceState) onState(s *seat, payload []byte, now time.Time) {
 	if !s.hasState {
 		rs.debug("kart states arriving", s, "tick", s.state.Tick, "pos", s.state.Pos, "lap", s.state.Lap)
 	}
-	s.stateBad, s.hasState = false, true
+	s.stateBad, s.hasState, s.stateAt = false, true, now
 	s.stateRaw = append(s.stateRaw[:0], payload[:len(payload)-r.Remaining()]...)
 	if !rs.arbitrated() || r.Remaining() == 0 {
 		return
@@ -1087,25 +1120,37 @@ func (rs *raceState) onState(s *seat, payload []byte, now time.Time) {
 	}
 }
 
-// onAiProgress stores the AI host's report of its AI karts (UDP AiProgress): lap, raceDistance and health feed
-// item rolls, DNF ranking and battle survivor ranking. Datagrams from anybody else are ignored.
-func (rs *raceState) onAiProgress(s *seat, payload []byte, now time.Time) {
+// onAiStates stores the AI host's states of its AI karts (UDP AiStates): World relays them to every other human, and
+// their lap, raceDistance and health feed item rolls, DNF ranking and battle survivor ranking. Datagrams from anybody
+// else are ignored.
+func (rs *raceState) onAiStates(s *seat, payload []byte, now time.Time) {
 	if s != rs.aiHost || s.out || rs.phase == phaseEnded {
 		return
 	}
-	if err := rs.progress.Decode(wire.NewReader(payload)); err != nil {
-		rs.debug("malformed AI progress", s, "err", err, "len", len(payload))
-		return
-	}
-	for _, e := range rs.progress.Entries {
-		if k := rs.seatAt(e.Slot); k != nil && k.ai {
-			k.state.Lap, k.state.RaceDistance, k.state.Health = e.Lap, e.RaceDistance, e.Health
+	r := wire.NewReader(payload)
+	n := int(r.U8())
+	for range n {
+		slot := r.U8()
+		start := len(payload) - r.Remaining()
+		if err := rs.aiScratch.Decode(r); err != nil {
+			rs.debug("malformed AI states", s, "err", err, "len", len(payload))
+			return
 		}
+		k := rs.seatAt(slot)
+		if k == nil || !k.ai {
+			continue
+		}
+		effects := k.state.Effects
+		k.state = rs.aiScratch
+		k.state.Effects = append(effects[:0], rs.aiScratch.Effects...)
+		k.hasState = true
+		k.stateRaw = append(k.stateRaw[:0], payload[start:len(payload)-r.Remaining()]...)
 	}
+	rs.aiHeard = now
 }
 
-// world sends every human with a known address the other humans' latest states, splitting at the datagram limit.
-// AI karts have no address and no state: every client simulates them itself.
+// world sends every human with a known address the latest states of the other humans and, except to the AI host
+// (which simulates them), of the AI karts, splitting at the datagram limit.
 func (rs *raceState) world(now time.Time) {
 	for _, to := range rs.seats {
 		if to.ai || to.out {
@@ -1117,7 +1162,7 @@ func (rs *raceState) world(now time.Time) {
 		}
 		countAt := -1 // offset of the entry count of the datagram being built, -1 = none
 		for _, o := range rs.seats {
-			if o == to || o.out || !o.hasState {
+			if o == to || o.out || !o.hasState || (o.ai && to == rs.aiHost) {
 				continue
 			}
 			entry := 1 + 2 + len(o.stateRaw)
@@ -1163,6 +1208,7 @@ func (rs *raceState) tick(now time.Time) {
 			rs.maybeDecideLoad(now)
 		}
 	case phaseRacing:
+		rs.tickAIHost(now)
 		rs.world(now)
 		rs.tickHits(now)
 		rs.tickProjectiles(now)
@@ -1242,8 +1288,8 @@ func (rs *raceState) end(now time.Time) {
 	rs.env.finished(rs.id, placements)
 }
 
-// placements orders every kart, AI included: race mode finishers by time, then DNF by distance (AI: from
-// AiProgress); battles survivors by health, then eliminated karts by reverse elimination order (both count as
+// placements orders every kart, AI included: race mode finishers by time, then DNF by distance (AI: from the AI
+// host's AiStates); battles survivors by health, then eliminated karts by reverse elimination order (both count as
 // finished, FinishMs = time survived); racers that left last, latest leaver first.
 func (rs *raceState) placements(now time.Time) []Placement {
 	var stayed, gone []*seat

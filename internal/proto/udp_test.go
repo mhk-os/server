@@ -161,7 +161,7 @@ func TestRaceMessagesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRaceMessageBytes pins the v2 layouts of the race messages (the C# codec tests assert the same hex).
+// TestRaceMessageBytes pins the v3 layouts of the race messages (the C# codec tests assert the same hex).
 func TestRaceMessageBytes(t *testing.T) {
 	key := bytes.Repeat([]byte{7}, UDPKeySize)
 	setup := RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "t", Mode: 0, EngineClass: 2, Laps: 3, Items: true,
@@ -178,6 +178,7 @@ func TestRaceMessageBytes(t *testing.T) {
 		"01", "b61c", "4200000000000000", "20" + strings.Repeat("07", 32), // yourSlot, udpPort, udpToken, udpKey
 		"01", "04", // setRace, setSize
 	}, ""))
+	aiPose := "03000000" + strings.Repeat("00", 12) + "000000000000ff7f" + strings.Repeat("00", 6) + "000000" // tick … steer
 	for _, c := range []struct {
 		m   Message
 		hex string
@@ -197,18 +198,16 @@ func TestRaceMessageBytes(t *testing.T) {
 			"0100000000000000" + "60ea0000" + "01" + "204e0000" + "100e0000" + "01"},
 		{&EliminatedSelf{RaceID: 1, AttackerSlot: NoSlot, Tick: 9, Slot: 2},
 			"0100000000000000" + "ff" + "09000000" + "02"},
-		{&UDPAiProgressPayload{Entries: []AiProgressEntry{{Slot: 0, Lap: 2, RaceDistance: 1234.5, Health: 100},
-			{Slot: 3, Lap: 1, RaceDistance: 0.5, Health: 0}}},
-			"02" + "00" + "02" + "00509a44" + "64" + "03" + "01" + "0000003f" + "00"},
+		{&UDPAiStatesPayload{Entries: []AiStateEntry{
+			{Slot: 0, State: KartState{Tick: 3, Rot: [4]int16{0, 0, 0, 32767}, Lap: 2, RaceDistance: 1234.5, Health: 100}},
+			{Slot: 3, State: KartState{Tick: 3, Rot: [4]int16{0, 0, 0, 32767}, Lap: 1, RaceDistance: 0.5,
+				Effects: []uint16{1}}}}},
+			"02" + "00" + aiPose + "02" + "00509a44" + "64" + "00" + "03" + aiPose + "01" + "0000003f" + "00" + "01" + "0100"},
 	} {
 		pinHex(t, c.m, c.hex)
 	}
-	var p UDPAiProgressPayload
-	if err := p.Decode(wire.NewReader([]byte{2, 0, 2, 0, 0, 0, 0, 1})); err == nil {
-		t.Fatal("truncated AiProgress accepted")
-	}
-	nan := []byte{1, 0, 1, 0, 0, 0xc0, 0x7f, 0}
-	if err := p.Decode(wire.NewReader(nan)); err == nil {
-		t.Fatal("NaN raceDistance accepted")
+	var p UDPAiStatesPayload
+	if err := p.Decode(wire.NewReader([]byte{2, 0, 3, 0, 0, 0})); err == nil {
+		t.Fatal("truncated AiStates accepted")
 	}
 }

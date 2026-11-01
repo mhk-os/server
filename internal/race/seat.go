@@ -9,8 +9,8 @@ import (
 )
 
 // seat is one kart's place in a race. Fields are owned by the race goroutine unless marked otherwise. AI seats
-// (ai true) have no account, token, key or address: the AI host reports for them, AiProgress fills their state's
-// lap, raceDistance and health, and they never load, leave, get struck or count as observers.
+// (ai true) have no account, token, key or address: the AI host reports for them, its AiStates fill their state, and
+// they never load, leave, get struck or count as observers.
 type seat struct {
 	slot  uint8
 	ai    bool
@@ -55,6 +55,8 @@ type seat struct {
 	stateBad bool // the latest State datagram did not decode
 	state    proto.KartState
 	stateRaw []byte // the KartState bytes as received, relayed verbatim in World
+	// When the latest valid State arrived: a silent AI host hands over to a human whose states still arrive.
+	stateAt time.Time
 
 	held      string // powerup id, "" = none
 	charges   uint8

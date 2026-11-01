@@ -215,10 +215,11 @@ func (b *bot) handOverAI(ctx context.Context, raceID uint64) error {
 	return err
 }
 
-// warnAIHost: a bot never reports for the AI karts (it simulates none), so while it hosts they take no items and
-// never finish (DNF). Retry the race until a game client has the lowest human slot.
+// warnAIHost: a bot never simulates the AI karts (it sends no AiStates), so the server hands them to a game client 2 s
+// after GO; with bots only they stand still, take no items and never finish (DNF).
 func (b *bot) warnAIHost(raceID uint64) {
-	b.log.Warn("this bot is the AI host: the AI karts will not pick up items or finish", "race", raceID)
+	b.log.Warn("this bot is the AI host: the AI karts stand still until the server hands them to a game client",
+		"race", raceID)
 }
 
 func (b *bot) onLobbyState(ctx context.Context, st *proto.LobbyState) {

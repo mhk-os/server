@@ -355,15 +355,15 @@ func (e *Engine) readUDP() {
 			pong = binary.LittleEndian.AppendUint64(pong, uint64(now.UnixMilli()))
 			pong = s.pongMac.Seal(pong)
 			e.cfg.UDP.WriteToUDPAddrPort(pong, addr)
-		case proto.UDPState, proto.UDPAiProgress:
+		case proto.UDPState, proto.UDPAiStates:
 			if !s.replay.accept(h.Seq, true) {
 				continue
 			}
 			e.learnAddr(ref, addr)
 			select {
 			case ref.run.states <- stateIn{seat: s, payload: bytes.Clone(payload), at: now,
-				ai: h.Type == proto.UDPAiProgress}:
-			default: // the race is behind; a newer datagram follows within 33 ms (AiProgress: 100 ms)
+				ai: h.Type == proto.UDPAiStates}:
+			default: // the race is behind; a newer datagram follows within 33 ms
 			}
 		}
 	}
@@ -393,7 +393,7 @@ type stateIn struct {
 	seat    *seat
 	payload []byte
 	at      time.Time
-	ai      bool // AiProgress, else State
+	ai      bool // AiStates, else State
 }
 
 func (r *runner) call(f func(time.Time)) {
@@ -421,7 +421,7 @@ func (r *runner) loop() {
 			f(time.Now())
 		case in := <-r.states:
 			if in.ai {
-				r.rs.onAiProgress(in.seat, in.payload, in.at)
+				r.rs.onAiStates(in.seat, in.payload, in.at)
 			} else {
 				r.rs.onState(in.seat, in.payload, in.at)
 			}

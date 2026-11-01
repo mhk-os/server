@@ -163,9 +163,9 @@ func (b *UDPBot) SendState() error {
 	return b.send(proto.UDPState, p)
 }
 
-// SendAiProgress sends one AiProgress datagram (as the AI host) about the given AI karts.
-func (b *UDPBot) SendAiProgress(entries ...proto.AiProgressEntry) error {
-	return b.send(proto.UDPAiProgress, &proto.UDPAiProgressPayload{Entries: entries})
+// SendAiStates sends one AiStates datagram (as the AI host) with the given AI karts' states.
+func (b *UDPBot) SendAiStates(entries ...proto.AiStateEntry) error {
+	return b.send(proto.UDPAiStates, &proto.UDPAiStatesPayload{Entries: entries})
 }
 
 func (b *UDPBot) readLoop() {

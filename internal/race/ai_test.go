@@ -12,11 +12,16 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// aiProgress feeds an AiProgress payload from s.
-func aiProgress(rs *raceState, s *seat, entries ...proto.AiProgressEntry) {
+// aiStates feeds an AiStates payload from s.
+func aiStates(rs *raceState, s *seat, entries ...proto.AiStateEntry) {
 	w := wire.NewWriter(64)
-	(&proto.UDPAiProgressPayload{Entries: entries}).Encode(w)
-	rs.onAiProgress(s, w.Bytes(), t0)
+	(&proto.UDPAiStatesPayload{Entries: entries}).Encode(w)
+	rs.onAiStates(s, w.Bytes(), t0)
+}
+
+// aiState is the AiStates entry of AI slot slot.
+func aiState(slot uint8, st proto.KartState) proto.AiStateEntry {
+	return proto.AiStateEntry{Slot: slot, State: st}
 }
 
 func TestAIHostElection(t *testing.T) {
@@ -72,6 +77,44 @@ func TestAIHostElection(t *testing.T) {
 	rs, _, _ = newTestRace(3, Spec{})
 	if rs.aiHost != nil || rs.aiHostSlot() != proto.NoSlot {
 		t.Fatal("host without AI")
+	}
+}
+
+// A host whose AiStates stop for 2 s after GO hands the AI karts to the lowest human whose own states still arrive;
+// the new host gets the same grace, and without such a human the silent host stays.
+func TestAIHostSilence(t *testing.T) {
+	rs, env, _ := newAIRace(2, 3, Spec{})
+	goAt := startRace(t, rs)
+	host, next := rs.seats[2], rs.seats[4]
+	state := func(s *seat, at time.Time) {
+		w := wire.NewWriter(64)
+		(&proto.UDPStatePayload{}).Encode(w)
+		rs.onState(s, w.Bytes(), at)
+	}
+	w := wire.NewWriter(64)
+	(&proto.UDPAiStatesPayload{Entries: []proto.AiStateEntry{aiState(0, proto.KartState{Tick: 60})}}).Encode(w)
+	heard := goAt.Add(time.Second)
+	rs.onAiStates(host, w.Bytes(), heard)
+	// Slot 3's states stopped long ago, slot 4's still arrive.
+	state(rs.seats[3], t0)
+	state(next, heard.Add(aiHostSilence))
+	rs.tick(heard.Add(aiHostSilence - time.Millisecond))
+	if rs.aiHost != host || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("host replaced before its silence")
+	}
+	rs.tick(heard.Add(aiHostSilence))
+	h := env.of(0, proto.PushAiHost)
+	if rs.aiHost != next || len(h) != 3 || h[0].(*proto.AiHost).Slot != 4 {
+		t.Fatalf("silent host: AiHost pushes %v, host %d", h, rs.aiHostSlot())
+	}
+	env.reset()
+	rs.tick(heard.Add(2*aiHostSilence - time.Millisecond))
+	if rs.aiHost != next || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("new host replaced within its grace")
+	}
+	rs.tick(heard.Add(10 * aiHostSilence))
+	if rs.aiHost != next || len(env.of(0, proto.PushAiHost)) != 0 {
+		t.Fatal("silent host replaced by a human whose states stopped too")
 	}
 }
 
@@ -204,18 +247,18 @@ func TestAIUseHitsAndProjectiles(t *testing.T) {
 	}
 }
 
-func TestAIProgressRankingAndPlacements(t *testing.T) {
+func TestAIStatesRankingAndPlacements(t *testing.T) {
 	rs, env, _ := newAIRace(2, 2, Spec{Items: true})
 	goAt := startRace(t, rs)
 	host, other := rs.seats[2], rs.seats[3]
 	setState(rs, host, proto.KartState{RaceDistance: 500})
 	setState(rs, other, proto.KartState{RaceDistance: 100})
-	aiProgress(rs, host, proto.AiProgressEntry{Slot: 0, Lap: 2, RaceDistance: 900, Health: 50},
-		proto.AiProgressEntry{Slot: 1, Lap: 1, RaceDistance: 300}, proto.AiProgressEntry{Slot: 3, RaceDistance: 9999},
-		proto.AiProgressEntry{Slot: 40, RaceDistance: 1})
+	aiStates(rs, host, aiState(0, proto.KartState{Lap: 2, RaceDistance: 900, Health: 50}),
+		aiState(1, proto.KartState{Lap: 1, RaceDistance: 300}), aiState(3, proto.KartState{RaceDistance: 9999}),
+		aiState(40, proto.KartState{RaceDistance: 1}))
 	if rs.seats[0].state.RaceDistance != 900 || rs.seats[0].state.Lap != 2 || rs.seats[0].state.Health != 50 ||
-		other.state.RaceDistance != 100 || rs.seats[0].hasState {
-		t.Fatal("AiProgress not applied to AI seats only")
+		other.state.RaceDistance != 100 || !rs.seats[0].hasState {
+		t.Fatal("AiStates not applied to AI seats only")
 	}
 	// Ranking: AI 0 (900), host (500), AI 1 (300), other (100).
 	for slot, want := range []float64{0, 2.0 / 3, 1.0 / 3, 1} {
@@ -223,10 +266,10 @@ func TestAIProgressRankingAndPlacements(t *testing.T) {
 			t.Fatalf("slot %d fraction %v, want %v", slot, got, want)
 		}
 	}
-	// Progress from anybody but the host is ignored.
-	aiProgress(rs, other, proto.AiProgressEntry{Slot: 1, RaceDistance: 2000})
+	// States from anybody but the host are ignored.
+	aiStates(rs, other, aiState(1, proto.KartState{RaceDistance: 2000}))
 	if rs.seats[1].state.RaceDistance != 300 {
-		t.Fatal("non-host AiProgress applied")
+		t.Fatal("non-host AiStates applied")
 	}
 	// An AI finish the server cannot believe is taken at its clock, without a strike; everybody hears it.
 	at := goAt.Add(60 * time.Second)
@@ -270,9 +313,9 @@ func TestAIBattle(t *testing.T) {
 	rs, env, _ := newAIRace(2, 2, Spec{Mode: ModeBattle})
 	goAt := startRace(t, rs)
 	host := rs.seats[2]
-	aiProgress(rs, host, proto.AiProgressEntry{Slot: 0, Health: 3}, proto.AiProgressEntry{Slot: 1, Health: 7})
+	aiStates(rs, host, aiState(0, proto.KartState{Health: 3}), aiState(1, proto.KartState{Health: 7}))
 	setState(rs, host, proto.KartState{Health: 5})
-	// AI karts never get the silent-zero-health treatment (they have no states).
+	// AI karts never get the silent-zero-health treatment (their host reports their eliminations).
 	rs.tick(goAt.Add(time.Second))
 	rs.tick(goAt.Add(4 * time.Second))
 	if rs.seats[0].eliminated || rs.seats[1].eliminated {
@@ -286,7 +329,7 @@ func TestAIBattle(t *testing.T) {
 	if e := env.of(0, proto.PushEliminated); len(e) != 2 || e[0].(*proto.Eliminated).Slot != 0 {
 		t.Fatalf("AI Eliminated %v", e)
 	}
-	// No human alive ends the battle while an AI kart still drives; survivors rank by health (AI from AiProgress).
+	// No human alive ends the battle while an AI kart still drives; survivors rank by health (AI from AiStates).
 	rs.onEliminatedSelf(rs.seats[3], &proto.EliminatedSelf{AttackerSlot: 1, Slot: proto.OwnSlot}, goAt.Add(6*time.Second))
 	if env.finishedN != 0 {
 		t.Fatal("ended with a human alive")
@@ -333,17 +376,18 @@ func fiftyKarts(t testing.TB, ai int) (*raceState, *fakeEnv) {
 		s.addr.Store(&addr)
 	}
 	if ai > 0 {
-		entries := make([]proto.AiProgressEntry, ai)
+		entries := make([]proto.AiStateEntry, ai)
 		for i := range entries {
-			entries[i] = proto.AiProgressEntry{Slot: uint8(i), Lap: 1, RaceDistance: float32(i), Health: 100}
+			entries[i] = aiState(uint8(i), proto.KartState{Tick: 100, Pos: proto.Vec3{float32(i), 1, 2}, Lap: 1,
+				RaceDistance: float32(i), Health: 100, Effects: []uint16{1, 2, 3}})
 		}
-		aiProgress(rs, rs.aiHost, entries...)
+		aiStates(rs, rs.aiHost, entries...)
 	}
 	return rs, env
 }
 
-// TestWorldFiftyRacers: with 50 humans every World datagram fits 1200 bytes and each racer gets all 49 others;
-// with 48 AI karts the two humans get one entry each and nothing is sent for AI.
+// TestWorldFiftyRacers: with 50 humans every World datagram fits 1200 bytes and each racer gets all 49 others; with
+// 48 AI karts the AI host gets the other human's state and the other human gets the host's and every AI kart's.
 func TestWorldFiftyRacers(t *testing.T) {
 	for _, ai := range []int{0, 48} {
 		rs, env := fiftyKarts(t, ai)
@@ -367,8 +411,11 @@ func TestWorldFiftyRacers(t *testing.T) {
 				got[env.udpTo[i]] = map[uint8]bool{}
 			}
 			for _, e := range w.Entries {
-				if rs.seats[e.Slot].ai || e.Slot == to.slot || got[env.udpTo[i]][e.Slot] {
+				if (rs.seats[e.Slot].ai && to == rs.aiHost) || e.Slot == to.slot || got[env.udpTo[i]][e.Slot] {
 					t.Fatalf("entry for slot %d to slot %d", e.Slot, to.slot)
+				}
+				if e.State.Tick != 100 || len(e.State.Effects) != 3 {
+					t.Fatalf("entry for slot %d: %+v", e.Slot, e.State)
 				}
 				got[env.udpTo[i]][e.Slot] = true
 			}
@@ -378,8 +425,12 @@ func TestWorldFiftyRacers(t *testing.T) {
 			t.Fatalf("%d AI: %d receivers", ai, len(got))
 		}
 		for port, slots := range got {
-			if len(slots) != humans-1 {
-				t.Fatalf("%d AI: receiver %d got %d states", ai, port-1000, len(slots))
+			want := proto.MaxRacers - 1
+			if rs.seats[port-1000] == rs.aiHost {
+				want = humans - 1
+			}
+			if len(slots) != want {
+				t.Fatalf("%d AI: receiver %d got %d states, want %d", ai, port-1000, len(slots), want)
 			}
 		}
 		t.Logf("%d AI: %d datagrams per World tick", ai, len(env.datagrams))
@@ -405,7 +456,7 @@ func BenchmarkTick(b *testing.B) {
 	}
 }
 
-// An AI kart's projectile flies in every client's own copy of the race: far reports are corrected, never struck.
+// An AI kart's projectile: far reports are corrected, never struck.
 func TestAIProjectileOutliersNotStruck(t *testing.T) {
 	rs, env, _ := newAIRace(1, 4, Spec{Items: true, Anticheat: true})
 	goAt := startRace(t, rs)

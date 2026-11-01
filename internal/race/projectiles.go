@@ -99,8 +99,7 @@ func (rs *raceState) tickProjectiles(now time.Time) {
 			rs.pushAll(proto.PushProjectileCorrect, &proto.ProjectileCorrect{RaceID: rs.id, UseID: useID,
 				Tick: res.tick, Pos: res.pos, Vel: res.vel}, nil)
 		}
-		// An AI kart's projectile flies in every client's own copy of the race (AI karts diverge by design): its
-		// reports are corrected towards the median but a far one is never a strike.
+		// An AI kart's projectile: its reports are corrected towards the median but a far one is never a strike.
 		if rs.seats[u.owner].ai {
 			continue
 		}

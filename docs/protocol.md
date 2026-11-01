@@ -93,7 +93,7 @@ Must be the first request of a connection; anything else first closes the connec
 | Field | Type | |
 | ------- | ------ | - |
 | magic | u32 | `0x4F4B484D` (bytes `M H K O`) |
-| protocol | u16 | **2** |
+| protocol | u16 | **3** |
 | gameCommit | string ≤ 40 | `BuildInfo.Commit` |
 | gameBuild | i32 | `BuildInfo.Number` |
 | contentVersion | i32 | `ContentVersion.Current` |
@@ -543,8 +543,9 @@ accounts. `reason` is shown to the affected player where applicable.
 
 - Up to **50 players** per lobby and up to **50 karts** per race: the humans plus AI drivers (see "AI drivers").
   Every client simulates its **own kart** (client authority over its own motion) and renders the other humans from
-  UDP snapshots; every client simulates every AI kart itself. Kart-vs-kart contacts are resolved by each client
-  against kinematic stand-ins of the other humans.
+  UDP snapshots; one human's client, the AI host, simulates the AI karts and the others render them from its snapshots
+  too. Kart-vs-kart contacts are resolved by each client against kinematic stand-ins of the karts it does not
+  simulate.
 - The server decides everything that has a single truth: lobby phases, which track, the GO instant, the AI drivers,
   item box pickups and item rolls, which items a racer (human or AI) holds, hit arbitration, finish order, points,
   kicks.
@@ -685,27 +686,33 @@ runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`
 - **Grid**: AI karts take the front of the grid (slots 0…n−1 in driver order), the humans follow in join order
   shuffled. `RaceSlot.ai` marks AI slots: `accountId` 0, `username` `""` (clients show the character's name),
   `country` `""`, `platform` 0.
-- **Simulation**: every client simulates every AI kart locally with its normal AI driver. AI positions are never
-  streamed between clients (only the AI host tells the server their progress, UDP `AiProgress`); clients' AI karts
-  diverge and that is accepted: plausibility checks, cheat reports, hit claims, unknown-content reports and server
-  strikes never concern an AI slot.
-- **AI host**: one racer reports for every AI kart: the human with the lowest grid slot still in the race
-  (`RaceSetup.aiHost`; when the host leaves the race the server elects the next one and pushes `AiHost`; finishing or
-  being eliminated does not end hosting). The host's client sends the AI karts' item box pickups (`ItemPickup`), item
-  uses (`ItemUse`, use id `(aiSlot + 1) << 24 | n`, n counted per AI slot), hits taken (`HitTaken`), battle
-  eliminations (`EliminatedSelf`), finishes (`Finished`) and the end of their projectiles (`ProjectileGone`), each
-  with the AI kart's slot in the notify's `slot` field, and their progress (`AiProgress`, 10 Hz). Such notifies from
-  anybody else, or naming a human's slot, are ignored. The server arbitrates them like a human's (box availability,
-  held item, roulette cooldown; no pickup distance check: it has no AI positions; never a strike; finish times it
+- **Simulation**: the AI host's client (see below) simulates every AI kart with its normal AI driver and streams
+  their states (UDP `AiStates`, 30 Hz, the `KartState` a human sends of its own kart); the server relays them in
+  `World` to every other human, whose clients draw the AI karts like the other humans' karts (interpolated, about
+  100 ms behind), so every racer sees the same AI race. The server takes the AI karts' lap, `raceDistance` and health
+  from those states. Plausibility checks, cheat reports, hit claims, unknown-content reports and server strikes never
+  concern an AI slot.
+- **AI host**: one racer simulates and reports for every AI kart: the human with the lowest grid slot still in the
+  race (`RaceSetup.aiHost`). When the host leaves the race, or its `AiStates` stop for **2 s** after GO while another
+  human's own states still arrive (the lowest such slot whose latest `State` is at most 1 s old), the server elects
+  the next one and pushes `AiHost`; finishing or being eliminated does not end hosting. The host's client sends the AI
+  karts' states (`AiStates`), item box pickups (`ItemPickup`), item uses (`ItemUse`, use id `(aiSlot + 1) << 24 | n`,
+  n counted per AI slot), hits taken (`HitTaken`), battle eliminations (`EliminatedSelf`), finishes (`Finished`) and
+  the end of their projectiles (`ProjectileGone`), each notify with the AI kart's slot in its `slot` field. Such
+  datagrams and notifies from anybody else, or naming a human's slot, are ignored. The server arbitrates them like a
+  human's (box availability, held item, roulette cooldown; no pickup distance check; never a strike; finish times it
   cannot believe are replaced by its clock) and broadcasts the outcome: `ItemGranted` (with the AI slot) to every
   racer, `ItemDenied` to the host, `ItemUsed` and `HitApplied` to everyone but the host, `PlayerFinished` and
   `Eliminated` to everyone.
-- **Replay**: every client applies those events to its own AI kart of that slot: `ItemGranted` puts the item into
-  its inventory (the box is taken), `ItemUsed` spawns the use from the reported pose and spends a charge,
-  `HitApplied` applies the effect, `Eliminated` takes the kart out of the battle, `PlayerFinished` finishes it with
-  the reported time when it still drives. On clients that are not the host, AI drivers never take boxes, use items or
-  take hits from item uses by themselves; track hazards and zones act on every client's AI karts locally, so a
-  `HitApplied` with `useId` 0 for an AI slot is not replayed. A new host goes on from its own AI karts.
+- **Replay**: on every other client an AI kart follows the host's states and never takes boxes, uses items or takes
+  hits by itself (track hazards and zones act on the host's AI karts only); those events reach it from the server:
+  `ItemGranted` puts the item into its inventory (the box is taken), `ItemUsed` spawns the use from the reported pose
+  and spends a charge, `HitApplied` shows the effect, `Eliminated` takes the kart out of the battle, `PlayerFinished`
+  finishes it with the reported time when it still drives.
+- **Takeover**: a new host simulates the AI karts on from where it draws them, with the inventories it replayed, and
+  numbers an AI kart's next uses on from the highest n it saw in that kart's `ItemUsed` (the server rejects a reused
+  use id); it first sends the finishes the old host never sent. A client that stops hosting (replaced while silent)
+  follows the new host's states.
 - **Results**: AI rows rank with the humans (`RaceResultRow.ai`, `accountId` 0, `username` `""`, `characterId`),
   earn position points and set points like humans (kept in `LobbyState.aiDrivers`); account score is for humans only
   (see "Profiles and score").
@@ -934,7 +941,7 @@ their pack commit equals the majority's, get a content strike. A racer that did 
 leaves the race. The server then sends `RaceGo` with GO = now + 3.5 s.
 
 Item roll: position fraction f = (position − 1) / (karts − 1) over every kart still in the race, AI included,
-ranked by the latest `raceDistance`s (humans from their states, AI from `AiProgress`; finished karts in finish
+ranked by the latest `raceDistance`s (humans from their states, AI from `AiStates`; finished karts in finish
 order; battles and single karts use 0.5); weight = linear interpolation of the 11 weights at f; a weighted random
 draw (server RNG) among entries with weight > 0. `@special` boxes grant the slot's special powerup (random draw when
 it has none).
@@ -959,8 +966,8 @@ datagrams (latest valid one wins).
 | 1 Ping | c → s | `clientTime: time`, `echoServerTime: time` (`serverTime` of the newest Pong received, 0 = none yet), `echoHoldMs: u16` (ms between receiving that Pong and sending this Ping, clamped to 65535). Sent 4×/s during loading and races; doubles as keepalive. The server's RTT sample = receive time − `echoServerTime` − `echoHoldMs` (ignored when the echo is 0, in the future or older than 5 s), smoothed with EWMA α = 1/8; it feeds `World.rttMs` and eligibility |
 | 2 Pong | s → c | `clientTime: time`, `serverTime: time` |
 | 3 State | c → s | `KartState`, `reports: u8 n` + n × `ProjectileReport` (as many as fit the datagram; the rest go with the next state) |
-| 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other human racer; split over as many World datagrams as needed, each a whole entry list with its own `seq`) |
-| 5 AiProgress | c → s | `n: u8` + n × (`slot: u8`, `lap: u8`, `raceDistance: f32`, `health: u8`): the AI host's AI karts (10 Hz, as many as fit, the rest in the next datagram); ignored from anybody else. Feeds item rolls, DNF ranking and battle survivor ranking |
+| 4 World | s → c | `serverTime: time`, `n: u8` + n × (`slot: u8`, `rttMs: u16`, `KartState`) (30 Hz, latest state of every other human racer and, except to the AI host, of every AI kart (`rttMs` 0); split over as many World datagrams as needed, each a whole entry list with its own `seq`) |
+| 5 AiStates | c → s | `n: u8` + n × (`slot: u8`, `KartState`): the AI host's AI karts (30 Hz, as many as fit a datagram, the rest in further ones); ignored from anybody else. Relayed in World; feeds item rolls, DNF ranking and battle survivor ranking |
 
 `KartState` (sent at 30 Hz):
 
@@ -985,8 +992,8 @@ start the race at GO in server time. Ticks are counted locally from GO at 60 Hz;
 100 ms behind the newest received tick.
 
 `useId` = `(slot + 1) << 24 | n` with n the kart's own use counter (1-based) in this race: unique without a
-round trip (AI karts: counted by the AI host per AI slot). A client must not use an item before its `ItemGranted`
-arrived.
+round trip (AI karts: counted by the AI host per AI slot; a new host goes on from the highest n it saw in `ItemUsed`).
+A client must not use an item before its `ItemGranted` arrived.
 
 ### Race rules (server)
 
@@ -1010,7 +1017,7 @@ arrived.
   eliminated, 30 s after the first finisher (human or AI), when no human is left in the race, or after 20 min;
   unfinished karts are DNF, ranked by `raceDistance`. Battles end when ≤ 1 kart is alive (of a battle that started
   with two or more karts: a lone kart battles until the time limit or `EndRaceEarly`), when no human racer is
-  alive, or after 4 min; survivors rank by health (AI: from `AiProgress`).
+  alive, or after 4 min; survivors rank by health (AI: from `AiStates`).
 - **Battles**: the victim reports its own elimination (`EliminatedSelf`; AI karts: the AI host); observers' kart
   states carry health; a human at health 0 in a majority of observers' views for 2 s without `EliminatedSelf` gets a
   strike and is eliminated.
