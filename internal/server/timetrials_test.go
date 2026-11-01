@@ -150,7 +150,8 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	}
 	bd := boards[0]
 	if bd.BoardID != r1.Run.BoardID || bd.TrackID != track || bd.Laps != 3 || bd.EngineClass != 2 ||
-		bd.ContentVersion != 4 || bd.Players != 1 || bd.BestMs != 92_500 || bd.LastUpload.IsZero() {
+		bd.ContentVersion != 4 || bd.Players != 1 || bd.BestMs != 92_500 || bd.LastUpload.IsZero() ||
+		bd.TrackHash != ghosttest.New().Header.TrackHash {
 		t.Fatalf("board %+v", bd)
 	}
 	if bs, _ := a.c.ListBoards(ctx, track, 1, 0); len(bs) != 0 {
@@ -164,37 +165,43 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	if !r2.PersonalBest || r2.Run.Rank != 1 || r2.Run.RunID == r1.Run.RunID || r2.Run.BoardID != bd.BoardID {
 		t.Fatalf("second upload %+v", r2)
 	}
-	r3 := upload(t, a, run(track, kart, 32, 32, 32)) // slower
-	if r3.PersonalBest || r3.Run.Rank != 0 {
+	r3 := upload(t, a, run(track, kart, 32, 32, 32)) // 96.5 s: slower, still ranked
+	if r3.PersonalBest || r3.Run.Rank != 3 {
 		t.Fatalf("slower upload %+v", r3)
 	}
-	upload(t, b, run(track, kart, 31, 31, 30))         // 92.5 s
+	upload(t, b, run(track, kart, 31, 31, 30))         // 92.5 s, after a's 92.5 s
 	rb := upload(t, b, run(track, kart, 30, 30.5, 30)) // 91 s
 	if !rb.PersonalBest || rb.Run.Rank != 2 {
 		t.Fatalf("b's best %+v", rb)
 	}
-	// Another track case and the same identity: same board.
-	g := run(strings.ToUpper(track), kart, 31, 31, 31.2)
-	if res := upload(t, b, g); res.Run.BoardID != bd.BoardID || res.Run.Rank != 0 {
-		t.Fatalf("upper-case track %+v", res)
+	// Another track case and a changed track hash (a mod's racing-line tweak), same identity: same board.
+	const newHash = "0123456789abcdef0123456789abcdef"
+	g := run(strings.ToUpper(track), kart, 31, 31, 31.2) // 93.7 s
+	g.Header.TrackHash = newHash
+	if res := upload(t, b, g); res.Run.BoardID != bd.BoardID || res.Run.Rank != 5 || res.PersonalBest {
+		t.Fatalf("upper-case track, new track hash %+v", res)
 	}
 
+	// Every run is listed: a 90.5, b 91, a 92.5, b 92.5, b 93.7, a 96.5.
 	lb := board(t, a, bd.BoardID, proto.LeaderboardFilter{})
-	wantNames(t, lb, a.name, b.name)
-	if lb.Entries[0].RunID != r2.Run.RunID || lb.Entries[1].RunID != rb.Run.RunID {
-		t.Fatalf("best runs %d %d", lb.Entries[0].RunID, lb.Entries[1].RunID)
+	wantNames(t, lb, a.name, b.name, a.name, b.name, b.name, a.name)
+	if lb.Entries[0].RunID != r2.Run.RunID || lb.Entries[1].RunID != rb.Run.RunID ||
+		lb.Entries[2].RunID != r1.Run.RunID || lb.Entries[5].RunID != r3.Run.RunID {
+		t.Fatalf("runs %+v", lb.Entries)
 	}
 	if lb.Mine == nil || lb.Mine.RunID != r2.Run.RunID || lb.Mine.Rank != 1 {
 		t.Fatalf("mine %+v", lb.Mine)
 	}
 	page, err := connect(t, ts).GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: bd.BoardID, Offset: 1, Limit: 1})
-	if err != nil || page.Total != 2 || len(page.Entries) != 1 || page.Entries[0].Rank != 2 || page.Mine != nil {
+	if err != nil || page.Total != 6 || len(page.Entries) != 1 || page.Entries[0].Rank != 2 || page.Mine != nil {
 		t.Fatalf("page 2 logged out %+v %v", page, err)
 	}
-	page, err = b.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: bd.BoardID, Offset: 5, Limit: 10})
-	if err != nil || page.Total != 2 || len(page.Entries) != 0 || page.Mine == nil || page.Mine.Rank != 2 {
+	page, err = b.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: bd.BoardID, Offset: 10, Limit: 10})
+	if err != nil || page.Total != 6 || len(page.Entries) != 0 || page.Mine == nil ||
+		page.Mine.RunID != rb.Run.RunID || page.Mine.Rank != 2 {
 		t.Fatalf("past the end %+v %v", page, err)
 	}
+
 	_, err = a.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: bd.BoardID, Limit: 0})
 	wantStatus(t, err, proto.StatusBadRequest)
 	_, err = a.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: bd.BoardID, Limit: 101})
@@ -203,8 +210,8 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	wantStatus(t, err, proto.StatusNotFound)
 
 	boards, _ = a.c.ListBoards(ctx, track, proto.AnyEngineClass, proto.AnyContentVersion)
-	if boards[0].Players != 2 || boards[0].BestMs != 90_500 {
-		t.Fatalf("board stats %+v", boards[0])
+	if len(boards) != 1 || boards[0].Players != 2 || boards[0].BestMs != 90_500 || boards[0].TrackHash != newHash {
+		t.Fatalf("board stats %+v", boards)
 	}
 
 	// Duplicates: the owner gets the run back, anybody else Forbidden.
@@ -234,7 +241,8 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	wantStatus(t, err, proto.StatusNotFound)
 
 	mine, err := a.c.MyRuns(ctx, track)
-	if err != nil || len(mine) != 3 || mine[0].RunID != r3.Run.RunID || mine[1].Rank != 1 || mine[2].Rank != 0 {
+	if err != nil || len(mine) != 3 || mine[0].RunID != r3.Run.RunID || mine[0].Rank != 6 || mine[1].Rank != 1 ||
+		mine[2].Rank != 3 {
 		t.Fatalf("my runs %+v %v", mine, err)
 	}
 	if other, _ := a.c.MyRuns(ctx, uniqueID("none")); len(other) != 0 {
@@ -400,19 +408,23 @@ func TestLeaderboardFilters(t *testing.T) {
 		boardID = upload(t, p, g).Run.BoardID
 		ps = append(ps, p)
 	}
-	// The DE player also has a slower run with kart Y.
+	// The DE player also has a slower run with kart Y: listed too, after everybody's faster run.
 	upload(t, ps[0], run(track, kartY, 35, 35, 35))
 
-	wantNames(t, board(t, ps[0], boardID, proto.LeaderboardFilter{}), ps[0].name, ps[1].name, ps[2].name, ps[3].name)
+	lb := board(t, ps[0], boardID, proto.LeaderboardFilter{})
+	wantNames(t, lb, ps[0].name, ps[1].name, ps[2].name, ps[3].name, ps[0].name)
+	if lb.Mine == nil || lb.Mine.FinishMs != 90_500 || lb.Mine.Rank != 1 {
+		t.Fatalf("mine is not the best run %+v", lb.Mine)
+	}
 	wantNames(t, board(t, ps[0], boardID, proto.LeaderboardFilter{Username: strings.ToUpper(ps[1].name[2:9])}),
 		ps[1].name)
 	wantNames(t, board(t, ps[0], boardID, proto.LeaderboardFilter{Username: "%"}))
 	// "_" is a literal character, not a LIKE wildcard: only names containing "n_" match.
-	lb := board(t, ps[0], boardID, proto.LeaderboardFilter{Username: "N_"})
-	wantNames(t, lb, ps[0].name)
+	lb = board(t, ps[0], boardID, proto.LeaderboardFilter{Username: "N_"})
+	wantNames(t, lb, ps[0].name, ps[0].name)
 	wantNames(t, board(t, ps[0], boardID, proto.LeaderboardFilter{Country: "US"}), ps[2].name)
 	lb = board(t, ps[3], boardID, proto.LeaderboardFilter{Continent: "EU"})
-	wantNames(t, lb, ps[0].name, ps[1].name)
+	wantNames(t, lb, ps[0].name, ps[1].name, ps[0].name)
 	if lb.Mine != nil {
 		t.Fatalf("JP player in the EU list: %+v", lb.Mine)
 	}

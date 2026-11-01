@@ -261,11 +261,11 @@ func TestDeleteAccountAnonymizesRuns(t *testing.T) {
 
 	anon := anonymousOwner(t, ts, fast.Run.RunID, p.acct.ID)
 	lb := board(t, q, boardID, proto.LeaderboardFilter{})
-	wantNames(t, lb, "Anonymous", q.name)
+	wantNames(t, lb, "Anonymous", q.name, "Anonymous")
 	if e := lb.Entries[0]; e.RunID != fast.Run.RunID || e.AccountID != anon.ID || e.Country != "" {
 		t.Fatalf("anonymous row %+v", e)
 	}
-	wantNames(t, board(t, q, boardID, proto.LeaderboardFilter{Username: "anon"}), "Anonymous")
+	wantNames(t, board(t, q, boardID, proto.LeaderboardFilter{Username: "anon"}), "Anonymous", "Anonymous")
 	wantNames(t, board(t, q, boardID, proto.LeaderboardFilter{Username: anon.Username}))
 	wantNames(t, board(t, q, boardID, proto.LeaderboardFilter{Country: "DE"}))
 

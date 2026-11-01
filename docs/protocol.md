@@ -269,7 +269,7 @@ and are `NotFound` for everyone.
 | podiums | u32 | |
 | ttRuns | u32 | visible uploaded time-trial runs |
 | ttBoards | u32 | boards with a visible run |
-| ttBestRank | u32 | best leaderboard rank on any board, 0 = none |
+| ttBestRank | u32 | best board rank of any of its runs (as `RunEntry.rank` outside leaderboards), 0 = none |
 | disabled | bool | moderators only, else false |
 | disabledReason | string ≤ 256 | moderators only, else `""` |
 | cheatKicks | u32 | moderators only, else 0 |
@@ -344,11 +344,12 @@ for the 2000 most unlocked achievements (most first, ties by id).
   the `playerName`/`playerId` inside the file, and runs show the account's current name (see `ChangeUsername`).
   Identified by `runId` (u64). The file's header `id` (32 hex) is unique across the server: the same account
   uploading it again gets the existing run back (`duplicate`), another account gets `Forbidden`.
-- **Board**: runs that are comparable: same `trackId` (case-insensitive), `engineClass` (0–2), `laps`, `contentVersion`
-  and `trackHash`. A new content version or changed track content therefore starts a new board; older boards
-  stay browsable ("archived" in the client: any board whose `contentVersion`/`trackHash` differs from the client's own).
-  A leaderboard lists **one row per account: its best visible run** on the board (fastest `finishMs`, ties by earlier
-  upload), filtered as requested, ranked from 1.
+- **Board**: runs that are comparable: same `trackId` (case-insensitive), `engineClass` (0–2), `laps` and
+  `contentVersion`. A new content version is the only thing that starts a new board; older boards stay browsable
+  ("archived" in the client: any board whose `contentVersion` differs from the client's own). Runs keep their own
+  `trackHash`: a changed track hash (e.g. a mod tweaking racing lines) does not split the board.
+  A leaderboard lists **every visible run** on the board (an account may appear several times), fastest `finishMs`
+  first, ties by earlier upload, filtered as requested, ranked from 1.
 - **Setup mismatch**: `setupHash` covers kart physics, engine class and laps. For every
   (`kartId`, `engineClass`, `laps`, `contentVersion`) the server counts distinct accounts per `setupHash`; a run whose
   `setupHash` is not the one used by the most accounts (once ≥ 3 accounts uploaded for that key) is marked
@@ -411,7 +412,7 @@ the backstop for that.
 | engineClass | u8 | |
 | laps | u8 | |
 | contentVersion | i32 | |
-| trackHash | string ≤ 32 | |
+| trackHash | string ≤ 32 | track hash of the newest visible upload, `""` when none |
 | players | u32 | accounts with a visible run |
 | bestMs | i32 | fastest visible finish, 0 when none |
 | lastUpload | time | 0 when none |
@@ -421,7 +422,7 @@ the backstop for that.
 | Field | Type | |
 | ------- | ------ | - |
 | runId | u64 | |
-| rank | u32 | rank in the requested (filtered) list, 0 when not ranked (hidden, or not the account's best) |
+| rank | u32 | position in the requested (filtered) leaderboard, elsewhere among the visible runs of its board; 0 when hidden |
 | accountId | u64 | |
 | username | string ≤ 20 | |
 | country | string ≤ 2 | |
@@ -452,7 +453,7 @@ the backstop for that.
 | characterId | string ≤ 96 | `""` = any |
 | includeHidden | bool | honoured for moderators only |
 
-With a kart/character filter, "best per account" means the best run matching the filter.
+A kart/character (or any other) filter narrows the list before ranking: ranks are positions in the filtered list.
 
 ### ListBoards (request 128)
 
@@ -463,14 +464,14 @@ most recent upload first. No login needed.
 
 `boardId: u64`, `offset: u32`, `limit: u16` (1–100), `filter: LeaderboardFilter` →
 `total: u32` (rows in the filtered list), `entries: list<RunEntry>`, `hasMine: bool`, then `mine: RunEntry` when
-`hasMine` (the logged-in account's best matching the filter, with its rank). No login needed.
+`hasMine` (the logged-in account's best visible run matching the filter, with its rank). No login needed.
 
 ### UploadRun (request 130)
 
-`file: bytes ≤ 8 MiB` → `run: RunEntry` (rank within the unfiltered board, 0 if not the account's best),
-`personalBest: bool` (the run is now the account's best on its board), `duplicate: bool`. Needs login and the
-connection's complete content announcement. Errors (see "Upload validation"): `BadRequest` (invalid file, content
-not announced yet), `Forbidden` (ghost id uploaded by another account, run uses modified content), `RateLimited`.
+`file: bytes ≤ 8 MiB` → `run: RunEntry` (rank among the visible runs of its unfiltered board), `personalBest: bool`
+(the run is now the account's best visible run on its board), `duplicate: bool`. Needs login and the connection's
+complete content announcement. Errors (see "Upload validation"): `BadRequest` (invalid file, content not announced
+yet), `Forbidden` (ghost id uploaded by another account, run uses modified content), `RateLimited`.
 
 ### DownloadRun (request 131)
 
@@ -495,8 +496,8 @@ hidden ones included with `hidden` set), so the client can mark local ghosts as 
 ### PlayerRuns (request 134)
 
 `accountId: u64`, `offset: u32`, `limit: u16` (1–100) → `total: u32`, `list<RunEntry>`: the account's visible runs
-on every board (moderators: hidden ones too, with `hidden` set), newest upload first; `rank` is the board rank of
-the account's best run there, 0 for its other runs. `NotFound` when the account is unknown, or disabled or
+on every board (moderators: hidden ones too, with `hidden` set), newest upload first; `rank` is the run's position
+among the visible runs of its board, 0 for hidden runs. `NotFound` when the account is unknown, or disabled or
 anonymous for a non-moderator. No login needed.
 
 ### RunHiddenReason (request 135)
@@ -598,8 +599,9 @@ own manifest decides what it may select, without strikes). Nothing is decided by
 client whose hash differs from a majority backed by ≥ 3 accounts gets a content strike (stored, shown to
 moderators) and cannot join anticheat lobbies with that pack, nor with the `game` pack ("Your copy of <pack> differs
 from other players'."). The catalog keeps every item's fingerprint, so time-trial uploads compare single items
-against that majority ("Upload validation"). The built-in `game` pack is announced like any other pack; lobbies do
-not list it but its items are lobby content.
+against that majority ("Upload validation"). The built-in `game` pack is announced like any other pack, with the
+game build's commit as its `commit` (builds before 2026-11 sent `""`); lobbies do not list it but its items are lobby
+content.
 
 **Overrides**: an announced pack P **replaces** every item it lists whose id belongs to another pack
 (`PackOf(id)` ≠ P): by load order P's definition is the effective one. The server derives these from the announced
@@ -951,11 +953,14 @@ each racer's character, AI included, that is lobby content; a special of another
 resolved only where that pack is installed, is left out), `rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024`
 (status effect ids, the index table of UDP states).
 
-- `ItemBoxInfo`: `pos: vec3`, `respawnTenths: u16` (respawn time in 0.1 s), `fixed: string ≤ 96` (`""` random,
-  a powerup id, `@special`, or a status effect id: boxes that apply an effect are not arbitrated). Box ids are the
-  index in this list; clients order boxes by their stable hierarchy path.
+- `ItemBoxInfo`: `pos: vec3`, `respawnTenths: u16` (respawn time in 0.1 s; in battles clients send at least their
+  battle respawn time, 30 s by default), `fixed: string ≤ 96` (`""` random, a powerup id, `@special`, or a status
+  effect id: boxes that apply an effect are not arbitrated). Battles have no fixed pickups: clients remove every box
+  with a `fixed` id other than `@special` (random boxes may give the game's battle-only health pack instead) and the
+  server denies pickups of them. Box ids are the index in this list (removed boxes included); clients order boxes by
+  their stable hierarchy path.
 - `PoolEntry`: `powerupId: string ≤ 96`, `charges: u8`, `battleCharges: u8`, `weights: 11 × f32` (weight at
-  position fraction 0, 0.1, … 1; 0 = leader, 1 = last).
+  position fraction 0, 0.1, … 1; 0 = leader, 1 = last). Battle-only powerups (the health pack) are in battle pools only.
 - `ItemRules`: `replacesHeld: bool`, `rouletteMs: u16`.
 
 The server first drops every `specials` entry whose powerup id's pack (the part before the first `.`) is neither

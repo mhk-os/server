@@ -17,14 +17,15 @@ import (
 // ErrGhostExists means a run with the same ghost id is already stored.
 var ErrGhostExists = errors.New("store: ghost already uploaded")
 
-// Board is a row of boards with the statistics of its visible runs.
+// Board is a row of boards with the statistics of its visible runs. A board is identified by (track id, engine
+// class, laps, content version); its runs keep their own track hash.
 type Board struct {
 	ID             uint64
 	TrackID        string
 	EngineClass    uint8
 	Laps           uint8
 	ContentVersion int32
-	TrackHash      string
+	TrackHash      string // of the newest visible upload, "" = none
 	CreatedAt      time.Time
 	Players        uint32     // accounts with a visible run
 	BestMs         int32      // fastest visible finish, 0 = none
@@ -77,7 +78,8 @@ type RunView struct {
 	Country         string // the owner's effective country
 	AccountDisabled bool
 	BoardTrackID    string
-	Rank            uint32 // rank on the board (or in the requested list), 0 = not ranked
+	Rank            uint32 // rank among the visible runs of the board (or in the requested list), 0 = hidden
+	OwnerBest       bool   // the owner's best visible run on its board
 	SetupMismatch   bool
 }
 
@@ -91,7 +93,7 @@ type RunFilter struct {
 	Limit     int
 }
 
-// LeaderboardQuery asks for one page of a board: the best visible run per account matching the filter.
+// LeaderboardQuery asks for one page of a board: every visible run matching the filter.
 type LeaderboardQuery struct {
 	BoardID       uint64
 	Offset, Limit int
@@ -101,7 +103,7 @@ type LeaderboardQuery struct {
 	KartID        string
 	CharacterID   string
 	IncludeHidden bool   // add every hidden run (rank 0) to the list; moderators only
-	Mine          uint64 // account whose own best row is returned separately, 0 = none
+	Mine          uint64 // account whose best row is returned separately, 0 = none
 }
 
 // LeaderboardPage is the answer to a LeaderboardQuery.
@@ -273,9 +275,9 @@ func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run
 // id is taken.
 func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, engine_class, laps, content_version, track_hash,
-			created_at) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-			r.TrackID, r.EngineClass, r.Laps, r.ContentVersion, r.TrackHash, r.UploadedAt)
+		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, engine_class, laps, content_version, created_at)
+			VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+			r.TrackID, r.EngineClass, r.Laps, r.ContentVersion, r.UploadedAt)
 		if err != nil {
 			return fmt.Errorf("store: board: %w", err)
 		}
@@ -335,7 +337,7 @@ func (s *Store) CountUploadsSince(ctx context.Context, accountID uint64, since t
 	return n, err
 }
 
-// decorate fills Rank (on the unfiltered board) and SetupMismatch of views.
+// decorate fills Rank (on the unfiltered board), OwnerBest and SetupMismatch of views.
 func (s *Store) decorate(ctx context.Context, views []RunView) error {
 	if len(views) == 0 {
 		return nil
@@ -346,49 +348,55 @@ func (s *Store) decorate(ctx context.Context, views []RunView) error {
 	return s.markSetupMismatch(ctx, views)
 }
 
-// rankOnBoards sets Rank to the position of each run on its board when it is its owner's best visible run.
+// rankOnBoards sets Rank to the position of each visible run among the visible runs of its board and OwnerBest.
 func (s *Store) rankOnBoards(ctx context.Context, views []RunView) error {
 	boardSet := map[uint64]bool{}
 	var boards, ids []any
 	for i := range views {
-		views[i].Rank = 0
 		ids = append(ids, views[i].ID)
 		if !boardSet[views[i].BoardID] {
 			boardSet[views[i].BoardID] = true
 			boards = append(boards, views[i].BoardID)
 		}
 	}
-	query := `WITH best AS (
-			SELECT r.id, r.board_id, r.finish_ms, r.uploaded_at,
-				ROW_NUMBER() OVER (PARTITION BY r.board_id, r.account_id ORDER BY ` + rankOrder + `) AS rn
+	query := `WITH vis AS (
+			SELECT r.id, r.board_id, r.account_id, r.finish_ms, r.uploaded_at
 			FROM runs r JOIN accounts a ON a.id = r.account_id
 			WHERE r.board_id IN (` + placeholders(len(boards)) + `) AND ` + visible + `
 		), ranked AS (
-			SELECT id, ROW_NUMBER() OVER (PARTITION BY board_id ORDER BY ` + rankOrder + `) AS rnk
-			FROM best WHERE rn = 1
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY board_id ORDER BY ` + rankOrder + `) AS rnk,
+				ROW_NUMBER() OVER (PARTITION BY board_id, account_id ORDER BY ` + rankOrder + `) AS rn
+			FROM vis
 		)
-		SELECT id, rnk FROM ranked WHERE id IN (` + placeholders(len(ids)) + `)`
+		SELECT id, rnk, rn FROM ranked WHERE id IN (` + placeholders(len(ids)) + `)`
 	rows, err := s.db.QueryContext(ctx, query, append(boards, ids...)...)
 	if err != nil {
 		return fmt.Errorf("store: ranks: %w", err)
 	}
 	defer rows.Close()
-	ranks := map[uint64]uint32{}
+	type rank struct {
+		rank uint32
+		best bool
+	}
+	ranks := map[uint64]rank{}
 	for rows.Next() {
 		var (
-			id   uint64
-			rank uint32
+			id uint64
+			r  rank
+			rn int
 		)
-		if err := rows.Scan(&id, &rank); err != nil {
+		if err := rows.Scan(&id, &r.rank, &rn); err != nil {
 			return err
 		}
-		ranks[id] = rank
+		r.best = rn == 1
+		ranks[id] = r
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	for i := range views {
-		views[i].Rank = ranks[views[i].ID]
+		r := ranks[views[i].ID]
+		views[i].Rank, views[i].OwnerBest = r.rank, r.best
 	}
 	return nil
 }
@@ -478,8 +486,11 @@ func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
 	return nil
 }
 
-const boardSelect = `SELECT b.id, b.track_id, b.engine_class, b.laps, b.content_version, b.track_hash, b.created_at,
-	COUNT(DISTINCT v.account_id), COALESCE(MIN(v.finish_ms), 0), MAX(v.uploaded_at)
+// boardSelect reads the board's track hash from its newest visible upload.
+const boardSelect = `SELECT b.id, b.track_id, b.engine_class, b.laps, b.content_version,
+	COALESCE((SELECT r.track_hash FROM runs r JOIN accounts a ON a.id = r.account_id
+		WHERE r.board_id = b.id AND ` + visible + ` ORDER BY r.uploaded_at DESC, r.id DESC LIMIT 1), ''),
+	b.created_at, COUNT(DISTINCT v.account_id), COALESCE(MIN(v.finish_ms), 0), MAX(v.uploaded_at)
 	FROM boards b LEFT JOIN (
 		SELECT r.board_id, r.account_id, r.finish_ms, r.uploaded_at
 		FROM runs r JOIN accounts a ON a.id = r.account_id WHERE ` + visible + `
@@ -555,8 +566,9 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
-// Leaderboard ranks the best visible run per account on the board after filtering. With IncludeHidden every hidden
-// run matching the filter joins the list with rank 0, so moderators see what players do not, in finish order.
+// Leaderboard ranks every visible run on the board matching the filter; an account may appear several times. With
+// IncludeHidden every hidden run matching the filter joins the list with rank 0, so moderators see what players do
+// not, in finish order. Mine is the account's best visible run in the filtered list.
 func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*LeaderboardPage, error) {
 	conds := []string{"r.board_id = ?"}
 	args := []any{q.BoardID}
@@ -595,19 +607,16 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 				(r.hidden_at IS NOT NULL OR a.disabled_at IS NOT NULL) AS hid
 			FROM runs r JOIN accounts a ON a.id = r.account_id
 			WHERE ` + strings.Join(conds, " AND ") + `
-		), best AS (
-			SELECT id, account_id, finish_ms, uploaded_at, hid,
-				ROW_NUMBER() OVER (PARTITION BY account_id, hid ORDER BY ` + rankOrder + `) AS rn
-			FROM cand
 		), shown AS (
 			SELECT id, account_id, hid,
 				IF(hid, 0, ROW_NUMBER() OVER (PARTITION BY hid ORDER BY ` + rankOrder + `)) AS rnk,
+				ROW_NUMBER() OVER (PARTITION BY account_id, hid ORDER BY ` + rankOrder + `) AS rn,
 				ROW_NUMBER() OVER (ORDER BY ` + rankOrder + `) AS pos,
 				COUNT(*) OVER () AS total
-			FROM best WHERE hid OR rn = 1
+			FROM cand
 		) `
-	rows, err := s.db.QueryContext(ctx, ctes+`SELECT id, account_id, hid, rnk, pos, total FROM shown
-		WHERE (pos > ? AND pos <= ?) OR (account_id = ? AND NOT hid) ORDER BY pos`,
+	rows, err := s.db.QueryContext(ctx, ctes+`SELECT id, account_id, hid, rnk, rn, pos, total FROM shown
+		WHERE (pos > ? AND pos <= ?) OR (account_id = ? AND NOT hid AND rn = 1) ORDER BY pos`,
 		append(args, q.Offset, q.Offset+q.Limit, q.Mine)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: leaderboard: %w", err)
@@ -616,7 +625,7 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 		id, account uint64
 		hid         bool
 		rank        uint32
-		pos         int
+		rn, pos     int
 	}
 	var (
 		page   LeaderboardPage
@@ -624,7 +633,7 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 	)
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.account, &r.hid, &r.rank, &r.pos, &page.Total); err != nil {
+		if err := rows.Scan(&r.id, &r.account, &r.hid, &r.rank, &r.rn, &r.pos, &page.Total); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -667,7 +676,7 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 		if r.pos > q.Offset && r.pos <= q.Offset+q.Limit {
 			page.Entries = append(page.Entries, *v)
 		}
-		if q.Mine != 0 && r.account == q.Mine && !r.hid {
+		if q.Mine != 0 && r.account == q.Mine && !r.hid && r.rn == 1 {
 			mine := *v
 			page.Mine = &mine
 		}
@@ -715,7 +724,7 @@ func (s *Store) FlaggedRuns(ctx context.Context, offset, limit int, includeHidde
 }
 
 // PlayerRuns lists the account's visible runs (all of them with includeHidden), newest upload first, with board
-// ranks: only the account's best run on a board has one.
+// ranks.
 func (s *Store) PlayerRuns(ctx context.Context, accountID uint64, offset, limit int, includeHidden bool) (int,
 	[]RunView, error) {
 	where := " WHERE r.account_id = ?"

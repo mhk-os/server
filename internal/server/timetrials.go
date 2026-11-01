@@ -225,7 +225,7 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	}
 	c.log.Info("run uploaded", "run", run.ID, "board", run.BoardID, "track", run.TrackID, "finish_ms", run.FinishMs,
 		"rank", v.Rank)
-	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.Rank > 0}, nil
+	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.OwnerBest}, nil
 }
 
 // existingUpload answers an upload of a ghost id that is already stored: the owner gets the run back as a
@@ -241,7 +241,7 @@ func (s *Server) existingUpload(ctx context.Context, acct *store.Account, ghostI
 	if v.AccountID != acct.ID {
 		return nil, Errorf(proto.StatusForbidden, msgGhostTaken)
 	}
-	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.Rank > 0,
+	return &proto.UploadResult{Run: runEntry(v, acct.Role == proto.RoleModerator), PersonalBest: v.OwnerBest,
 		Duplicate: true}, nil
 }
 

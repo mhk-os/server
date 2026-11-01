@@ -637,9 +637,12 @@ func (rs *raceState) onPickup(s *seat, m *proto.ItemPickup, now time.Time) {
 		return
 	}
 	box := &rs.agreed.Boxes[m.BoxID]
-	if rs.isEffect[box.Fixed] || now.Before(rs.boxFreeAt[m.BoxID]) {
-		// Effect boxes are applied by each client and never arbitrated.
-		rs.deny(s, k, m.BoxID, proto.DenyNotAvailable, "effect box or respawning", "fixed", box.Fixed)
+	fixedInBattle := rs.spec.Mode == ModeBattle && box.Fixed != "" && box.Fixed != specialBox
+	if rs.isEffect[box.Fixed] || fixedInBattle || now.Before(rs.boxFreeAt[m.BoxID]) {
+		// Effect boxes are applied by each client and never arbitrated; battles have no fixed pickups (clients remove
+		// them, random boxes give health there).
+		rs.deny(s, k, m.BoxID, proto.DenyNotAvailable, "effect box, fixed pickup in a battle or respawning", "fixed",
+			box.Fixed)
 		return
 	}
 	if !k.ai && !rs.nearBox(k, box.Pos) {

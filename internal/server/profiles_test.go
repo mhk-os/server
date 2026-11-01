@@ -239,8 +239,9 @@ func TestPlayerRunsAndTimeTrialStats(t *testing.T) {
 			t.Fatal("not newest first")
 		}
 	}
-	if page.Runs[0].RunID != other.Run.RunID || ranks[best.Run.RunID] != 2 || ranks[slow.Run.RunID] != 0 ||
-		ranks[mid.Run.RunID] != 0 || ranks[other.Run.RunID] != 1 {
+	// Every visible run is ranked on its board: rival 87.5 s, best 90.5 s, mid 93.5 s, slow 99.5 s.
+	if page.Runs[0].RunID != other.Run.RunID || ranks[best.Run.RunID] != 2 || ranks[slow.Run.RunID] != 4 ||
+		ranks[mid.Run.RunID] != 3 || ranks[other.Run.RunID] != 1 {
 		t.Fatalf("ranks %v", ranks)
 	}
 	if page, err := connect(t, ts).PlayerRuns(ctx, owner.acct.ID, 1, 2); err != nil || page.Total != 4 ||

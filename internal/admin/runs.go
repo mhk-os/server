@@ -131,8 +131,9 @@ func runShow(ctx context.Context, env *Env, args []string) error {
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", v.ID)
 	fmt.Fprintf(tw, "Account\t%s (id %d, %s)\n", v.Username, v.AccountID, orDash(v.Country))
-	fmt.Fprintf(tw, "Board\t%d: %s, engine class %d, %d laps, content version %d, track hash %s\n", v.BoardID,
-		v.BoardTrackID, v.EngineClass, v.Laps, v.ContentVersion, v.TrackHash)
+	fmt.Fprintf(tw, "Board\t%d: %s, engine class %d, %d laps, content version %d\n", v.BoardID,
+		v.BoardTrackID, v.EngineClass, v.Laps, v.ContentVersion)
+	fmt.Fprintf(tw, "Track hash\t%s\n", v.TrackHash)
 	fmt.Fprintf(tw, "Track pack\t%s\n", v.TrackPackID)
 	fmt.Fprintf(tw, "Kart / character\t%s / %s\n", v.KartID, v.CharacterID)
 	fmt.Fprintf(tw, "Time\t%s (best lap %s; laps %s)\n", formatMs(v.FinishMs), formatMs(v.BestLapMs),
@@ -308,7 +309,7 @@ func boardList(ctx context.Context, env *Env, args []string) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTRACK\tCLASS\tLAPS\tSIM\tTRACK HASH\tPLAYERS\tBEST\tLAST UPLOAD")
+	fmt.Fprintln(tw, "ID\tTRACK\tCLASS\tLAPS\tSIM\tLATEST TRACK HASH\tPLAYERS\tBEST\tLAST UPLOAD")
 	for i := range boards {
 		b := &boards[i]
 		best := "-"
@@ -316,7 +317,7 @@ func boardList(ctx context.Context, env *Env, args []string) error {
 			best = formatMs(b.BestMs)
 		}
 		fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n", b.ID, b.TrackID, b.EngineClass, b.Laps, b.ContentVersion,
-			b.TrackHash, b.Players, best, formatTime(b.LastUpload))
+			orDash(b.TrackHash), b.Players, best, formatTime(b.LastUpload))
 	}
 	tw.Flush()
 	fmt.Fprintf(env.Out, "%d board(s)\n", len(boards))

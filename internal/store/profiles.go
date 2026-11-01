@@ -195,17 +195,16 @@ func (s *Store) Profile(ctx context.Context, id uint64) (*Profile, error) {
 }
 
 // bestBoardRank returns the account's best rank over every board it has a visible run on, ranked as rankOnBoards
-// does: each account's best visible run per board, fastest first, ties by earlier upload.
+// does: every visible run of the board, fastest first, ties by earlier upload.
 func (s *Store) bestBoardRank(ctx context.Context, accountID uint64) (uint32, error) {
 	var rank uint32
-	err := s.db.QueryRowContext(ctx, `WITH best AS (
-			SELECT r.id, r.board_id, r.account_id, r.finish_ms, r.uploaded_at,
-				ROW_NUMBER() OVER (PARTITION BY r.board_id, r.account_id ORDER BY `+rankOrder+`) AS rn
+	err := s.db.QueryRowContext(ctx, `WITH vis AS (
+			SELECT r.id, r.board_id, r.account_id, r.finish_ms, r.uploaded_at
 			FROM runs r JOIN accounts a ON a.id = r.account_id
 			WHERE r.board_id IN (SELECT board_id FROM runs WHERE account_id = ? AND hidden_at IS NULL) AND `+visible+`
 		), ranks AS (
 			SELECT account_id, ROW_NUMBER() OVER (PARTITION BY board_id ORDER BY `+rankOrder+`) AS rnk
-			FROM best WHERE rn = 1
+			FROM vis
 		)
 		SELECT COALESCE(MIN(rnk), 0) FROM ranks WHERE account_id = ?`, accountID, accountID).Scan(&rank)
 	return rank, err

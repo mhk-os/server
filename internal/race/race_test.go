@@ -458,6 +458,53 @@ func TestItemPickup(t *testing.T) {
 	}
 }
 
+// TestBattlePickups: battles deny fixed pickups (clients remove them) but grant random and special boxes, which
+// respawn after the RespawnTenths the clients agreed on (30 s in battles).
+func TestBattlePickups(t *testing.T) {
+	rs, env, _ := newTestRace(2, Spec{Mode: ModeBattle, Items: true})
+	l := testLoaded()
+	for i := range l.Boxes {
+		l.Boxes[i].RespawnTenths = 300
+	}
+	for _, s := range rs.seats {
+		rs.onLoaded(s, l, t0)
+	}
+	if rs.phase != phaseRacing {
+		t.Fatalf("phase %d after loading", rs.phase)
+	}
+	s0 := rs.seats[0]
+	now := rs.goAt.Add(time.Second)
+	pickup := func(box uint16, pos proto.Vec3, at time.Time) string {
+		t.Helper()
+		s0.held, s0.charges = "", 0
+		setState(rs, s0, proto.KartState{Pos: pos, Health: 100})
+		rs.onPickup(s0, &proto.ItemPickup{BoxID: box, Slot: proto.OwnSlot}, at)
+		defer env.reset()
+		if g := env.of(acc(0), proto.PushItemGranted); len(g) == 1 {
+			return g[0].(*proto.ItemGranted).PowerupID
+		}
+		if d := env.of(acc(0), proto.PushItemDenied); len(d) != 1 || d[0].(*proto.ItemDenied).Reason != proto.DenyNotAvailable {
+			t.Fatalf("box %d: denials %v", box, d)
+		}
+		return ""
+	}
+	if id := pickup(2, proto.Vec3{200, 0, 0}, now); id != "" {
+		t.Fatalf("fixed powerup box granted %s in a battle", id)
+	}
+	if id := pickup(1, proto.Vec3{100, 0, 0}, now); id != "mhk2.super" {
+		t.Fatalf("special box: %q", id)
+	}
+	if id := pickup(0, proto.Vec3{0, 0, 0}, now); id != "mhk2.rocket" {
+		t.Fatalf("random box: %q", id)
+	}
+	if id := pickup(0, proto.Vec3{0, 0, 0}, now.Add(29*time.Second)); id != "" {
+		t.Fatalf("box back after 29 s: %q", id)
+	}
+	if id := pickup(0, proto.Vec3{0, 0, 0}, now.Add(30*time.Second)); id != "mhk2.rocket" {
+		t.Fatalf("box not back after 30 s: %q", id)
+	}
+}
+
 func TestItemUse(t *testing.T) {
 	rs, env, _ := newTestRace(3, Spec{Items: true, Anticheat: true})
 	goAt := startRace(t, rs)
