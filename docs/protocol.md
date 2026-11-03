@@ -93,7 +93,7 @@ Must be the first request of a connection; anything else first closes the connec
 | Field | Type | |
 | ------- | ------ | - |
 | magic | u32 | `0x4F4B484D` (bytes `M H K O`) |
-| protocol | u16 | **3** |
+| protocol | u16 | **4** |
 | gameCommit | string ≤ 40 | `BuildInfo.Commit` |
 | gameBuild | i32 | `BuildInfo.Number` |
 | contentVersion | i32 | `ContentVersion.Current` |
@@ -676,6 +676,18 @@ or a **custom track list** (`cupId` `""`, `trackIds`: 1–35 race tracks of the 
 in race order). The set is the list: `racesPerSet` = the track count (the server sets it), and race n of the set
 runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`, any other track is `BadRequest`.
 
+**Owner cups**: in a race room where the owner picks (`mode` 0, `trackPick` 0) the owner may start a **cup** instead
+of a single track while the room waits between sets (`setRace` 0): `StartCup` names a cup of the room's content and
+its tracks in race order (1–16 race tracks of the room's content; the client sends the cup's list, the catalog does
+not know cups' tracks). Its first race starts at once and the set is the cup: `setSize` = its track count (not
+`racesPerSet`), set points add up over it, and race n runs `cupTrackIds[n − 1]` (`StartRace` names that track or
+sends `""`, any other track is `BadRequest`). `LobbyState.cupId`/`cupTrackIds` show the running cup. When its set
+results end the room picks single tracks again in sets of `racesPerSet`. An `UpdateRoom` keeps a running cup while
+the new settings still allow it (owner pick, race mode, cup and tracks of the new packs); otherwise the cup ends and
+the set carries on as a normal one. Errors (`BadRequest` unless noted): not the owner or a public lobby
+(`Forbidden`), not waiting, inside a set, a vote, battle or championship room, a cup or track outside the room's
+content, no or more than 16 tracks, nobody with a loadout.
+
 ### AI drivers
 
 - **How many**: `RoomSettings.maxAi` (0 = no AI, at most `maxPlayers` − 1). A race has every racing human (members
@@ -816,12 +828,14 @@ runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`
 | members | list<LobbyMember> ≤ 50 | |
 | phaseEnds | time | 0 = no timer |
 | setRace | u8 | 1-based race number in the set, 0 between sets |
-| setSize | u8 | |
+| setSize | u8 | races of the set: `racesPerSet` (4 in public lobbies), a running owner cup's track count |
 | votes | list<(accountId: u64, trackId: string ≤ 96)> ≤ 50 | `""` = Random |
 | trackId | string ≤ 96 | drawn/current track, `""` before the draw |
 | raceId | u64 | current race, 0 = none |
 | lastResults | list<RaceResultRow> ≤ 50 | of the previous race, for the results phases |
 | aiDrivers | list<AiDriver> ≤ 49 | the set's AI drivers in grid order (see "AI drivers"); empty between sets |
+| cupId | string ≤ 96 | the owner cup the current set races (see "Owner cups"), `""` = none |
+| cupTrackIds | list<string ≤ 96> ≤ 16 | that cup's tracks in race order; empty without one |
 
 `AiDriver`: `characterId: string ≤ 96`, `kartId: string ≤ 96`, `setPoints: i32`.
 
@@ -854,14 +868,15 @@ answer `BadRequest` "content not announced". Needs login.
 | 259 | JoinLobby | `lobbyId: u64`, `code: string ≤ 8` (one of them; code wins when non-empty) | `LobbyState` |
 | 260 | QuickJoin | `category: u8` | `LobbyState` (the fullest public instance with room, of the caller's content set in anticheat categories) |
 | 261 | CreateRoom | `RoomSettings` | `LobbyState` |
-| 262 | UpdateRoom | `RoomSettings` | empty (owner, Waiting only; the set's AI drivers are drawn again) |
+| 262 | UpdateRoom | `RoomSettings` | empty (owner, Waiting only; the set's AI drivers are drawn again; a running owner cup ends when the new settings do not allow it) |
 | 263 | LeaveLobby | empty | empty |
 | 264 | SetLoadout | `characterId: string ≤ 96`, `kartId: string ≤ 96` | empty (must be lobby content; choosing anything also re-applies the content rules of joining) |
 | 265 | SetReady | `ready: bool` | empty |
 | 266 | Vote | `trackId: string ≤ 96` (`""` = Random) | empty (Voting phase, lobby content) |
-| 267 | StartRace | `trackId: string ≤ 96` (a solo race on that track, `""` = random lobby track; private rooms: the track in owner-pick rooms (`""` = random, championships with a cup must name the cup's next track), `""` in vote rooms (opens the voting), the listed track or `""` in custom-list championships) | empty (owner of a private room, also alone; the lone member of a waiting public lobby without AI) |
+| 267 | StartRace | `trackId: string ≤ 96` (a solo race on that track, `""` = random lobby track; private rooms: the track in owner-pick rooms (`""` = random, championships with a cup must name the cup's next track), `""` in vote rooms (opens the voting), the listed track or `""` in custom-list championships and during an owner cup) | empty (owner of a private room, also alone; the lone member of a waiting public lobby without AI) |
 | 268 | EndRaceEarly | empty | empty (the only human racer of the current race) |
 | 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty. Both kicks remove the member from the lobby for 10 min and, during a race, from the race (`PlayerLeftRace`). Room owners kick within their private room (outcome left); moderators kick anywhere (outcome kicked: moderator; audit-logged) |
+| 270 | StartCup | `cupId: string ≤ 96`, `trackIds: list<string ≤ 96> ≤ 16` (the cup's tracks in race order) | empty (owner of a waiting owner-pick race room between sets: starts the cup's first race, the set is the cup; see "Owner cups") |
 
 Join errors: `NotFound`, `Forbidden` (full, kicked from this lobby in the last 10 min, or in an anticheat lobby a
 pack differing from the catalog majority or from the lobby's content set; message says which), `BadRequest` (missing

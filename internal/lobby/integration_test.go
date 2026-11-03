@@ -175,7 +175,7 @@ func (s *itServer) packs(commit string) []proto.PackManifest {
 			item(proto.ContentKart, "game.kart")),
 		manifest("mhk2", commit, s.contentVersion, item(proto.ContentTrack, "mhk2.rome"),
 			item(proto.ContentTrack, "mhk2.alps"), item(proto.ContentKart, "mhk2.speedy")),
-		manifest("mhk3", commit, s.contentVersion, item(proto.ContentTrack, "mhk3.paris")),
+		manifest("mhk3", commit, s.contentVersion, item(proto.ContentTrack, "mhk3.paris"), item(proto.ContentCup, "mhk3.cup")),
 		manifest("mhke", commit, s.contentVersion),
 		manifest("mhkt", commit, s.contentVersion, item(proto.ContentArena, "mhkt.arena")),
 	}
@@ -431,6 +431,8 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	itStatus(t, guest.StartRace(ctx, "mhk2.rome"), proto.StatusForbidden, "owner")
+	itStatus(t, guest.StartCup(ctx, "mhk3.cup", []string{"mhk3.paris"}), proto.StatusForbidden, "owner")
+	itStatus(t, owner.StartCup(ctx, "mhk3.cup", []string{"mhk3.paris", "mhk3.lyon"}), proto.StatusBadRequest, "mhk3.lyon")
 	if err := owner.StartRace(ctx, "mhk3.paris"); err != nil {
 		t.Fatal(err)
 	}

@@ -143,16 +143,20 @@ type lobby struct {
 	timer   Timer
 	gen     uint64 // invalidates timers of earlier phases
 	setRace uint8  // races started in the current set; 0 = between sets
-	votes   map[uint64]string
-	track   string
-	raceID  uint64
-	solo    bool // the current race is a solo race: outside the set, no points, no results phase
-	humans  int  // humans in the current race
-	aiRaced int  // AI karts in the current race (slots 0…aiRaced−1)
-	roster  []*aiDriver
-	results []proto.RaceResultRow
-	bans    map[uint64]time.Time // kicked accounts and until when
-	closed  bool
+	// cup is the cup the owner of an owner-pick race room started as the current set (StartCup), "" = none;
+	// cupTracks are its tracks in race order.
+	cup       string
+	cupTracks []string
+	votes     map[uint64]string
+	track     string
+	raceID    uint64
+	solo      bool // the current race is a solo race: outside the set, no points, no results phase
+	humans    int  // humans in the current race
+	aiRaced   int  // AI karts in the current race (slots 0…aiRaced−1)
+	roster    []*aiDriver
+	results   []proto.RaceResultRow
+	bans      map[uint64]time.Time // kicked accounts and until when
+	closed    bool
 }
 
 // aiDriver is one AI driver of the lobby's current set; race n of the set uses the first drivers in this order.
@@ -173,10 +177,25 @@ func (l *lobby) member(accountID uint64) *member {
 func (l *lobby) full() bool { return len(l.members) >= int(l.settings.MaxPlayers) }
 
 func (l *lobby) setSize() uint8 {
-	if l.public {
+	switch {
+	case l.public:
 		return publicSetSize
+	case l.cup != "":
+		return uint8(len(l.cupTracks))
 	}
 	return l.settings.RacesPerSet
+}
+
+// setTracks is the set's fixed track order: the owner's cup or a custom-list championship's list; empty when the
+// owner picks or the members vote each track (and in cup championships, whose tracks the owner's client sends).
+func (l *lobby) setTracks() []string {
+	if l.cup != "" {
+		return l.cupTracks
+	}
+	if l.settings.Mode == proto.RoomChampionship {
+		return l.settings.TrackIDs
+	}
+	return nil
 }
 
 // minVoters is how many humans the automatic cycle of a public lobby needs: one in AI categories, else two.
@@ -465,6 +484,7 @@ func (m *Manager) state(l *lobby) *proto.LobbyState {
 		SetSize: l.setSize(), TrackID: l.track, RaceID: l.raceID,
 		Members: make([]proto.LobbyMember, len(l.members)), Votes: []proto.LobbyVote{},
 		LastResults: l.results, AIDrivers: make([]proto.AIDriver, len(l.roster)),
+		CupID: l.cup, CupTrackIDs: append([]string{}, l.cupTracks...),
 	}
 	if s.LastResults == nil {
 		s.LastResults = []proto.RaceResultRow{}
@@ -530,6 +550,7 @@ func (m *Manager) setPhase(l *lobby, phase uint8, d time.Duration, next func()) 
 func (m *Manager) idle(l *lobby) {
 	m.setPhase(l, proto.PhaseWaiting, 0, nil)
 	l.setRace, l.results, l.track, l.votes, l.roster = 0, nil, "", nil, nil
+	l.cup, l.cupTracks = "", nil
 }
 
 // between moves to what follows a race or the results: Voting in public lobbies with enough humans (two, one in
@@ -893,8 +914,9 @@ func (m *Manager) settle(l *lobby, raceID uint64, placements []race.Placement) [
 			for _, mem := range l.members {
 				mem.points = 0
 			}
-			// The next set draws its AI drivers again.
+			// The next set draws its AI drivers again; after the owner's cup the owner picks single tracks again.
 			l.setRace, l.results, l.roster = 0, nil, nil
+			l.cup, l.cupTracks = "", nil
 			m.between(l)
 			m.broadcast(l, 0)
 		})
@@ -1260,7 +1282,8 @@ func (m *Manager) CreateRoom(p Player, settings proto.RoomSettings) (*proto.Lobb
 // UpdateRoom changes the settings of the caller's room while it waits. Every member must be able to stay: the
 // update is refused when one lacks a new pack, runs a mod replacing content of one, or (anticheat rooms, whose
 // content set becomes the owner's) holds a differing copy, or when the room would be over its new size. Loadouts
-// that stop being room content are cleared.
+// that stop being room content are cleared. The owner's running cup goes on while the new settings still allow it
+// (see StartCup); otherwise its set carries on as the room's normal set.
 func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 	ann, err := m.announced(p)
 	if err != nil {
@@ -1306,6 +1329,9 @@ func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 		}
 	}
 	l.settings, l.set, l.roster = s, set, nil // the set's AI drivers are drawn again
+	if l.cup != "" && m.checkCup(s, p.AccountID, l.cup, l.cupTracks) != nil {
+		l.cup, l.cupTracks = "", nil
+	}
 	for _, mem := range l.members {
 		if mem.character != "" && !m.isContent(s.Packs, mem.AccountID, proto.ContentCharacter, mem.character) {
 			mem.character = ""
@@ -1423,8 +1449,8 @@ func (m *Manager) Vote(p Player, track string) error {
 // StartRace starts a race on request. The lone member of a waiting public lobby without AI gets a solo race against
 // 6 AI drivers on track ("" = a random lobby track of the right kind), outside the set. A private room's owner, with
 // company or alone, starts the next race of the set: on track when the owner picks ("" draws a random one), by
-// opening the voting in vote rooms, the cup's next track (which the owner's client sends) or the custom list's
-// next track ("" or that id) in championships.
+// opening the voting in vote rooms, the cup's next track (which the owner's client sends) in cup championships, and
+// the next track of the custom list or of the owner's running cup ("" or that id).
 func (m *Manager) StartRace(p Player, track string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1453,8 +1479,9 @@ func (m *Manager) StartRace(p Player, track string) error {
 		return nil
 	}
 	switch {
-	case !solo && s.Mode == proto.RoomChampionship && len(s.TrackIDs) > 0:
-		next := s.TrackIDs[min(int(l.setRace), len(s.TrackIDs)-1)]
+	case !solo && len(l.setTracks()) > 0:
+		list := l.setTracks()
+		next := list[min(int(l.setRace), len(list)-1)]
 		switch {
 		case track == "":
 			track = next
@@ -1475,6 +1502,61 @@ func (m *Manager) StartRace(p Player, track string) error {
 		return errorf(proto.StatusServerError, "The race could not start.")
 	}
 	m.broadcast(l, 0)
+	return nil
+}
+
+// StartCup starts a cup as the next set of an owner-pick race room: its owner, between sets, names the cup and its
+// tracks in race order (the catalog lists cups, not their tracks). The cup's first race starts at once; the set is
+// the cup (its track count races, set points add up over it), StartRace runs its next track, and once the set
+// results end the owner picks single tracks again.
+func (m *Manager) StartCup(p Player, cupID string, tracks []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	l := m.byAccount[p.AccountID]
+	switch {
+	case l == nil:
+		return errNotInLobby
+	case l.public || l.owner != p.AccountID:
+		return errorf(proto.StatusForbidden, "Only the room owner can start a cup.")
+	case l.phase != proto.PhaseWaiting:
+		return errorf(proto.StatusBadRequest, "A cup can only start while the room waits.")
+	case l.setRace > 0:
+		return errorf(proto.StatusBadRequest, "Finish the running set (%d of %d races) before starting a cup.",
+			l.setRace, l.setSize())
+	}
+	if err := m.checkCup(l.settings, p.AccountID, cupID, tracks); err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(l.members, (*member).hasLoadout) {
+		return errNoLoadouts
+	}
+	l.cup, l.cupTracks = cupID, slices.Clone(tracks)
+	if err := m.startRace(l, tracks[0], false); err != nil {
+		l.cup, l.cupTracks = "", nil
+		m.log.Error("starting cup", "lobby", l.id, "err", err)
+		return errorf(proto.StatusServerError, "The race could not start.")
+	}
+	m.broadcast(l, 0)
+	return nil
+}
+
+// checkCup checks the owner's cup against room settings: an owner-pick race room, a cup of the room's packs and
+// 1–16 race tracks of them (as the owner's catalog entry lists them).
+func (m *Manager) checkCup(s proto.RoomSettings, accountID uint64, cupID string, tracks []string) error {
+	bad := func(format string, args ...any) error { return errorf(proto.StatusBadRequest, format, args...) }
+	switch {
+	case s.Mode != proto.RoomRaceSet || s.TrackPick != proto.PickOwner:
+		return bad("Cups start in race rooms where the owner picks the tracks.")
+	case !m.isContent(s.Packs, accountID, proto.ContentCup, cupID):
+		return bad("%s is not a cup of the room's packs.", cupID)
+	case len(tracks) == 0 || len(tracks) > proto.MaxCupTracks:
+		return bad("A cup races 1-%d tracks.", proto.MaxCupTracks)
+	}
+	for _, id := range tracks {
+		if !m.isContent(s.Packs, accountID, proto.ContentTrack, id) {
+			return bad("%s is not a race track of the room's packs.", id)
+		}
+	}
 	return nil
 }
 

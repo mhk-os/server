@@ -8,7 +8,7 @@ import (
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// Register adds the lobby request handlers (258–269) and leaves the lobby when an account's last connection goes.
+// Register adds the lobby request handlers (258–270) and leaves the lobby when an account's last connection goes.
 func (m *Manager) Register(srv *server.Server) {
 	h := func(typ proto.Type, fn func(ctx context.Context, p Player, r *wire.Reader) (proto.Message, error)) {
 		srv.Handle(typ, true, func(ctx context.Context, c *server.Conn, r *wire.Reader) (proto.Message, error) {
@@ -31,6 +31,7 @@ func (m *Manager) Register(srv *server.Server) {
 	h(proto.TypeStartRace, m.handleStartRace)
 	h(proto.TypeEndRaceEarly, m.handleEndRaceEarly)
 	h(proto.TypeKickMember, m.handleKick)
+	h(proto.TypeStartCup, m.handleStartCup)
 	srv.OnAccountGone(m.Leave)
 	srv.OnAccountRenamed(m.Rename)
 }
@@ -130,6 +131,14 @@ func (m *Manager) handleStartRace(_ context.Context, p Player, r *wire.Reader) (
 		return nil, err
 	}
 	return nil, m.StartRace(p, req.TrackID)
+}
+
+func (m *Manager) handleStartCup(_ context.Context, p Player, r *wire.Reader) (proto.Message, error) {
+	var req proto.StartCup
+	if err := req.Decode(r); err != nil {
+		return nil, err
+	}
+	return nil, m.StartCup(p, req.CupID, req.TrackIDs)
 }
 
 func (m *Manager) handleEndRaceEarly(_ context.Context, p Player, r *wire.Reader) (proto.Message, error) {

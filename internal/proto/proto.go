@@ -7,7 +7,7 @@ const (
 	// Magic opens every Hello: the bytes "MHKO" read as a little-endian u32.
 	Magic uint32 = 0x4F4B484D
 	// Version is the protocol revision; bump it only for incompatible changes.
-	Version uint16 = 3
+	Version uint16 = 4
 	// DefaultPort serves both the TCP control connection and (phase 3) UDP realtime.
 	DefaultPort = 7350
 )

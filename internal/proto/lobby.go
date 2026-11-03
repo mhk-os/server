@@ -22,6 +22,7 @@ const (
 	TypeStartRace        Type = 267
 	TypeEndRaceEarly     Type = 268
 	TypeKickMember       Type = 269
+	TypeStartCup         Type = 270
 )
 
 // Lobby pushes, and RaceResults from the race-control push range (the lobby computes the points).
@@ -50,6 +51,7 @@ const (
 	MaxRaceRows       = 50
 	MaxAIDrivers      = 49 // LobbyState.aiDrivers: every kart but one human
 	MaxCustomTracks   = 35 // RoomSettings.trackIds of a custom-list championship
+	MaxCupTracks      = 16 // StartCup.trackIds and LobbyState.cupTrackIds: a cup's races, at most a set's
 	MaxKickReason     = 256
 	MaxLobbyMessage   = 256
 
@@ -541,6 +543,8 @@ type LobbyState struct {
 	RaceID      uint64
 	LastResults []RaceResultRow
 	AIDrivers   []AIDriver
+	CupID       string   // the cup the owner started for the current set (StartCup); "" = none
+	CupTrackIDs []string // its tracks in race order; empty without a cup
 }
 
 func (m *LobbyState) Encode(w *wire.Writer) {
@@ -568,6 +572,8 @@ func (m *LobbyState) Encode(w *wire.Writer) {
 		w.String(d.KartID)
 		w.I32(d.SetPoints)
 	}
+	w.String(m.CupID)
+	encodeStrings(w, m.CupTrackIDs)
 }
 
 func (m *LobbyState) Decode(r *wire.Reader) error {
@@ -595,6 +601,8 @@ func (m *LobbyState) Decode(r *wire.Reader) error {
 		m.AIDrivers[i].KartID = r.String(MaxContentID)
 		m.AIDrivers[i].SetPoints = r.I32()
 	}
+	m.CupID = r.String(MaxContentID)
+	m.CupTrackIDs = decodeStrings(r, MaxCupTracks, MaxTrackID)
 	return r.Err()
 }
 
@@ -655,6 +663,23 @@ type TrackChoice struct {
 
 func (m *TrackChoice) Encode(w *wire.Writer)       { w.String(m.TrackID) }
 func (m *TrackChoice) Decode(r *wire.Reader) error { m.TrackID = r.String(MaxTrackID); return r.Err() }
+
+// StartCup is request 270: the owner of an owner-pick race room starts a cup as the next set.
+type StartCup struct {
+	CupID    string
+	TrackIDs []string // the cup's tracks in race order
+}
+
+func (m *StartCup) Encode(w *wire.Writer) {
+	w.String(m.CupID)
+	encodeStrings(w, m.TrackIDs)
+}
+
+func (m *StartCup) Decode(r *wire.Reader) error {
+	m.CupID = r.String(MaxContentID)
+	m.TrackIDs = decodeStrings(r, MaxCupTracks, MaxTrackID)
+	return r.Err()
+}
 
 // KickMember is request 269.
 type KickMember struct {

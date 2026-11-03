@@ -73,6 +73,10 @@ func (c *Client) StartRace(ctx context.Context, trackID string) error {
 	return c.Request(ctx, proto.TypeStartRace, &proto.TrackChoice{TrackID: trackID}, nil)
 }
 
+func (c *Client) StartCup(ctx context.Context, cupID string, trackIDs []string) error {
+	return c.Request(ctx, proto.TypeStartCup, &proto.StartCup{CupID: cupID, TrackIDs: trackIDs}, nil)
+}
+
 func (c *Client) EndRaceEarly(ctx context.Context) error {
 	return c.Request(ctx, proto.TypeEndRaceEarly, proto.Empty{}, nil)
 }

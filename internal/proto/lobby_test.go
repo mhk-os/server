@@ -56,14 +56,17 @@ func lobbyMessages() []Message {
 		&LobbyState{Summary: summary, Code: "ABC234", Settings: sampleSettings(), Members: []LobbyMember{member},
 			PhaseEnds: when, SetRace: 2, SetSize: 4, Votes: []LobbyVote{{1, "mhk2.rome"}, {2, ""}},
 			TrackID: "mhk2.rome", RaceID: 99, LastResults: []RaceResultRow{sampleRow(0), sampleRow(3)},
-			AIDrivers: []AIDriver{{"mhk2.char.kurt", "mhk2.kart.speedy", 15}, {"game.huhn", "game.kart", 0}}},
+			AIDrivers: []AIDriver{{"mhk2.char.kurt", "mhk2.kart.speedy", 15}, {"game.huhn", "game.kart", 0}},
+			CupID:     "mhk2.cup", CupTrackIDs: []string{"mhk2.rome", "mhk2.alps"}},
 		&LobbyState{Summary: summary, Settings: RoomSettings{Packs: []string{}, TrackIDs: []string{}},
-			Members: []LobbyMember{}, Votes: []LobbyVote{}, LastResults: []RaceResultRow{}, AIDrivers: []AIDriver{}},
+			Members: []LobbyMember{}, Votes: []LobbyVote{}, LastResults: []RaceResultRow{}, AIDrivers: []AIDriver{},
+			CupTrackIDs: []string{}},
 		&JoinLobby{LobbyID: 5, Code: "XYZ234"},
 		&QuickJoin{Category: 20},
 		&SetLoadout{CharacterID: "mhk2.char.huhn", KartID: ""},
 		&SetReady{Ready: true},
 		&TrackChoice{TrackID: "mhk3.arena"},
+		&StartCup{CupID: "mhk2.cup", TrackIDs: []string{"mhk2.rome", "mhk2.alps", "mhk2.rome"}},
 		&KickMember{AccountID: 3, Reason: "rude"},
 		&LobbyLeft{Reason: LeftModKick, Message: "cheating"},
 		&SoloRaceJoinWaiting{Username: "Kurt"},
@@ -197,14 +200,16 @@ func TestRoomSettingsBytes(t *testing.T) {
 func TestLobbyStateBytes(t *testing.T) {
 	s := LobbyState{Settings: RoomSettings{Packs: []string{}, TrackIDs: []string{}}, Members: []LobbyMember{},
 		Votes: []LobbyVote{}, LastResults: []RaceResultRow{},
-		AIDrivers: []AIDriver{{CharacterID: "c", KartID: "k", SetPoints: -1}}}
+		AIDrivers: []AIDriver{{CharacterID: "c", KartID: "k", SetPoints: -1}}, CupID: "c", CupTrackIDs: []string{"t"}}
 	z := func(n int) string { return strings.Repeat("00", n) }
 	want := strings.Join([]string{
 		z(lobbySummaryMinSize), "00", z(14), "00", // summary, code, settings, members
 		z(8), "00", "00", "00", "00", z(8), "00", // phaseEnds, setRace, setSize, votes, trackId, raceId, lastResults
 		"01" + "0163" + "016b" + "ffffffff", // aiDrivers
+		"0163", "01" + "0174",               // cupId, cupTrackIds
 	}, "")
 	pinHex(t, &s, want)
+	pinHex(t, &StartCup{CupID: "c", TrackIDs: []string{"t", "u"}}, "0163"+"02"+"0174"+"0175")
 }
 
 func TestLobbyLimits(t *testing.T) {
@@ -234,6 +239,9 @@ func TestLobbyLimits(t *testing.T) {
 	decodeFails("51 last results", &LobbyState{},
 		Encode(&LobbyState{LastResults: make([]RaceResultRow, MaxRaceRows+1)}))
 	decodeFails("50 AI drivers", &LobbyState{}, Encode(&LobbyState{AIDrivers: make([]AIDriver, MaxAIDrivers+1)}))
+	decodeFails("17 cup tracks", &LobbyState{}, Encode(&LobbyState{CupTrackIDs: make([]string, MaxCupTracks+1)}))
+	decodeFails("17 tracks of a started cup", &StartCup{},
+		Encode(&StartCup{TrackIDs: make([]string, MaxCupTracks+1)}))
 	decodeFails("36 custom tracks", &RoomSettings{},
 		Encode(&RoomSettings{TrackIDs: make([]string, MaxCustomTracks+1)}))
 	decodeFails("97-byte custom track", &RoomSettings{},
@@ -269,7 +277,7 @@ func TestLobbyHostileBodies(t *testing.T) {
 }
 
 func TestLobbyRanges(t *testing.T) {
-	for typ := TypeContentHello; typ <= TypeKickMember; typ++ {
+	for typ := TypeContentHello; typ <= TypeStartCup; typ++ {
 		if !RangeLobbies.Contains(typ) {
 			t.Errorf("%d not in lobby range", typ)
 		}

@@ -288,6 +288,120 @@ func TestCustomChampionship(t *testing.T) {
 	}
 }
 
+// TestOwnerCup: the owner of an owner-pick race room starts a cup between sets; the cup is the set (its tracks in
+// order, set points over all of them), then the room goes back to single tracks and racesPerSet.
+func TestOwnerCup(t *testing.T) {
+	e := newEnv(t)
+	owner := e.player(1)
+	st := e.ok(e.m.CreateRoom(owner, aiRoom(4, 2))) // owner picks, 2 races per set
+	e.ok(e.m.Join(e.player(2), 0, st.Code))
+	for id := uint64(1); id <= 2; id++ {
+		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
+	}
+	cup := []string{"mhk2.rome", "mhk2.alps", "mhk2.rome"}
+	wantStatus(t, e.m.StartCup(Player{AccountID: 2}, "mhk2.cup", cup), proto.StatusForbidden, "owner")
+	wantStatus(t, e.m.StartCup(owner, "mhk3.cup", cup), proto.StatusBadRequest, "mhk3.cup")
+	wantStatus(t, e.m.StartCup(owner, "mhk2.rome", cup), proto.StatusBadRequest, "not a cup")
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", []string{"mhk2.rome", "mhk3.paris"}), proto.StatusBadRequest,
+		"mhk3.paris")
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", []string{"mhk2.arena"}), proto.StatusBadRequest, "mhk2.arena")
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", nil), proto.StatusBadRequest, "1-16")
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", slices.Repeat([]string{"mhk2.rome"}, 17)), proto.StatusBadRequest,
+		"1-16")
+
+	l := e.lobbyOf(1)
+	var points int32 // the owner's points over the cup's races
+	run := func(start func() error, want string, setRace uint8, phase uint8) *proto.RaceResults {
+		t.Helper()
+		must(t, start())
+		call := e.races.last()
+		if call.spec.TrackID != want || call.spec.SetRace != setRace || call.spec.SetSize != 3 {
+			t.Fatalf("race %+v, want %s as race %d of 3", call.spec, want, setRace)
+		}
+		finish(t, e, l, call, placed(call), phase)
+		results := e.push.of(1, proto.PushRaceResults)
+		res := results[len(results)-1].(*proto.RaceResults)
+		for _, row := range res.Rows {
+			if !row.AI && row.AccountID == 1 {
+				points += row.Points
+				if row.Points == 0 || row.SetPoints != points {
+					t.Fatalf("owner's row %+v, %d set points expected", row, points)
+				}
+			}
+		}
+		e.clock.Advance(15 * time.Second)
+		return res
+	}
+	res := run(func() error { return e.m.StartCup(owner, "mhk2.cup", cup) }, "mhk2.rome", 1, proto.PhaseResults)
+	if st := e.push.lastState(t, 1); st.CupID != "mhk2.cup" || !slices.Equal(st.CupTrackIDs, cup) ||
+		st.SetRace != 1 || st.SetSize != 3 || st.Summary.SetSize != 3 || res.SetDone {
+		t.Fatalf("cup state %+v, results %+v", st, res)
+	}
+	// Inside the cup: its next track only, no other cup.
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", cup), proto.StatusBadRequest, "1 of 3")
+	wantStatus(t, e.m.StartRace(owner, "mhk2.rome"), proto.StatusBadRequest, "mhk2.alps")
+	// Settings that still allow the cup keep it (racesPerSet 2 would have ended the set after race 2).
+	upd := aiRoom(4, 2)
+	upd.Laps = 5
+	must(t, e.m.UpdateRoom(owner, upd))
+	if res := run(func() error { return e.m.StartRace(owner, "") }, "mhk2.alps", 2, proto.PhaseResults); res.SetDone {
+		t.Fatal("cup set ended after racesPerSet races")
+	}
+	res = run(func() error { return e.m.StartRace(owner, "mhk2.rome") }, "mhk2.rome", 3, proto.PhaseSetResults)
+	if !res.SetDone {
+		t.Fatalf("cup results %+v", res)
+	}
+	// Afterwards the owner picks single tracks again, in sets of racesPerSet.
+	if st := e.push.lastState(t, 1); st.CupID != "" || len(st.CupTrackIDs) != 0 || st.SetRace != 0 || st.SetSize != 2 {
+		t.Fatalf("after the cup %+v", st)
+	}
+	must(t, e.m.StartRace(owner, "mhk2.alps"))
+	if call := e.races.last(); call.spec.TrackID != "mhk2.alps" || call.spec.SetRace != 1 || call.spec.SetSize != 2 {
+		t.Fatalf("after the cup %+v", call.spec)
+	}
+}
+
+// TestOwnerCupRooms: cups only start in owner-pick race rooms, and leave when the settings no longer allow them.
+func TestOwnerCupRooms(t *testing.T) {
+	e := newEnv(t)
+	owner := e.player(1)
+	cup := []string{"mhk2.rome", "mhk2.alps"}
+	for name, mutate := range map[string]func(*proto.RoomSettings){
+		"vote":         func(s *proto.RoomSettings) { s.TrackPick = proto.PickVote },
+		"battles":      func(s *proto.RoomSettings) { s.Mode = proto.RoomBattleSet },
+		"championship": func(s *proto.RoomSettings) { s.Mode, s.CupID = proto.RoomChampionship, "mhk2.cup" },
+	} {
+		s := aiRoom(4, 2)
+		mutate(&s)
+		e.ok(e.m.CreateRoom(owner, s))
+		must(t, e.m.SetLoadout(owner, "game.huhn", "game.kart"))
+		if err := e.m.StartCup(owner, "mhk2.cup", cup); err == nil {
+			t.Errorf("cup started in a %s room", name)
+		}
+		e.m.Leave(1)
+	}
+	// Public lobbies have no owner.
+	e.ok(e.m.QuickJoin(owner, 1))
+	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", cup), proto.StatusForbidden, "owner")
+	e.m.Leave(1)
+
+	// Switching to votes mid-cup ends the cup; the set carries on under the room's settings.
+	st := e.ok(e.m.CreateRoom(owner, aiRoom(4, 2)))
+	e.ok(e.m.Join(e.player(2), 0, st.Code))
+	must(t, e.m.SetLoadout(owner, "game.huhn", "game.kart"))
+	must(t, e.m.StartCup(owner, "mhk2.cup", cup))
+	l := e.lobbyOf(1)
+	call := e.races.last()
+	finish(t, e, l, call, placed(call), proto.PhaseResults)
+	e.clock.Advance(15 * time.Second)
+	upd := aiRoom(4, 2)
+	upd.TrackPick = proto.PickVote
+	must(t, e.m.UpdateRoom(owner, upd))
+	if st := e.push.lastState(t, 1); st.CupID != "" || st.SetRace != 1 || st.SetSize != 2 {
+		t.Fatalf("after UpdateRoom %+v", st)
+	}
+}
+
 // TestLoneHumanRaces: solo races only for the lone member of a public lobby without AI (6 throwaway drivers,
 // outside the set); EndRaceEarly and SoloRaceJoinWaiting whenever exactly one human races.
 func TestLoneHumanRaces(t *testing.T) {
