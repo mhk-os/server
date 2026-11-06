@@ -244,6 +244,14 @@ reachable everywhere their name appears (lobbies, leaderboards, rankings). Disab
 are `NotFound` for everyone except moderators. Anonymous accounts (see `DeleteAccount`) appear in no list or ranking
 and are `NotFound` for everyone.
 
+**Playtime** is the account's total of the `playtime.s` achievement counter (see "Achievements"): the seconds the
+game ran in the foreground on every device that synced to the account, including play on a device before logging
+in; 0 = none synced. The server reads no other achievement stat. It is not a `PlayerSummary` field, so lists of
+summaries keep their layout: every response carrying summaries (`ListPlayers`, `GetProfiles`, `GetProfile`,
+`ScoreLeaderboard`) ends with `playtimes: list<u64>`, the playtime of each of its summaries in the order they appear
+(the list, then `mine` when present). A body that ends before `playtimes` (an older server) has no playtimes; a
+list of another length is invalid.
+
 `PlayerSummary`:
 
 | Field | Type | |
@@ -276,22 +284,24 @@ and are `NotFound` for everyone.
 | contentStrikes | u32 | moderators only, else 0 |
 | hiddenRuns | u32 | moderators only, else 0 |
 | flaggedRuns | u32 | runs with flags ≥ 1; moderators only, else 0 |
+| playtimes | list<u64> | one item: the player's playtime (see above) |
 
 | Type | Name | Request | Response |
 | ------ | ------ | --------- | ---------- |
 | 21 | SetProfileListed | `listed: bool` | empty. Needs login |
-| 22 | ListPlayers | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` (case-insensitive username substring, `""` = all), `sort: u8` (0 newest registration first, 1 username A–Z) | `total: u32`, `list<PlayerSummary>`: listed accounts only |
-| 23 | GetProfiles | `list<u64> ≤ 100` (account ids) | `list<PlayerSummary>` of the ids that exist (any order; unknown and, for non-moderators, disabled ids are left out). For names shown in lists (rank next to the name) |
+| 22 | ListPlayers | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` (case-insensitive username substring, `""` = all), `sort: u8` (0 newest registration first, 1 username A–Z) | `total: u32`, `list<PlayerSummary>`: listed accounts only, `playtimes` |
+| 23 | GetProfiles | `list<u64> ≤ 100` (account ids) | `list<PlayerSummary>` of the ids that exist (any order; unknown and, for non-moderators, disabled ids are left out), `playtimes`. For names shown in lists (rank next to the name) |
 | 24 | GetProfile | `accountId: u64` | `PlayerProfile` (`NotFound` when unknown, or disabled for a non-moderator) |
-| 25 | ScoreLeaderboard | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` | `total: u32` (rows after the search), `list<PlayerSummary>` ranked (rank, then username), `hasMine: bool`, then `mine: PlayerSummary` when `hasMine` (the logged-in account, when ranked) |
+| 25 | ScoreLeaderboard | `offset: u32`, `limit: u16` (1–100), `search: string ≤ 20` | `total: u32` (rows after the search), `list<PlayerSummary>` ranked (rank, then username), `hasMine: bool`, then `mine: PlayerSummary` when `hasMine` (the logged-in account, when ranked), `playtimes` |
 
 None but `SetProfileListed` needs login.
 
 ## Achievements
 
-Achievements are defined by the game and its mods; the server knows nothing about them but ids. It stores, per
-account, the **stats** the game counts and the achievements it unlocked, so progress follows the player across
-devices and survives uninstalling a mod (whatever the game no longer shows stays stored).
+Achievements are defined by the game and its mods; the server knows nothing about them but ids (it only reads the
+`playtime.s` counter for the profiles' playtime, see "Profiles and score"). It stores, per account, the **stats** the
+game counts and the achievements it unlocked, so progress follows the player across devices and survives
+uninstalling a mod (whatever the game no longer shows stays stored).
 
 - **Ids**: stat ids 1–64, set items and achievement ids 1–96 characters of `A–Z a–z 0–9 _ . -`, compared exactly
   (case-sensitive). Anything else is `BadRequest`.

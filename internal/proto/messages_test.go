@@ -40,9 +40,10 @@ func TestRoundTrips(t *testing.T) {
 		if !reflect.DeepEqual(got, m) {
 			t.Fatalf("%T: got %+v, want %+v", m, got, m)
 		}
-		// Every strict prefix must fail cleanly, never panic.
+		// Every strict prefix must fail cleanly, never panic; only the body of an older revision, which ends before
+		// an optional tail, decodes.
 		for n := range len(b) {
-			if err := got.Decode(wire.NewReader(b[:n])); err == nil {
+			if err := got.Decode(wire.NewReader(b[:n])); err == nil && n != len(b)-optionalTail(m) {
 				t.Fatalf("%T: prefix of %d/%d bytes decoded", m, n, len(b))
 			}
 		}

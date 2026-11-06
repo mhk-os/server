@@ -102,6 +102,7 @@ func accountShow(ctx context.Context, env *Env, args []string) error {
 	fmt.Fprintf(tw, "Score\t%d\n", p.Score)
 	fmt.Fprintf(tw, "Rank\t%s\n", rankLabel(p.Rank))
 	fmt.Fprintf(tw, "Races\t%d (%d wins, %d podiums)\n", p.Races, p.Wins, p.Podiums)
+	fmt.Fprintf(tw, "Playtime\t%d h %d min\n", p.Playtime/3600, p.Playtime/60%60)
 	fmt.Fprintf(tw, "Achievements\t%d unlocked (%d stats, %d set items; last sync %s)\n", ach.Unlocked, ach.Stats,
 		ach.SetItems, formatTime(ach.SyncedAt))
 	fmt.Fprintf(tw, "Status\t%s\n", status(a))

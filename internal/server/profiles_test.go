@@ -109,6 +109,48 @@ func TestScoreRanking(t *testing.T) {
 	}
 }
 
+// TestPlaytime: every response carrying summaries has the account's playtime counter total.
+func TestPlaytime(t *testing.T) {
+	ts := start(t, server.Config{}, generous)
+	ctx := ctxT(t)
+	base := uniqueName("t")
+	a, b := register(t, ts, base+"_a"), register(t, ts, base+"_b")
+	syncAch(t, a.c, &proto.SyncAchievements{Counters: []proto.StatValue{{Stat: proto.PlaytimeStat, Value: 3000},
+		{Stat: "races.finished", Value: 7}}})
+	syncAch(t, a.c, &proto.SyncAchievements{Counters: []proto.StatValue{{Stat: proto.PlaytimeStat, Value: 600}}})
+	const want = 3600
+	if err := ts.st.RecordRace(ctx, []store.RaceResult{{AccountID: a.acct.ID, Points: 1}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if p, err := b.c.GetProfile(ctx, a.acct.ID); err != nil || p.Player.Playtime != want {
+		t.Fatalf("profile %+v %v", p, err)
+	}
+	if p, err := b.c.GetProfile(ctx, b.acct.ID); err != nil || p.Player.Playtime != 0 {
+		t.Fatalf("profile without playtime %+v %v", p, err)
+	}
+	got, err := b.c.GetProfiles(ctx, a.acct.ID, b.acct.ID)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("GetProfiles %+v %v", got, err)
+	}
+	for _, p := range got {
+		if p.AccountID == a.acct.ID && p.Playtime != want || p.AccountID == b.acct.ID && p.Playtime != 0 {
+			t.Fatalf("GetProfiles playtime %+v", p)
+		}
+	}
+	page, err := b.c.ListPlayers(ctx, &proto.ListPlayers{Limit: 10, Search: base, Sort: proto.PlayerSortName})
+	if err != nil || len(page.Players) != 2 || page.Players[0].Playtime != want || page.Players[1].Playtime != 0 {
+		t.Fatalf("ListPlayers %+v %v", page, err)
+	}
+	r, err := a.c.ScoreLeaderboard(ctx, &proto.ScoreLeaderboard{Limit: 100, Search: base})
+	if err != nil || len(r.Players) != 1 || r.Players[0].Playtime != want || r.Mine == nil || r.Mine.Playtime != want {
+		t.Fatalf("ScoreLeaderboard %+v %v", r, err)
+	}
+	if out := runAdmin(t, ts, "account", "show", a.name); !strings.Contains(out, "1 h 0 min") {
+		t.Fatalf("account show lacks the playtime:\n%s", out)
+	}
+}
+
 func TestPlayerDirectory(t *testing.T) {
 	ts := start(t, server.Config{}, generous)
 	ctx := ctxT(t)

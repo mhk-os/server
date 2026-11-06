@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/mhk-os/server/internal/wire"
@@ -13,6 +14,10 @@ const (
 	PlayerSortNewest     uint8 = 0 // ListPlayers: newest registration first
 	PlayerSortName       uint8 = 1 // ListPlayers: username A–Z
 )
+
+// PlaytimeStat is the game's time played counter (seconds in the foreground, AchievementStats.PlaytimeSeconds),
+// the one achievement stat the server reads: PlayerSummary.Playtime.
+const PlaytimeStat = "playtime.s"
 
 // SetProfileListed is request 21.
 type SetProfileListed struct {
@@ -56,6 +61,10 @@ type PlayerSummary struct {
 	Online     bool
 	Score      uint32
 	Rank       uint32 // 0 = unranked
+	// Playtime is the account's PlaytimeStat total in seconds (0 = none synced). It is not part of the summary's
+	// own encoding: the message carrying summaries appends them all at its end (encodePlaytimes), so readers of
+	// older bodies keep working.
+	Playtime uint64
 }
 
 func (m *PlayerSummary) Encode(w *wire.Writer) {
@@ -80,6 +89,7 @@ func (m *PlayerSummary) Decode(r *wire.Reader) error {
 	m.Online = r.Bool()
 	m.Score = r.U32()
 	m.Rank = r.U32()
+	m.Playtime = 0 // decodePlaytimes of the carrying message fills it
 	return r.Err()
 }
 
@@ -98,6 +108,44 @@ func decodePlayers(r *wire.Reader, max int) []PlayerSummary {
 	return players
 }
 
+// encodePlaytimes ends a message carrying summaries: list<u64> with the Playtime of every summary of the message in
+// order (players, then mine when present).
+func encodePlaytimes(w *wire.Writer, players []PlayerSummary, mine *PlayerSummary) {
+	n := len(players)
+	if mine != nil {
+		n++
+	}
+	w.Count(n)
+	for i := range players {
+		w.U64(players[i].Playtime)
+	}
+	if mine != nil {
+		w.U64(mine.Playtime)
+	}
+}
+
+// decodePlaytimes reads what encodePlaytimes wrote. A body that ends before it (an older server) leaves every
+// Playtime 0; a list of another length than the message's summaries is invalid.
+func decodePlaytimes(r *wire.Reader, players []PlayerSummary, mine *PlayerSummary) {
+	if r.Err() != nil || r.Remaining() == 0 {
+		return
+	}
+	n := len(players)
+	if mine != nil {
+		n++
+	}
+	if got := r.Count(n, 8); r.Err() == nil && got != n {
+		r.Fail(fmt.Errorf("%w: %d playtimes for %d players", wire.ErrInvalid, got, n))
+		return
+	}
+	for i := range players {
+		players[i].Playtime = r.U64()
+	}
+	if mine != nil {
+		mine.Playtime = r.U64()
+	}
+}
+
 // PlayerPage is the response to ListPlayers.
 type PlayerPage struct {
 	Total   uint32
@@ -107,11 +155,13 @@ type PlayerPage struct {
 func (m *PlayerPage) Encode(w *wire.Writer) {
 	w.U32(m.Total)
 	encodePlayers(w, m.Players)
+	encodePlaytimes(w, m.Players, nil)
 }
 
 func (m *PlayerPage) Decode(r *wire.Reader) error {
 	m.Total = r.U32()
 	m.Players = decodePlayers(r, MaxPage)
+	decodePlaytimes(r, m.Players, nil)
 	return r.Err()
 }
 
@@ -140,10 +190,14 @@ type PlayerSummaries struct {
 	Players []PlayerSummary
 }
 
-func (m *PlayerSummaries) Encode(w *wire.Writer) { encodePlayers(w, m.Players) }
+func (m *PlayerSummaries) Encode(w *wire.Writer) {
+	encodePlayers(w, m.Players)
+	encodePlaytimes(w, m.Players, nil)
+}
 
 func (m *PlayerSummaries) Decode(r *wire.Reader) error {
 	m.Players = decodePlayers(r, MaxProfileIDs)
+	decodePlaytimes(r, m.Players, nil)
 	return r.Err()
 }
 
@@ -181,6 +235,7 @@ func (m *PlayerProfile) Encode(w *wire.Writer) {
 	w.U32(m.ContentStrikes)
 	w.U32(m.HiddenRuns)
 	w.U32(m.FlaggedRuns)
+	encodePlaytimes(w, nil, &m.Player)
 }
 
 func (m *PlayerProfile) Decode(r *wire.Reader) error {
@@ -198,6 +253,7 @@ func (m *PlayerProfile) Decode(r *wire.Reader) error {
 	m.ContentStrikes = r.U32()
 	m.HiddenRuns = r.U32()
 	m.FlaggedRuns = r.U32()
+	decodePlaytimes(r, nil, &m.Player)
 	return r.Err()
 }
 
@@ -235,6 +291,7 @@ func (m *ScoreRanking) Encode(w *wire.Writer) {
 	if m.Mine != nil {
 		m.Mine.Encode(w)
 	}
+	encodePlaytimes(w, m.Players, m.Mine)
 }
 
 func (m *ScoreRanking) Decode(r *wire.Reader) error {
@@ -243,7 +300,8 @@ func (m *ScoreRanking) Decode(r *wire.Reader) error {
 	m.Mine = nil
 	if r.Bool() {
 		m.Mine = &PlayerSummary{}
-		return m.Mine.Decode(r)
+		m.Mine.Decode(r)
 	}
+	decodePlaytimes(r, m.Players, m.Mine)
 	return r.Err()
 }

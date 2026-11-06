@@ -34,7 +34,7 @@ func (s *Server) profileAccount(ctx context.Context, id uint64, moderator bool) 
 func (s *Server) summary(p *store.PlayerSummary) proto.PlayerSummary {
 	out := proto.PlayerSummary{
 		AccountID: p.AccountID, Username: p.Username, Country: p.Country, Role: p.Role, Created: p.CreatedAt,
-		Online: s.hub.Online(p.AccountID), Score: p.Score, Rank: p.Rank,
+		Online: s.hub.Online(p.AccountID), Score: p.Score, Rank: p.Rank, Playtime: p.Playtime,
 	}
 	if p.LastActive != nil {
 		out.LastActive = *p.LastActive

@@ -22,6 +22,7 @@ type PlayerSummary struct {
 	Score      uint32
 	Rank       uint32 // 0 = unranked (score 0 or disabled)
 	Disabled   bool
+	Playtime   uint64 // seconds of the game's time played counter (proto.PlaytimeStat), 0 = none synced
 }
 
 // Profile is an account's full profile. The moderator-only fields are always filled; callers blank them for players.
@@ -78,10 +79,13 @@ var _ Profiles = (*Store)(nil)
 const ranked = "a.score > 0 AND a.disabled_at IS NULL AND a.role <> 2"
 
 // summarySelect computes the rank per row; accounts_score (score, disabled_at) makes the count an index range scan.
+// The playtime is one primary-key lookup in achievement_counters.
 const summarySelect = `SELECT a.id, a.username, COALESCE(a.country_user, a.country_ip), a.role, a.created_at,
 	a.last_active_at, a.score, IF(` + ranked + `, 1 + (SELECT COUNT(*) FROM accounts h
 		WHERE h.score > a.score AND h.disabled_at IS NULL), 0),
-	a.disabled_at IS NOT NULL`
+	a.disabled_at IS NOT NULL,
+	COALESCE((SELECT c.value FROM achievement_counters c WHERE c.account_id = a.id AND c.stat = '` +
+	proto.PlaytimeStat + `'), 0)`
 
 func scanSummary(row rowScanner, extra ...any) (*PlayerSummary, error) {
 	var (
@@ -90,7 +94,7 @@ func scanSummary(row rowScanner, extra ...any) (*PlayerSummary, error) {
 		lastActive sql.NullTime
 	)
 	err := row.Scan(append([]any{&p.AccountID, &p.Username, &p.Country, &role, &p.CreatedAt, &lastActive, &p.Score,
-		&p.Rank, &p.Disabled}, extra...)...)
+		&p.Rank, &p.Disabled, &p.Playtime}, extra...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
