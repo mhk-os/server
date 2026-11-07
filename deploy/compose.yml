@@ -1,0 +1,62 @@
+# Production (mhk-os.svit.ac): MariaDB and the server built from this repository. /srv/mhk-os is a clone;
+# deploy/.env (root, 0600) holds MHK_DB_PASSWORD and MHK_DB_ROOT_PASSWORD (openssl rand -hex 24 each).
+#
+#   MHK_VERSION=$(git rev-parse --short HEAD) docker compose -f deploy/compose.yml up -d --build
+#
+# Host paths: /var/lib/mhk-server/data (ghosts, owned by 65532), /var/lib/mhk-server/geoip (deploy/geoip) and
+# /etc/mhk-server/tls (copies of the Let's Encrypt certificate made by deploy/certbot/20-mhk-server.sh).
+name: mhk-os
+
+services:
+  db:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MHK_DB_ROOT_PASSWORD:?set MHK_DB_ROOT_PASSWORD in deploy/.env}
+      MARIADB_DATABASE: mhk
+      MARIADB_USER: mhk
+      MARIADB_PASSWORD: ${MHK_DB_PASSWORD:?set MHK_DB_PASSWORD in deploy/.env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  server:
+    build:
+      context: ..
+      args:
+        VERSION: ${MHK_VERSION:-dev}
+    image: mhk-server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MHK_DB_DSN: "mhk:${MHK_DB_PASSWORD}@tcp(db:3306)/mhk?parseTime=true"
+      MHK_LISTEN: ":7350"
+      MHK_UDP_LISTEN: ":7350"
+      MHK_TLS_CERT: /tls/fullchain.pem
+      MHK_TLS_KEY: /tls/privkey.pem
+      MHK_DATA_DIR: /data
+      MHK_GEOIP: /geoip/dbip-country-lite.mmdb
+      MHK_LOG_LEVEL: info
+    ports:
+      - "7350:7350/tcp"
+      - "7350:7350/udp"
+    volumes:
+      - /var/lib/mhk-server/data:/data
+      - /var/lib/mhk-server/geoip:/geoip:ro
+      # a directory, not the files: the renewal hook replaces them and the server reloads them on change
+      - /etc/mhk-server/tls:/tls:ro
+    # SIGTERM: connected players are told the server restarts before it exits
+    stop_grace_period: 15s
+    ulimits:
+      nofile: 65536
+
+volumes:
+  db-data:

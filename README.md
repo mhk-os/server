@@ -148,23 +148,24 @@ Players change their username in the game (`ChangeUsername`, 3 times per 30 days
 
 ### Production host (mhk-os.svit.ac)
 
-The production server runs from systemd on an Ubuntu host next to the host's MariaDB and nginx; the files are in
-`deploy/`:
+The production server runs in Docker Compose (`deploy/compose.yml`: MariaDB 10.11 and the server image) from a clone
+of this repository in `/srv/mhk-os`. The host's nginx and certbot answer the HTTP-01 challenges and keep the Let's
+Encrypt certificate; the other files are in `deploy/`:
 
 | Path on the host | From | |
 |------|------|-|
-| `/usr/local/bin/mhk-server` | `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=<commit>" ./cmd/mhk-server` | the binary |
-| `/etc/systemd/system/mhk-server.service` | `deploy/systemd/mhk-server.service` | runs as user `mhk-server`, data in `/var/lib/mhk-server` |
-| `/etc/mhk-server/env` | `deploy/env.example` | DSN (database `mhk`, user `mhk@localhost`), TLS, data and GeoIP paths; `root:mhk-server 0640` |
-| `/etc/mhk-server/tls/` | `deploy/certbot/20-mhk-server.sh` | readable copies of the Let's Encrypt certificate |
+| `/srv/mhk-os/deploy/.env` | | `MHK_DB_PASSWORD`, `MHK_DB_ROOT_PASSWORD`; `root 0600` |
+| `/var/lib/mhk-server/data` | | ghost files, mounted at `/data`; owned by `65532` (the image's user) |
+| `/etc/mhk-server/tls/` | `deploy/certbot/20-mhk-server.sh` | copies of the Let's Encrypt certificate the container can read |
 | `/etc/letsencrypt/renewal-hooks/deploy/20-mhk-server.sh` | `deploy/certbot/20-mhk-server.sh` | refreshes the copies after renewal |
-| `/etc/nginx/sites-enabled/mhk-os.svit.ac` | `deploy/nginx/mhk-os.svit.ac.conf` | HTTP-01 challenges (webroot `/var/www/acme`), browsers to GitHub |
-| `/usr/local/lib/mhk-server/mhk-geoip-update.sh`, `mhk-geoip.{service,timer}` | `deploy/geoip/` | monthly DB-IP update, then a restart |
-| `/usr/local/bin/mhk-admin` | `deploy/mhk-admin` | the admin CLI with the service's configuration, e.g. `mhk-admin account list` |
+| `/usr/local/lib/mhk-server/mhk-geoip-update.sh`, `mhk-geoip.{service,timer}` | `deploy/geoip/` | monthly DB-IP update into `/var/lib/mhk-server/geoip`, then a container restart |
+| `/usr/local/bin/mhk-admin` | `deploy/mhk-admin` | the admin CLI inside the running container, e.g. `mhk-admin account list` |
 
-The certificate comes from `certbot certonly --webroot -w /var/www/acme -d mhk-os.svit.ac --key-type ecdsa`. To update
-the server: build, copy the binary, `systemctl restart mhk-server` (migrations run at startup; running lobbies and races
-end). `journalctl -u mhk-server` shows the log.
+To update the server: `git pull` in `/srv/mhk-os`, then
+`MHK_VERSION=$(git rev-parse --short HEAD) docker compose -f deploy/compose.yml up -d --build` (migrations run at
+startup; running lobbies and races end). `docker compose -f deploy/compose.yml logs -f server` shows the log. Back up
+with `docker compose -f deploy/compose.yml exec db sh -c 'mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" mhk'` and the
+data directory.
 
 ## License
 

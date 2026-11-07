@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs this month's DB-IP Lite country database (CC BY 4.0, IP Geolocation by DB-IP: https://db-ip.com) for the
-# registration country lookup, then restarts mhk-server, which reads the file at start.
+# registration country lookup, then restarts the running server container, which reads the file at start.
 set -eu
 
 target=/var/lib/mhk-server/geoip/dbip-country-lite.mmdb
@@ -12,6 +12,7 @@ curl -fsSL --retry 3 "https://download.db-ip.com/free/dbip-country-lite-$month.m
 test -s "$tmp"
 install -D -m 0644 "$tmp" "$target"
 
-if [ "${1:-}" != "--no-restart" ]; then
-    systemctl try-restart mhk-server
+compose="docker compose -f /srv/mhk-os/deploy/compose.yml"
+if [ "${1:-}" != "--no-restart" ] && [ -n "$($compose ps --status running -q server)" ]; then
+    $compose restart server
 fi
