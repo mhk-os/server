@@ -24,6 +24,7 @@ const (
 	msgBadLimit        = "The page size must be 1-100."
 	msgBadContinent    = "Unknown continent code."
 	msgBadReportReason = "Unknown report reason."
+	msgBadVariant      = "Invalid track variant."
 	maxStoredGameBuild = 64  // runes kept of the ghost's gameBuild label
 	maxStoredReason    = 255 // runes of a moderator reason the database keeps (the wire allows 256 bytes)
 )
@@ -48,25 +49,29 @@ func isModerator(c *Conn) bool {
 // runEntry is what a client sees of a run: flags only for moderators.
 func runEntry(v *store.RunView, moderator bool) proto.RunEntry {
 	e := proto.RunEntry{
-		RunID:         v.ID,
-		Rank:          v.Rank,
-		AccountID:     v.AccountID,
-		Username:      v.Username,
-		Country:       v.Country,
-		FinishMs:      v.FinishMs,
-		BestLapMs:     v.BestLapMs,
-		LapMs:         v.LapMs,
-		KartID:        v.KartID,
-		CharacterID:   v.CharacterID,
-		GhostID:       v.GhostID,
-		Recorded:      v.RecordedAt,
-		Uploaded:      v.UploadedAt,
-		SetupMismatch: v.SetupMismatch,
-		Hidden:        v.Hidden(),
-		FileSize:      v.FileSize,
-		BoardID:       v.BoardID,
-		TrackID:       v.BoardTrackID,
-		EngineClass:   v.EngineClass,
+		RunID:        v.ID,
+		Rank:         v.Rank,
+		AccountID:    v.AccountID,
+		Username:     v.Username,
+		Country:      v.Country,
+		FinishMs:     v.FinishMs,
+		BestLapMs:    v.BestLapMs,
+		LapMs:        v.LapMs,
+		KartID:       v.KartID,
+		KartVersion:  v.KartVersion,
+		CharacterID:  v.CharacterID,
+		GhostID:      v.GhostID,
+		Recorded:     v.RecordedAt,
+		Uploaded:     v.UploadedAt,
+		Hidden:       v.Hidden(),
+		FileSize:     v.FileSize,
+		BoardID:      v.BoardID,
+		TrackID:      v.BoardTrackID,
+		EngineClass:  v.EngineClass,
+		TrackVersion: v.TrackVersion,
+		Variant:      v.Variant,
+		Laps:         v.Laps,
+		RulesVersion: v.RulesVersion,
 	}
 	if moderator {
 		e.Flags = v.Flags
@@ -98,7 +103,11 @@ func (s *Server) handleListBoards(ctx context.Context, _ *Conn, r *wire.Reader) 
 	if err := req.Decode(r); err != nil {
 		return nil, err
 	}
-	f := store.BoardFilter{TrackID: req.TrackID, ContentVersion: req.ContentVersion, Limit: proto.MaxBoards}
+	if req.Variant != proto.AnyVariant && !proto.ValidVariant(req.Variant) {
+		return nil, Errorf(proto.StatusBadRequest, msgBadVariant)
+	}
+	f := store.BoardFilter{TrackID: req.TrackID, RulesVersion: req.RulesVersion, Variant: req.Variant,
+		Limit: proto.MaxBoards}
 	if req.EngineClass != proto.AnyEngineClass {
 		f.EngineClass = &req.EngineClass
 	}
@@ -109,8 +118,8 @@ func (s *Server) handleListBoards(ctx context.Context, _ *Conn, r *wire.Reader) 
 	out := &proto.BoardList{Boards: make([]proto.BoardInfo, len(boards))}
 	for i, b := range boards {
 		out.Boards[i] = proto.BoardInfo{
-			BoardID: b.ID, TrackID: b.TrackID, EngineClass: b.EngineClass, Laps: b.Laps, ContentVersion: b.ContentVersion,
-			TrackHash: b.TrackHash, Players: b.Players, BestMs: b.BestMs,
+			BoardID: b.ID, TrackID: b.TrackID, TrackVersion: b.TrackVersion, Variant: b.Variant,
+			EngineClass: b.EngineClass, Laps: b.Laps, RulesVersion: b.RulesVersion, Players: b.Players, BestMs: b.BestMs,
 		}
 		if b.LastUpload != nil {
 			out.Boards[i].LastUpload = *b.LastUpload
@@ -193,8 +202,12 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 	if res, err := s.existingUpload(ctx, acct, sum.ID); res != nil || err != nil {
 		return res, err
 	}
-	if err := s.deps.Content.RunContent(ctx, c, acct.ID, sum.KartID, sum.CharacterID, sum.TrackID); err != nil {
-		c.log.Info("run refused", "kart", sum.KartID, "character", sum.CharacterID, "track", sum.TrackID, "err", err)
+	if err := s.deps.Content.RunContent(ctx, c, acct.ID, RunContent{
+		RulesVersion: sum.RulesVersion, TrackID: sum.TrackID, TrackVersion: sum.TrackVersion, KartID: sum.KartID,
+		KartVersion: sum.KartVersion, CharacterID: sum.CharacterID,
+	}); err != nil {
+		c.log.Info("run refused", "rules", sum.RulesVersion, "track", sum.TrackID, "track_version", sum.TrackVersion,
+			"kart", sum.KartID, "kart_version", sum.KartVersion, "character", sum.CharacterID, "err", err)
 		return nil, err
 	}
 	hash, err := s.deps.Blobs.Put(req.File)
@@ -202,10 +215,11 @@ func (s *Server) handleUploadRun(ctx context.Context, c *Conn, r *wire.Reader) (
 		return nil, err
 	}
 	run := &store.Run{
-		AccountID: acct.ID, GhostID: sum.ID, TrackID: sum.TrackID, TrackPackID: sum.TrackPackID, KartID: sum.KartID,
+		AccountID: acct.ID, GhostID: sum.ID, TrackID: sum.TrackID, TrackPackID: sum.TrackPackID,
+		TrackVersion: sum.TrackVersion, Variant: sum.Variant, KartID: sum.KartID, KartVersion: sum.KartVersion,
 		CharacterID: sum.CharacterID, EngineClass: uint8(sum.EngineClass), Laps: uint8(sum.Laps),
-		ContentVersion: sum.ContentVersion, TrackHash: sum.TrackHash, SetupHash: sum.SetupHash,
-		GameBuild: storedLabel(sum.GameBuild, maxStoredGameBuild), FinishMs: sum.FinishMs, BestLapMs: sum.BestLapMs,
+		RulesVersion: sum.RulesVersion,
+		GameBuild:    storedLabel(sum.GameBuild, maxStoredGameBuild), FinishMs: sum.FinishMs, BestLapMs: sum.BestLapMs,
 		LapMs: sum.LapMs, FrameCount: sum.FrameCount, RecordedAt: sum.Recorded, UploadedAt: now, Blob: hash,
 		FileSize: uint32(len(req.File)),
 	}

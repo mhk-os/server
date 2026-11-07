@@ -71,7 +71,6 @@ type Catalog interface {
 	// Ready reports whether the connection announced its content completely (lobby requests need it).
 	Ready(conn any, accountID uint64) bool
 	Announced(accountID uint64) (content.Announcement, bool)
-	Differs(accountID uint64, packID string) bool
 	Has(accountID uint64, packID string, kind uint8, id string) bool
 	Items(accountID uint64, packID string, kind uint8) []string
 	Overrides(ann content.Announcement) []content.Override
@@ -127,16 +126,16 @@ type member struct {
 func (m *member) hasLoadout() bool { return m.character != "" && m.kart != "" }
 
 type lobby struct {
-	id             uint64
-	public         bool
-	category       uint8
-	instance       uint16
-	contentVersion int32
-	set            contentSet // anticheat lobbies: what every member announces; nil otherwise
-	code           string
-	settings       proto.RoomSettings
-	members        []*member // join order: members[0] is the longest present
-	owner          uint64    // private rooms
+	id           uint64
+	public       bool
+	category     uint8
+	instance     uint16
+	rulesVersion int32
+	set          contentSet // anticheat lobbies: what every member announces; nil otherwise
+	code         string
+	settings     proto.RoomSettings
+	members      []*member // join order: members[0] is the longest present
+	owner        uint64    // private rooms
 
 	phase   uint8
 	ends    time.Time // zero = no timer
@@ -147,8 +146,9 @@ type lobby struct {
 	// cupTracks are its tracks in race order.
 	cup       string
 	cupTracks []string
-	votes     map[uint64]string
+	votes     map[uint64]pick
 	track     string
+	variant   string // variant key of track
 	raceID    uint64
 	solo      bool // the current race is a solo race: outside the set, no points, no results phase
 	humans    int  // humans in the current race
@@ -157,6 +157,11 @@ type lobby struct {
 	results   []proto.RaceResultRow
 	bans      map[uint64]time.Time // kicked accounts and until when
 	closed    bool
+}
+
+// pick is a track with a variant key; a vote with track "" is Random.
+type pick struct {
+	track, variant string
 }
 
 // aiDriver is one AI driver of the lobby's current set; race n of the set uses the first drivers in this order.
@@ -223,12 +228,12 @@ func (l *lobby) trackKind() uint8 {
 
 // instanceKey groups the public instances players are matched into: anticheat categories also by content set.
 type instanceKey struct {
-	category       uint8
-	contentVersion int32
-	set            string // contentSet.String()
+	category     uint8
+	rulesVersion int32
+	set          string // contentSet.String()
 }
 
-func (l *lobby) key() instanceKey { return instanceKey{l.category, l.contentVersion, l.set.String()} }
+func (l *lobby) key() instanceKey { return instanceKey{l.category, l.rulesVersion, l.set.String()} }
 
 // publicKey returns the instance key of category cat for an announcement and the content set of its instances.
 func publicKey(cat uint8, ann content.Announcement) (instanceKey, contentSet) {
@@ -236,10 +241,10 @@ func publicKey(cat uint8, ann content.Announcement) (instanceKey, contentSet) {
 	if categories[cat].anticheat {
 		set = setOf(ann, categories[cat].packs)
 	}
-	return instanceKey{cat, ann.ContentVersion, set.String()}, set
+	return instanceKey{cat, ann.RulesVersion, set.String()}, set
 }
 
-// contentSet is the manifest hash of each lobby pack and of the game pack, by lowercase pack id ("" = not
+// contentSet is the lowercase commit of each lobby pack and of the game pack, by lowercase pack id ("" = not
 // announced). Every member of an anticheat lobby announces the same.
 type contentSet map[string]string
 
@@ -247,7 +252,7 @@ func setOf(ann content.Announcement, packs []string) contentSet {
 	s := contentSet{}
 	for _, pack := range withGame(packs) {
 		ref, _ := ann.Pack(pack)
-		s[strings.ToLower(pack)] = ref.ManifestHash
+		s[strings.ToLower(pack)] = strings.ToLower(ref.Commit)
 	}
 	return s
 }
@@ -372,7 +377,7 @@ func hasPack(packs []string, id string) bool {
 }
 
 // isContent reports whether id is lobby content of the given kind for the account: its pack (the text before the
-// first dot) is a lobby pack or the built-in game pack, and the deciding manifest of the account's version lists it.
+// first dot) is a lobby pack or the built-in game pack, and the manifest of the account's version lists it.
 func (m *Manager) isContent(packs []string, accountID uint64, kind uint8, id string) bool {
 	pack := content.PackOf(id)
 	if pack == "" || (!strings.EqualFold(pack, gamePack) && !hasPack(packs, pack)) {
@@ -381,13 +386,13 @@ func (m *Manager) isContent(packs []string, accountID uint64, kind uint8, id str
 	return m.cfg.Catalog.Has(accountID, pack, kind, id)
 }
 
-// checkContent applies the content rules of every lobby: same content version, every pack enabled, and no pack
+// checkContent applies the content rules of every lobby: same rules version, every pack enabled, and no pack
 // replacing an item of a lobby pack or of the game pack.
-func (m *Manager) checkContent(ann content.Announcement, contentVersion int32, packs []string) error {
-	if ann.ContentVersion != contentVersion {
+func (m *Manager) checkContent(ann content.Announcement, rulesVersion int32, packs []string) error {
+	if ann.RulesVersion != rulesVersion {
 		return errorf(proto.StatusBadRequest,
-			"This lobby runs another game version (content version %d, yours %d). Please update the game.",
-			contentVersion, ann.ContentVersion)
+			"This lobby runs another game version (rules version %d, yours %d). Please update the game.",
+			rulesVersion, ann.RulesVersion)
 	}
 	var missing []string
 	for _, pack := range packs {
@@ -423,19 +428,14 @@ func (m *Manager) checkContent(ann content.Announcement, contentVersion int32, p
 		"same content: disable it on the Mods screen to join.", strings.Join(mods, ", "), strings.Join(ids, ", "), more)
 }
 
-// checkAnticheat applies the content rules of anticheat lobbies: no lobby pack (nor the game pack) differing from
-// the catalog majority, and the lobby's content set when it has one.
-func (m *Manager) checkAnticheat(p Player, ann content.Announcement, packs []string, set contentSet) error {
-	for _, pack := range withGame(packs) {
-		if m.cfg.Catalog.Differs(p.AccountID, pack) {
-			return errorf(proto.StatusForbidden, "Your copy of %s differs from other players'.", pack)
-		}
-	}
+// checkAnticheat applies the content rule of anticheat lobbies: every lobby pack and the game pack at the commit of
+// the lobby's content set.
+func (m *Manager) checkAnticheat(ann content.Announcement, packs []string, set contentSet) error {
 	if set == nil {
 		return nil
 	}
 	for _, pack := range withGame(packs) {
-		if ref, _ := ann.Pack(pack); ref.ManifestHash != set[strings.ToLower(pack)] {
+		if ref, _ := ann.Pack(pack); !strings.EqualFold(ref.Commit, set[strings.ToLower(pack)]) {
 			return errorf(proto.StatusForbidden,
 				"Your version of %s differs from this lobby's (update your mods or pick another lobby).", pack)
 		}
@@ -444,7 +444,7 @@ func (m *Manager) checkAnticheat(p Player, ann content.Announcement, packs []str
 }
 
 func (m *Manager) checkJoin(l *lobby, p Player, ann content.Announcement) error {
-	if err := m.checkContent(ann, l.contentVersion, l.settings.Packs); err != nil {
+	if err := m.checkContent(ann, l.rulesVersion, l.settings.Packs); err != nil {
 		return err
 	}
 	if until, ok := l.bans[p.AccountID]; ok {
@@ -459,7 +459,7 @@ func (m *Manager) checkJoin(l *lobby, p Player, ann content.Announcement) error 
 	if !l.settings.Anticheat {
 		return nil
 	}
-	return m.checkAnticheat(p, ann, l.settings.Packs, l.set)
+	return m.checkAnticheat(ann, l.settings.Packs, l.set)
 }
 
 // ---- state pushes ----
@@ -468,7 +468,7 @@ func (m *Manager) summary(l *lobby) proto.LobbySummary {
 	s := proto.LobbySummary{
 		LobbyID: l.id, Kind: proto.LobbyPrivate, Name: l.settings.Name, Mode: l.settings.Mode,
 		Anticheat: l.settings.Anticheat, Packs: l.settings.Packs, Players: uint8(len(l.members)),
-		MaxPlayers: l.settings.MaxPlayers, Phase: l.phase, ContentVersion: l.contentVersion,
+		MaxPlayers: l.settings.MaxPlayers, Phase: l.phase, RulesVersion: l.rulesVersion,
 		EngineClass: l.settings.EngineClass, SetRace: l.setRace, SetSize: l.setSize(), MaxAI: l.settings.MaxAI,
 	}
 	if l.public {
@@ -481,7 +481,7 @@ func (m *Manager) summary(l *lobby) proto.LobbySummary {
 func (m *Manager) state(l *lobby) *proto.LobbyState {
 	s := &proto.LobbyState{
 		Summary: m.summary(l), Code: l.code, Settings: l.settings, PhaseEnds: l.ends, SetRace: l.setRace,
-		SetSize: l.setSize(), TrackID: l.track, RaceID: l.raceID,
+		SetSize: l.setSize(), TrackID: l.track, Variant: l.variant, RaceID: l.raceID,
 		Members: make([]proto.LobbyMember, len(l.members)), Votes: []proto.LobbyVote{},
 		LastResults: l.results, AIDrivers: make([]proto.AIDriver, len(l.roster)),
 		CupID: l.cup, CupTrackIDs: append([]string{}, l.cupTracks...),
@@ -499,8 +499,8 @@ func (m *Manager) state(l *lobby) *proto.LobbyState {
 			Moderator: mem.Moderator, InRace: mem.inRace, PingMs: mem.ping, SetPoints: mem.points,
 			Joined: mem.joined, Platform: mem.Platform,
 		}
-		if t, ok := l.votes[mem.AccountID]; ok {
-			s.Votes = append(s.Votes, proto.LobbyVote{AccountID: mem.AccountID, TrackID: t})
+		if v, ok := l.votes[mem.AccountID]; ok {
+			s.Votes = append(s.Votes, proto.LobbyVote{AccountID: mem.AccountID, TrackID: v.track, Variant: v.variant})
 		}
 	}
 	return s
@@ -549,7 +549,7 @@ func (m *Manager) setPhase(l *lobby, phase uint8, d time.Duration, next func()) 
 // idle returns an empty lobby to Waiting and forgets its set.
 func (m *Manager) idle(l *lobby) {
 	m.setPhase(l, proto.PhaseWaiting, 0, nil)
-	l.setRace, l.results, l.track, l.votes, l.roster = 0, nil, "", nil, nil
+	l.setRace, l.results, l.track, l.variant, l.votes, l.roster = 0, nil, "", "", nil, nil
 	l.cup, l.cupTracks = "", nil
 }
 
@@ -564,12 +564,12 @@ func (m *Manager) between(l *lobby) {
 		m.startVoting(l)
 	default:
 		m.setPhase(l, proto.PhaseWaiting, 0, nil)
-		l.track, l.votes = "", nil
+		l.track, l.variant, l.votes = "", "", nil
 	}
 }
 
 func (m *Manager) startVoting(l *lobby) {
-	l.votes, l.track = map[uint64]string{}, ""
+	l.votes, l.track, l.variant = map[uint64]pick{}, "", ""
 	m.setPhase(l, proto.PhaseVoting, m.timing.Voting, func() {
 		m.endVoting(l)
 		m.broadcast(l, 0)
@@ -585,26 +585,27 @@ func (m *Manager) allVoted(l *lobby) bool {
 	return len(l.members) > 0
 }
 
-// endVoting draws one vote at random (in member order, so a seeded RNG is reproducible) and starts the race. A
-// Random vote, or no vote, takes a random track of the lobby content. When nothing can start (no loadouts, no
-// track), public lobbies vote again and private rooms wait for the owner.
+// endVoting draws one vote at random (in member order, so a seeded RNG is reproducible) and starts the race; a drawn
+// track keeps its voter's variant. A Random vote, or no vote, takes a random track of the lobby content in its
+// default variant. When nothing can start (no loadouts, no track), public lobbies vote again and private rooms wait
+// for the owner.
 func (m *Manager) endVoting(l *lobby) {
-	var drawn []string
+	var drawn []pick
 	for _, mem := range l.members {
-		if t, ok := l.votes[mem.AccountID]; ok {
-			drawn = append(drawn, t)
+		if v, ok := l.votes[mem.AccountID]; ok {
+			drawn = append(drawn, v)
 		}
 	}
-	track := ""
+	var p pick
 	if len(drawn) > 0 {
-		track = drawn[m.rng.IntN(len(drawn))]
+		p = drawn[m.rng.IntN(len(drawn))]
 	}
-	if track == "" {
-		track = m.randomTrack(l)
+	if p.track == "" {
+		p = pick{track: m.randomTrack(l)}
 	}
 	err := errNoLoadouts
-	if track != "" {
-		err = m.startRace(l, track, false)
+	if p.track != "" {
+		err = m.startRace(l, p, false)
 	}
 	if err == nil {
 		return
@@ -742,10 +743,10 @@ func (m *Manager) drivers(l *lobby, humans []*member, n int, solo bool) []*aiDri
 	return roster[:n]
 }
 
-// startRace starts a race on track: every member with a loadout races, in join order shuffled, behind the race's
-// AI karts (min(maxAi, maxPlayers − humans) of the set's drivers). A solo race has the lone member against 6
-// throwaway AI drivers, outside the set (no points, the set does not advance).
-func (m *Manager) startRace(l *lobby, track string, solo bool) error {
+// startRace starts a race on the picked track and variant: every member with a loadout races, in join order
+// shuffled, behind the race's AI karts (min(maxAi, maxPlayers − humans) of the set's drivers). A solo race has the
+// lone member against 6 throwaway AI drivers, outside the set (no points, the set does not advance).
+func (m *Manager) startRace(l *lobby, p pick, solo bool) error {
 	humans := racersOf(l)
 	if len(humans) == 0 {
 		return errNoLoadouts
@@ -756,8 +757,8 @@ func (m *Manager) startRace(l *lobby, track string, solo bool) error {
 	m.rng.Shuffle(len(humans), func(i, j int) { humans[i], humans[j] = humans[j], humans[i] })
 	s := l.settings
 	spec := race.Spec{
-		LobbyID: l.id, TrackID: track, Mode: race.ModeRace, EngineClass: s.EngineClass, Laps: s.Laps,
-		Items: s.Items, ItemOdds: s.ItemOdds, Packs: slices.Clone(s.Packs), Anticheat: s.Anticheat,
+		LobbyID: l.id, TrackID: p.track, Variant: p.variant, Mode: race.ModeRace, EngineClass: s.EngineClass,
+		Laps: s.Laps, Items: s.Items, ItemOdds: s.ItemOdds, Packs: slices.Clone(s.Packs), Anticheat: s.Anticheat,
 		SetRace: l.setRace + 1, SetSize: l.setSize(),
 	}
 	if s.Mode == proto.RoomBattleSet {
@@ -787,7 +788,7 @@ func (m *Manager) startRace(l *lobby, track string, solo bool) error {
 	if err != nil {
 		return fmt.Errorf("starting race: %w", err)
 	}
-	l.raceID, l.track, l.solo, l.votes = id, track, solo, nil
+	l.raceID, l.track, l.variant, l.solo, l.votes = id, p.track, p.variant, solo, nil
 	l.humans, l.aiRaced = len(humans), len(drivers)
 	if !solo {
 		l.setRace++
@@ -932,9 +933,9 @@ func (m *Manager) settle(l *lobby, raceID uint64, placements []race.Placement) [
 
 // ---- membership ----
 
-func (m *Manager) newLobby(contentVersion int32, settings proto.RoomSettings) *lobby {
+func (m *Manager) newLobby(rulesVersion int32, settings proto.RoomSettings) *lobby {
 	m.nextID++
-	l := &lobby{id: m.nextID, contentVersion: contentVersion, settings: settings, bans: map[uint64]time.Time{}}
+	l := &lobby{id: m.nextID, rulesVersion: rulesVersion, settings: settings, bans: map[uint64]time.Time{}}
 	m.lobbies[l.id] = l
 	return l
 }
@@ -997,7 +998,7 @@ func (m *Manager) openInstance(key instanceKey, set contentSet) *lobby {
 		}
 		number++
 	}
-	l := m.newLobby(key.contentVersion, publicSettings(key.category))
+	l := m.newLobby(key.rulesVersion, publicSettings(key.category))
 	l.public, l.category, l.instance, l.set = true, key.category, number, set
 	i, _ := slices.BinarySearchFunc(list, number, func(x *lobby, n uint16) int { return int(x.instance) - int(n) })
 	m.instances[key] = slices.Insert(list, i, l)
@@ -1218,13 +1219,8 @@ func (m *Manager) validateSettings(p Player, ann content.Announcement, s proto.R
 			return bad("Pack %q is listed twice or empty.", pack)
 		}
 	}
-	if err := m.checkContent(ann, ann.ContentVersion, s.Packs); err != nil {
+	if err := m.checkContent(ann, ann.RulesVersion, s.Packs); err != nil {
 		return s, err
-	}
-	if s.Anticheat {
-		if err := m.checkAnticheat(p, ann, s.Packs, nil); err != nil {
-			return s, err
-		}
 	}
 	seen := map[string]bool{}
 	for _, o := range s.ItemOdds {
@@ -1270,7 +1266,7 @@ func (m *Manager) CreateRoom(p Player, settings proto.RoomSettings) (*proto.Lobb
 	if err != nil {
 		return nil, err
 	}
-	l := m.newLobby(ann.ContentVersion, s)
+	l := m.newLobby(ann.RulesVersion, s)
 	if s.Anticheat {
 		l.set = setOf(ann, s.Packs)
 	}
@@ -1316,9 +1312,9 @@ func (m *Manager) UpdateRoom(p Player, settings proto.RoomSettings) error {
 		if !ok {
 			return errorf(proto.StatusBadRequest, "%s has not announced their content.", mem.Username)
 		}
-		err := m.checkContent(mann, l.contentVersion, s.Packs)
+		err := m.checkContent(mann, l.rulesVersion, s.Packs)
 		if err == nil && s.Anticheat {
-			err = m.checkAnticheat(mem.Player, mann, s.Packs, set)
+			err = m.checkAnticheat(mann, s.Packs, set)
 		}
 		if err != nil {
 			msg := err.Error()
@@ -1388,11 +1384,11 @@ func (m *Manager) SetLoadout(p Player, character, kart string) error {
 		return errNotInLobby
 	}
 	if character != "" || kart != "" {
-		if err := m.checkContent(ann, l.contentVersion, l.settings.Packs); err != nil {
+		if err := m.checkContent(ann, l.rulesVersion, l.settings.Packs); err != nil {
 			return err
 		}
 		if l.settings.Anticheat {
-			if err := m.checkAnticheat(p, ann, l.settings.Packs, l.set); err != nil {
+			if err := m.checkAnticheat(ann, l.settings.Packs, l.set); err != nil {
 				return err
 			}
 		}
@@ -1425,8 +1421,21 @@ func (m *Manager) SetReady(p Player, ready bool) error {
 	return nil
 }
 
-// Vote records the caller's track vote ("" = Random); the voting ends once every member voted.
-func (m *Manager) Vote(p Player, track string) error {
+// checkVariant checks a requested variant key: valid syntax, and none without a track (Random and "draw one" pick
+// the default variant).
+func checkVariant(track, variant string) error {
+	switch {
+	case !proto.ValidVariant(variant):
+		return errorf(proto.StatusBadRequest, "Track variant %q is invalid.", variant)
+	case track == "" && variant != "":
+		return errorf(proto.StatusBadRequest, "A random track has no variant.")
+	}
+	return nil
+}
+
+// Vote records the caller's track vote with its variant key (track "" = Random); the voting ends once every member
+// voted. The server checks the variant's syntax only: which options a track offers is up to the clients.
+func (m *Manager) Vote(p Player, track, variant string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l := m.byAccount[p.AccountID]
@@ -1438,7 +1447,10 @@ func (m *Manager) Vote(p Player, track string) error {
 	case track != "" && !m.isContent(l.settings.Packs, p.AccountID, l.trackKind(), track):
 		return errorf(proto.StatusBadRequest, "%s is not a track of this lobby.", track)
 	}
-	l.votes[p.AccountID] = track
+	if err := checkVariant(track, variant); err != nil {
+		return err
+	}
+	l.votes[p.AccountID] = pick{track, variant}
 	if m.allVoted(l) {
 		m.endVoting(l)
 	}
@@ -1450,8 +1462,9 @@ func (m *Manager) Vote(p Player, track string) error {
 // 6 AI drivers on track ("" = a random lobby track of the right kind), outside the set. A private room's owner, with
 // company or alone, starts the next race of the set: on track when the owner picks ("" draws a random one), by
 // opening the voting in vote rooms, the cup's next track (which the owner's client sends) in cup championships, and
-// the next track of the custom list or of the owner's running cup ("" or that id).
-func (m *Manager) StartRace(p Player, track string) error {
+// the next track of the custom list or of the owner's running cup ("" or that id). Picked tracks race in variant;
+// drawn ones, championships and cups in the default variant.
+func (m *Manager) StartRace(p Player, track, variant string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l := m.byAccount[p.AccountID]
@@ -1465,13 +1478,16 @@ func (m *Manager) StartRace(p Player, track string) error {
 	case l.phase != proto.PhaseWaiting:
 		return errorf(proto.StatusBadRequest, "A race can only start while the lobby waits.")
 	}
+	if err := checkVariant(track, variant); err != nil {
+		return err
+	}
 	solo := l.public
 	if !slices.ContainsFunc(l.members, (*member).hasLoadout) {
 		return errNoLoadouts
 	}
 	s := l.settings
 	if !solo && s.TrackPick == proto.PickVote {
-		if track != "" {
+		if track != "" || variant != "" {
 			return errorf(proto.StatusBadRequest, "This room votes on tracks.")
 		}
 		m.startVoting(l)
@@ -1479,6 +1495,8 @@ func (m *Manager) StartRace(p Player, track string) error {
 		return nil
 	}
 	switch {
+	case variant != "" && !solo && (s.Mode == proto.RoomChampionship || l.cup != ""):
+		return errorf(proto.StatusBadRequest, "Championships and cups race every track in its default variant.")
 	case !solo && len(l.setTracks()) > 0:
 		list := l.setTracks()
 		next := list[min(int(l.setRace), len(list)-1)]
@@ -1497,7 +1515,7 @@ func (m *Manager) StartRace(p Player, track string) error {
 	case !m.isContent(s.Packs, p.AccountID, l.trackKind(), track):
 		return errorf(proto.StatusBadRequest, "%s is not a track of this lobby.", track)
 	}
-	if err := m.startRace(l, track, solo); err != nil {
+	if err := m.startRace(l, pick{track, variant}, solo); err != nil {
 		m.log.Error("starting race", "lobby", l.id, "err", err)
 		return errorf(proto.StatusServerError, "The race could not start.")
 	}
@@ -1531,7 +1549,7 @@ func (m *Manager) StartCup(p Player, cupID string, tracks []string) error {
 		return errNoLoadouts
 	}
 	l.cup, l.cupTracks = cupID, slices.Clone(tracks)
-	if err := m.startRace(l, tracks[0], false); err != nil {
+	if err := m.startRace(l, pick{track: tracks[0]}, false); err != nil {
 		l.cup, l.cupTracks = "", nil
 		m.log.Error("starting cup", "lobby", l.id, "err", err)
 		return errorf(proto.StatusServerError, "The race could not start.")

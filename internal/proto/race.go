@@ -144,6 +144,7 @@ type RaceSetup struct {
 	RaceID      uint64
 	LobbyID     uint64
 	TrackID     string
+	Variant     string // variant key of TrackID; "" = the track's default
 	Mode        uint8
 	EngineClass uint8
 	Laps        uint8
@@ -165,6 +166,7 @@ func (m *RaceSetup) Encode(w *wire.Writer) {
 	w.U64(m.RaceID)
 	w.U64(m.LobbyID)
 	w.String(m.TrackID)
+	w.String(m.Variant)
 	w.U8(m.Mode)
 	w.U8(m.EngineClass)
 	w.U8(m.Laps)
@@ -189,6 +191,7 @@ func (m *RaceSetup) Decode(r *wire.Reader) error {
 	m.RaceID = r.U64()
 	m.LobbyID = r.U64()
 	m.TrackID = r.String(MaxTrackID)
+	m.Variant = r.String(MaxVariant)
 	m.Mode = r.U8()
 	m.EngineClass = r.U8()
 	m.Laps = r.U8()
@@ -606,14 +609,15 @@ type ItemRules struct {
 
 // RaceLoaded is notify 528.
 type RaceLoaded struct {
-	RaceID    uint64
-	TrackHash string
-	Laps      uint8
-	Boxes     []ItemBoxInfo
-	Pool      []PoolEntry
-	Specials  []Special
-	Rules     ItemRules
-	Effects   []string
+	RaceID       uint64
+	TrackVersion int32  // content version of the loaded track variant
+	Variant      string // variant key the client loaded
+	Laps         uint8
+	Boxes        []ItemBoxInfo
+	Pool         []PoolEntry
+	Specials     []Special
+	Rules        ItemRules
+	Effects      []string
 }
 
 func (m *RaceLoaded) Encode(w *wire.Writer) {
@@ -623,7 +627,8 @@ func (m *RaceLoaded) Encode(w *wire.Writer) {
 
 // EncodeContent writes every field but raceId: the part racers must agree on.
 func (m *RaceLoaded) EncodeContent(w *wire.Writer) {
-	w.String(m.TrackHash)
+	w.I32(m.TrackVersion)
+	w.String(m.Variant)
 	w.U8(m.Laps)
 	w.Count(len(m.Boxes))
 	for i := range m.Boxes {
@@ -648,7 +653,8 @@ func (m *RaceLoaded) EncodeContent(w *wire.Writer) {
 
 func (m *RaceLoaded) Decode(r *wire.Reader) error {
 	m.RaceID = r.U64()
-	m.TrackHash = r.String(MaxHash)
+	m.TrackVersion = r.I32()
+	m.Variant = r.String(MaxVariant)
 	m.Laps = r.U8()
 	m.Boxes = make([]ItemBoxInfo, r.Count(MaxItemBoxes, boxInfoMinSize))
 	for i := range m.Boxes {

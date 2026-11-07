@@ -150,11 +150,10 @@ func (r *fakeRaces) startCount() int {
 
 // fakeCatalog: every account has the same content unless announced otherwise.
 type fakeCatalog struct {
-	mu      sync.Mutex
-	ann     map[uint64]content.Announcement
-	items   map[string][]proto.ManifestItem // by lowercase pack
-	differs map[uint64]string               // account → pack whose copy differs
-	hidden  map[uint64]map[string]bool      // account → item ids its catalog does not list
+	mu     sync.Mutex
+	ann    map[uint64]content.Announcement
+	items  map[string][]proto.ManifestItem // by lowercase pack
+	hidden map[uint64]map[string]bool      // account → item ids its catalog does not list
 }
 
 func newFakeCatalog() *fakeCatalog {
@@ -177,19 +176,23 @@ func newFakeCatalog() *fakeCatalog {
 			"mhk3":   it(proto.ContentTrack, "mhk3.paris"),
 			"tincan": it(proto.ContentKart, "tincan.can"),
 		},
-		differs: map[uint64]string{},
-		hidden:  map[uint64]map[string]bool{},
+		hidden: map[uint64]map[string]bool{},
 	}
 }
 
 var allPacks = []string{"game", "mhk2", "mhk3", "mhke", "mhkt"}
 
-func (c *fakeCatalog) announce(id uint64, contentVersion int32, packs ...string) {
+func (c *fakeCatalog) announce(id uint64, rulesVersion int32, packs ...string) {
+	c.announceAt(id, rulesVersion, "v1", packs...)
+}
+
+// announceAt announces every pack at commit.
+func (c *fakeCatalog) announceAt(id uint64, rulesVersion int32, commit string, packs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	a := content.Announcement{ContentVersion: contentVersion, Packs: map[string]proto.PackRef{}}
+	a := content.Announcement{RulesVersion: rulesVersion, Packs: map[string]proto.PackRef{}}
 	for _, p := range packs {
-		a.Packs[strings.ToLower(p)] = proto.PackRef{PackID: p, Commit: "v1", ManifestHash: strings.Repeat("a", 32)}
+		a.Packs[strings.ToLower(p)] = proto.PackRef{PackID: p, Commit: commit}
 	}
 	c.ann[id] = a
 }
@@ -201,12 +204,6 @@ func (c *fakeCatalog) Announced(id uint64) (content.Announcement, bool) {
 	defer c.mu.Unlock()
 	a, ok := c.ann[id]
 	return a, ok
-}
-
-func (c *fakeCatalog) Differs(id uint64, pack string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return strings.EqualFold(c.differs[id], pack)
 }
 
 func (c *fakeCatalog) Has(id uint64, pack string, kind uint8, item string) bool {
@@ -334,7 +331,7 @@ type env struct {
 	scores *fakeScores
 }
 
-const testContentVersion = 7
+const testRulesVersion = 7
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
@@ -357,7 +354,7 @@ func newEnv(t *testing.T) *env {
 
 // player returns a player with the default content announced.
 func (e *env) player(id uint64) Player {
-	e.cat.announce(id, testContentVersion, allPacks...)
+	e.cat.announce(id, testRulesVersion, allPacks...)
 	return Player{AccountID: id, Username: fmt.Sprintf("p%d", id), Country: "DE"}
 }
 

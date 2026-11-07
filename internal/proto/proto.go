@@ -1,13 +1,17 @@
 // Package proto defines the MHK:OS protocol constants and messages on top of internal/wire (docs/protocol.md).
 package proto
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 const (
 	// Magic opens every Hello: the bytes "MHKO" read as a little-endian u32.
 	Magic uint32 = 0x4F4B484D
 	// Version is the protocol revision; bump it only for incompatible changes.
-	Version uint16 = 4
+	Version uint16 = 5
 	// DefaultPort serves both the TCP control connection and (phase 3) UDP realtime.
 	DefaultPort = 7350
 )
@@ -166,6 +170,46 @@ func ValidID(id string, max int) bool {
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
 			return false
 		}
+	}
+	return true
+}
+
+// Variant key limits (docs/protocol.md, "Versions and track variants").
+const (
+	MaxVariant        = 128 // whole key
+	MaxVariantToken   = 64
+	MaxVariantOptions = 8
+	// AnyVariant is the ListBoards variant that matches every board.
+	AnyVariant = "*"
+)
+
+// ValidVariant reports whether key is a track variant key: "" (the track's default variant), or 1 to
+// MaxVariantOptions distinct option ids of 1 to MaxVariantToken characters of [a-z0-9_.-] joined by "+", at most
+// MaxVariant characters in all. The server checks the syntax only; which options a track offers is client content.
+func ValidVariant(key string) bool {
+	if key == "" {
+		return true
+	}
+	if len(key) > MaxVariant {
+		return false
+	}
+	var tokens [MaxVariantOptions]string
+	n := 0
+	for token := range strings.SplitSeq(key, "+") {
+		if n == MaxVariantOptions || len(token) == 0 || len(token) > MaxVariantToken {
+			return false
+		}
+		for i := range len(token) {
+			c := token[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-') {
+				return false
+			}
+		}
+		if slices.Contains(tokens[:n], token) {
+			return false
+		}
+		tokens[n] = token
+		n++
 	}
 	return true
 }

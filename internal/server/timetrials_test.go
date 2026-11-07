@@ -21,8 +21,12 @@ import (
 	"github.com/mhk-os/server/internal/testclient"
 )
 
-// Time-trial tests use a unique track and kart per test, so boards and setup votes of earlier runs against the
-// same database do not interfere.
+// Time-trial tests use a unique track and kart per test (each in its own pack), so boards and kart versions of
+// earlier runs against the same database do not interfere. upload announces the packs of the ghost's track and kart
+// right before it, listing them with the ghost's versions.
+
+// rulesVersion is the rules version of ghosttest's ghosts and of testclient.DefaultHello.
+const rulesVersion = 1
 
 type player struct {
 	c    *testclient.Client
@@ -47,15 +51,15 @@ func announce(t *testing.T, c *testclient.Client, ms []proto.PackManifest) {
 	t.Helper()
 	refs := make([]proto.PackRef, len(ms))
 	for i, m := range ms {
-		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.ManifestHash}
+		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit}
 	}
-	res, err := c.ContentHello(ctxT(t), testclient.DefaultHello().ContentVersion, refs)
+	res, err := c.ContentHello(ctxT(t), rulesVersion, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var send []proto.PackManifest
 	for _, m := range ms {
-		if slices.Contains(res.Missing, m.ManifestHash) {
+		if slices.ContainsFunc(res.Missing, func(id string) bool { return strings.EqualFold(id, m.PackID) }) {
 			send = append(send, m)
 		}
 	}
@@ -80,7 +84,34 @@ func newModerator(t *testing.T, ts *testServer) *player {
 	return &player{c: c, acct: s.Account, name: p.name}
 }
 
-func uniqueID(prefix string) string { return uniqueName(prefix) }
+// uniqueID returns a content id in a pack of its own: "<prefix><random>.<prefix>".
+func uniqueID(prefix string) string { return uniqueName(prefix) + "." + prefix }
+
+// manifest lists items in pack packID at commit, for rulesVersion.
+func manifest(packID, commit string, items ...proto.ManifestItem) proto.PackManifest {
+	return proto.PackManifest{PackID: packID, Commit: commit, RulesVersion: rulesVersion, Items: items}
+}
+
+// contentFor returns the manifests of the packs of g's track and kart, listing them with g's versions. The commit
+// names the versions, so equal content shares a stored manifest.
+func contentFor(g *ghosttest.Ghost) []proto.PackManifest {
+	var out []proto.PackManifest
+	add := func(kind uint8, id string, version int32, tag string) {
+		pack := strings.ToLower(content.PackOf(id))
+		item := proto.ManifestItem{Kind: kind, ID: strings.ToLower(id), Version: version}
+		for i := range out {
+			if out[i].PackID == pack {
+				out[i].Commit += tag + strconv.Itoa(int(version))
+				out[i].Items = append(out[i].Items, item)
+				return
+			}
+		}
+		out = append(out, manifest(pack, tag+strconv.Itoa(int(version)), item))
+	}
+	add(proto.ContentTrack, g.Header.TrackID, g.Header.TrackVersion, "t")
+	add(proto.ContentKart, g.Header.KartID, g.Header.KartVersion, "k")
+	return out
+}
 
 // run returns a valid ghost on track/kart whose laps take the given times (0.5 s run-up).
 func run(track, kart string, laps ...float32) *ghosttest.Ghost {
@@ -90,8 +121,10 @@ func run(track, kart string, laps ...float32) *ghosttest.Ghost {
 	return g
 }
 
+// upload announces the content of g and uploads it.
 func upload(t *testing.T, p *player, g *ghosttest.Ghost) *proto.UploadResult {
 	t.Helper()
+	announce(t, p.c, contentFor(g))
 	res, err := p.c.UploadRun(ctxT(t), g.Encode())
 	if err != nil {
 		t.Fatalf("upload by %s: %v", p.name, err)
@@ -144,21 +177,28 @@ func TestUploadAndLeaderboard(t *testing.T) {
 		r1.Run.EngineClass != 2 || r1.Run.Username != a.name || r1.Run.AccountID != a.acct.ID || r1.Run.Hidden {
 		t.Fatalf("first upload %+v", r1)
 	}
-	boards, err := a.c.ListBoards(ctx, strings.ToUpper(track), proto.AnyEngineClass, proto.AnyContentVersion)
+	if r1.Run.TrackVersion != 1 || r1.Run.Variant != "" || r1.Run.Laps != 3 || r1.Run.RulesVersion != rulesVersion ||
+		r1.Run.KartID != kart || r1.Run.KartVersion != 1 {
+		t.Fatalf("first upload versions %+v", r1.Run)
+	}
+	boards, err := a.c.ListBoards(ctx, proto.ListBoards{TrackID: strings.ToUpper(track),
+		EngineClass: proto.AnyEngineClass, RulesVersion: proto.AnyRulesVersion, Variant: proto.AnyVariant})
 	if err != nil || len(boards) != 1 {
 		t.Fatalf("boards %+v %v", boards, err)
 	}
 	bd := boards[0]
-	if bd.BoardID != r1.Run.BoardID || bd.TrackID != track || bd.Laps != 3 || bd.EngineClass != 2 ||
-		bd.ContentVersion != 4 || bd.Players != 1 || bd.BestMs != 92_500 || bd.LastUpload.IsZero() ||
-		bd.TrackHash != ghosttest.New().Header.TrackHash {
+	if bd.BoardID != r1.Run.BoardID || bd.TrackID != track || bd.TrackVersion != 1 || bd.Variant != "" ||
+		bd.Laps != 3 || bd.EngineClass != 2 || bd.RulesVersion != rulesVersion || bd.Players != 1 ||
+		bd.BestMs != 92_500 || bd.LastUpload.IsZero() {
 		t.Fatalf("board %+v", bd)
 	}
-	if bs, _ := a.c.ListBoards(ctx, track, 1, 0); len(bs) != 0 {
+	if bs, _ := a.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: 1,
+		Variant: proto.AnyVariant}); len(bs) != 0 {
 		t.Fatalf("engine class filter: %+v", bs)
 	}
-	if bs, _ := a.c.ListBoards(ctx, track, 2, 5); len(bs) != 0 {
-		t.Fatalf("content version filter: %+v", bs)
+	if bs, _ := a.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: 2, RulesVersion: 5,
+		Variant: proto.AnyVariant}); len(bs) != 0 {
+		t.Fatalf("rules version filter: %+v", bs)
 	}
 
 	r2 := upload(t, a, run(track, kart, 30, 30, 30)) // 90.5 s: new best
@@ -174,12 +214,10 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	if !rb.PersonalBest || rb.Run.Rank != 2 {
 		t.Fatalf("b's best %+v", rb)
 	}
-	// Another track case and a changed track hash (a mod's racing-line tweak), same identity: same board.
-	const newHash = "0123456789abcdef0123456789abcdef"
+	// Another track case, same identity: same board.
 	g := run(strings.ToUpper(track), kart, 31, 31, 31.2) // 93.7 s
-	g.Header.TrackHash = newHash
 	if res := upload(t, b, g); res.Run.BoardID != bd.BoardID || res.Run.Rank != 5 || res.PersonalBest {
-		t.Fatalf("upper-case track, new track hash %+v", res)
+		t.Fatalf("upper-case track %+v", res)
 	}
 
 	// Every run is listed: a 90.5, b 91, a 92.5, b 92.5, b 93.7, a 96.5.
@@ -209,8 +247,9 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	_, err = a.c.GetLeaderboard(ctx, &proto.GetLeaderboard{BoardID: 1 << 60, Limit: 10})
 	wantStatus(t, err, proto.StatusNotFound)
 
-	boards, _ = a.c.ListBoards(ctx, track, proto.AnyEngineClass, proto.AnyContentVersion)
-	if len(boards) != 1 || boards[0].Players != 2 || boards[0].BestMs != 90_500 || boards[0].TrackHash != newHash {
+	boards, _ = a.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: proto.AnyEngineClass,
+		Variant: proto.AnyVariant})
+	if len(boards) != 1 || boards[0].Players != 2 || boards[0].BestMs != 90_500 {
 		t.Fatalf("board stats %+v", boards)
 	}
 
@@ -218,16 +257,18 @@ func TestUploadAndLeaderboard(t *testing.T) {
 	dup := run(track, kart, 30, 30, 30)
 	dup.Header.ID = ghostIDOf(t, a, r2.Run.RunID)
 	file := dup.Encode()
-	again, err := a.c.UploadRun(ctx, file)
+	again, err := a.c.UploadRun(ctx, file) // a's connection still announces this content
 	if err != nil || !again.Duplicate || again.Run.RunID != r2.Run.RunID || !again.PersonalBest {
 		t.Fatalf("duplicate %+v %v", again, err)
 	}
+	announce(t, b.c, contentFor(dup))
 	_, err = b.c.UploadRun(ctx, file)
 	wantStatus(t, err, proto.StatusForbidden)
 
 	// Download returns the exact bytes and the entry.
 	orig := run(track, kart, 33, 33, 33)
 	origFile := orig.Encode()
+	announce(t, b.c, contentFor(orig))
 	up, err := b.c.UploadRun(ctx, origFile)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +319,10 @@ func TestUploadValidation(t *testing.T) {
 		{"trailing", func(g *ghosttest.Ghost) { g.Trailing = []byte{7} }, nil, "after the body block"},
 		{"id", func(g *ghosttest.Ghost) { g.Header.ID = "nothex" }, nil, "ghost id"},
 		{"track id", func(g *ghosttest.Ghost) { g.Header.TrackID = "../etc" }, nil, "track id"},
-		{"hash", func(g *ghosttest.Ghost) { g.Header.SetupHash = "" }, nil, "setup hash"},
+		{"variant", func(g *ghosttest.Ghost) { g.Header.Variant = "core.rain+core.rain" }, nil, "variant"},
+		{"track version", func(g *ghosttest.Ghost) { g.Header.TrackVersion = 0 }, nil, "track version 0"},
+		{"kart version", func(g *ghosttest.Ghost) { g.Header.KartVersion = -2 }, nil, "kart version -2"},
+		{"rules version", func(g *ghosttest.Ghost) { g.Header.RulesVersion = 0 }, nil, "rules version 0"},
 		{"engine class", func(g *ghosttest.Ghost) { g.Header.EngineClass = 7 }, nil, "engine class"},
 		{"laps", func(g *ghosttest.Ghost) { g.Header.Laps = 4 }, nil, "3 lap times for 4 laps"},
 		{"tick", func(g *ghosttest.Ghost) { g.Header.TickSeconds = 0.5 }, nil, "tick"},
@@ -337,19 +381,19 @@ func TestUploadRateLimit(t *testing.T) {
 func TestUploadContentChecks(t *testing.T) {
 	ts := start(t, server.Config{}, generous)
 	ctx := ctxT(t)
-	pack, mod, track := uniqueID("pk"), uniqueID("mod"), uniqueID("trk")
-	kart := pack + ".kart"
-	manifest := func(packID, fingerprint string, ids ...string) proto.PackManifest {
-		m := proto.PackManifest{PackID: packID, Commit: "c1", ContentVersion: testclient.DefaultHello().ContentVersion}
-		for _, id := range ids {
-			m.Items = append(m.Items, proto.ManifestItem{Kind: proto.ContentKart, ID: id, Fingerprint: fingerprint})
-		}
-		m.ManifestHash, _ = content.ManifestHash(m.Items)
-		return m
+	pack, mod := uniqueName("pk"), uniqueName("mod")
+	track, kart := pack+".trk", pack+".kart"
+	// The pack lists the track at version 2 and the kart at version 3.
+	base := manifest(pack, "c1", proto.ManifestItem{Kind: proto.ContentTrack, ID: track, Version: 2},
+		proto.ManifestItem{Kind: proto.ContentKart, ID: kart, Version: 3})
+	ghostOf := func(trackVersion, kartVersion int32) *ghosttest.Ghost {
+		g := run(track, kart, 30, 30, 30)
+		g.Header.TrackVersion, g.Header.KartVersion = trackVersion, kartVersion
+		return g
 	}
-	wantRefused := func(p *player, status proto.Status, msg string) {
+	wantRefused := func(p *player, g *ghosttest.Ghost, status proto.Status, msg string) {
 		t.Helper()
-		_, err := p.c.UploadRun(ctx, run(track, kart, 30, 30, 30).Encode())
+		_, err := p.c.UploadRun(ctx, g.Encode())
 		wantStatus(t, err, status)
 		if !strings.Contains(err.Error(), msg) {
 			t.Fatalf("%v does not mention %q", err, msg)
@@ -362,24 +406,37 @@ func TestUploadContentChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRefused(&player{c: c, acct: s.Account}, proto.StatusBadRequest, "hasn't sent its content")
+	wantRefused(&player{c: c, acct: s.Account}, ghostOf(2, 3), proto.StatusBadRequest, "hasn't sent its content")
 
-	// Three accounts back the kart's fingerprint; a fourth copy of the same commit differs.
-	var honest []*player
-	for range 3 {
-		p := newPlayer(t, ts, "cc_")
-		announce(t, p.c, []proto.PackManifest{manifest(pack, "aa", kart)})
-		honest = append(honest, p)
+	p := newPlayer(t, ts, "cc_")
+	announce(t, p.c, []proto.PackManifest{base})
+	wantRefused(p, ghostOf(2, 2), proto.StatusForbidden, "another version of "+kart)
+	wantRefused(p, ghostOf(2, 4), proto.StatusForbidden, "another version of "+kart)
+	wantRefused(p, ghostOf(1, 3), proto.StatusForbidden, "older version of "+track)
+	rules := ghostOf(2, 3)
+	rules.Header.RulesVersion = rulesVersion + 1
+	wantRefused(p, rules, proto.StatusForbidden, "other game rules")
+	missing := ghostOf(2, 3)
+	missing.Header.KartID = pack + ".other"
+	wantRefused(p, missing, proto.StatusForbidden, "isn't installed")
+	// The track version of the item itself, and a higher one (a variant adds its overlays' bumps): accepted.
+	exact, err := p.c.UploadRun(ctx, ghostOf(2, 3).Encode())
+	if err != nil || exact.Run.TrackVersion != 2 || exact.Run.KartVersion != 3 {
+		t.Fatalf("exact versions %+v %v", exact, err)
 	}
-	tampered := newPlayer(t, ts, "cc_")
-	announce(t, tampered.c, []proto.PackManifest{manifest(pack, "bb", kart)})
-	wantRefused(tampered, proto.StatusForbidden, "Your copy of "+pack+" differs from other players' ("+kart+")")
-	upload(t, honest[0], run(track, kart, 30, 30, 30))
+	bumped := ghostOf(4, 3)
+	bumped.Header.Variant = "core.night+core.rain"
+	res, err := p.c.UploadRun(ctx, bumped.Encode())
+	if err != nil || res.Run.TrackVersion != 4 || res.Run.Variant != "core.night+core.rain" ||
+		res.Run.BoardID == exact.Run.BoardID {
+		t.Fatalf("overlay-bumped track version %+v %v", res, err)
+	}
 
 	// A mod replacing the kart by load order.
 	modded := newPlayer(t, ts, "cc_")
-	announce(t, modded.c, []proto.PackManifest{manifest(pack, "aa"), manifest(mod, "ff", kart)})
-	wantRefused(modded, proto.StatusForbidden, "uses "+kart+" replaced by "+mod)
+	announce(t, modded.c, []proto.PackManifest{base,
+		manifest(mod, "m1", proto.ManifestItem{Kind: proto.ContentKart, ID: kart, Version: 3})})
+	wantRefused(modded, ghostOf(2, 3), proto.StatusForbidden, "uses "+kart+" replaced by "+mod)
 }
 
 func TestLeaderboardFilters(t *testing.T) {
@@ -447,37 +504,117 @@ func TestLeaderboardFilters(t *testing.T) {
 	}
 }
 
-func TestSetupMismatch(t *testing.T) {
+func TestKartVersionExclusion(t *testing.T) {
 	ts := start(t, server.Config{}, generous)
-	track, kart := uniqueID("trk"), uniqueID("kart")
-	const common, odd = "11111111111111111111111111111111", "22222222222222222222222222222222"
-	withSetup := func(hash string) *ghosttest.Ghost {
-		g := run(track, kart, 30, 30, 30)
-		g.Header.SetupHash = hash
+	ctx := ctxT(t)
+	track, kart, otherKart := uniqueID("trk"), uniqueID("kart"), uniqueID("kart")
+	withKart := func(id string, version int32, laps ...float32) *ghosttest.Ghost {
+		g := run(track, id, laps...)
+		g.Header.KartVersion = version
 		return g
 	}
-	a, b := newPlayer(t, ts, "su_"), newPlayer(t, ts, "su_")
-	ra := upload(t, a, withSetup(common))
-	rb := upload(t, b, withSetup(odd))
-	if ra.Run.SetupMismatch || rb.Run.SetupMismatch {
-		t.Fatal("mismatch before 3 accounts uploaded")
+	a, b, c := newPlayer(t, ts, "kv_"), newPlayer(t, ts, "kv_"), newPlayer(t, ts, "kv_")
+	ra := upload(t, a, withKart(kart, 1, 28, 28, 28))      // 84.5 s
+	rb := upload(t, b, withKart(kart, 1, 29, 29, 29))      // 87.5 s
+	ro := upload(t, b, withKart(otherKart, 1, 33, 33, 33)) // 99.5 s, another kart: unaffected
+	if ra.Run.Rank != 1 || rb.Run.Rank != 2 || !rb.PersonalBest {
+		t.Fatalf("v1 runs %+v %+v", ra.Run, rb)
 	}
-	upload(t, newPlayer(t, ts, "su_"), withSetup(common))
-	rc := upload(t, newPlayer(t, ts, "su_"), withSetup(common))
-	if rc.Run.SetupMismatch {
-		t.Fatal("majority run marked")
+	boardID := ra.Run.BoardID
+
+	// Kart version 2 appears: every v1 run of the kart leaves the leaderboard, ranks and board statistics.
+	rc := upload(t, c, withKart(strings.ToUpper(kart), 2, 31, 31, 31)) // 93.5 s
+	if rc.Run.BoardID != boardID || rc.Run.Rank != 1 || !rc.PersonalBest || rc.Run.KartVersion != 2 {
+		t.Fatalf("v2 run %+v", rc)
 	}
-	lb := board(t, a, ra.Run.BoardID, proto.LeaderboardFilter{})
-	for _, e := range lb.Entries {
-		if e.SetupMismatch != (e.RunID == rb.Run.RunID) {
-			t.Fatalf("run %d by %s: mismatch %t", e.RunID, e.Username, e.SetupMismatch)
+	lb := board(t, a, boardID, proto.LeaderboardFilter{})
+	wantNames(t, lb, c.name, b.name)
+	if lb.Entries[1].RunID != ro.Run.RunID || lb.Mine != nil {
+		t.Fatalf("leaderboard after the kart update %+v (mine %+v)", lb.Entries, lb.Mine)
+	}
+	if lb := board(t, newModerator(t, ts), boardID, proto.LeaderboardFilter{IncludeHidden: true}); len(lb.Entries) != 2 {
+		t.Fatalf("moderator sees outdated runs %+v", lb.Entries)
+	}
+	bs, _ := a.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: proto.AnyEngineClass,
+		Variant: proto.AnyVariant})
+	if len(bs) != 1 || bs[0].Players != 2 || bs[0].BestMs != 93_500 {
+		t.Fatalf("board stats %+v", bs)
+	}
+	// The outdated run stays the player's, unranked and not hidden.
+	if mine, _ := a.c.MyRuns(ctx, track); len(mine) != 1 || mine[0].Rank != 0 || mine[0].Hidden ||
+		mine[0].KartVersion != 1 {
+		t.Fatalf("outdated own run %+v", mine)
+	}
+	// Another v1 upload is stored but never ranked; v2 ranks again.
+	if late := upload(t, a, withKart(kart, 1, 27, 27, 27)); late.Run.Rank != 0 || late.PersonalBest {
+		t.Fatalf("late v1 upload %+v", late)
+	}
+	if v2 := upload(t, a, withKart(kart, 2, 30, 30, 30)); v2.Run.Rank != 1 || !v2.PersonalBest {
+		t.Fatalf("a's v2 upload %+v", v2)
+	}
+	wantNames(t, board(t, b, boardID, proto.LeaderboardFilter{}), a.name, c.name, b.name)
+}
+
+func TestBoardIdentity(t *testing.T) {
+	ts := start(t, server.Config{}, generous)
+	ctx := ctxT(t)
+	track, kart := uniqueID("trk"), uniqueID("kart")
+	p := newPlayer(t, ts, "bi_")
+	variant := func(key string, trackVersion int32, laps ...float32) *ghosttest.Ghost {
+		g := run(track, kart, laps...)
+		g.Header.Variant, g.Header.TrackVersion = key, trackVersion
+		return g
+	}
+	def := upload(t, p, variant("", 1, 30, 30, 30))
+	rain := upload(t, p, variant("core.rain", 1, 31, 31, 31))
+	night := upload(t, p, variant("core.night+core.rain", 1, 32, 32, 32))
+	v2 := upload(t, p, variant("", 2, 33, 33, 33))
+	lap := variant("", 1, 30)
+	lap.Events = lap.Events[:4] // up to 14 s: inside the 30.5 s run
+	oneLap := upload(t, p, lap)
+	ids := map[uint64]bool{}
+	for _, r := range []*proto.UploadResult{def, rain, night, v2, oneLap} {
+		if r.Run.Rank != 1 || !r.PersonalBest {
+			t.Fatalf("each run leads its own board: %+v", r)
 		}
+		ids[r.Run.BoardID] = true
 	}
-	// Another track with the same kart, class and laps shares the vote.
-	other := withSetup(odd)
-	other.Header.TrackID = uniqueID("trk")
-	if res := upload(t, b, other); !res.Run.SetupMismatch {
-		t.Fatal("odd setup on another track not marked")
+	if len(ids) != 5 {
+		t.Fatalf("boards %v", ids)
+	}
+	if rain.Run.Variant != "core.rain" || v2.Run.TrackVersion != 2 || oneLap.Run.Laps != 1 {
+		t.Fatalf("board fields %+v %+v %+v", rain.Run, v2.Run, oneLap.Run)
+	}
+	// Same variant again: same board.
+	if again := upload(t, p, variant("core.rain", 1, 30, 30, 30)); again.Run.BoardID != rain.Run.BoardID {
+		t.Fatalf("same variant on another board %+v", again)
+	}
+
+	list := func(key string, rules int32) []proto.BoardInfo {
+		t.Helper()
+		bs, err := p.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: proto.AnyEngineClass,
+			RulesVersion: rules, Variant: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bs
+	}
+	if bs := list(proto.AnyVariant, proto.AnyRulesVersion); len(bs) != 5 {
+		t.Fatalf("all boards %+v", bs)
+	}
+	if bs := list("", rulesVersion); len(bs) != 3 {
+		t.Fatalf("default variant boards %+v", bs)
+	}
+	if bs := list("core.rain", proto.AnyRulesVersion); len(bs) != 1 || bs[0].BoardID != rain.Run.BoardID ||
+		bs[0].Variant != "core.rain" || bs[0].BestMs != 90_500 || bs[0].Players != 1 {
+		t.Fatalf("rain boards %+v", bs)
+	}
+	if bs := list(proto.AnyVariant, rulesVersion+1); len(bs) != 0 {
+		t.Fatalf("other rules version %+v", bs)
+	}
+	for _, bad := range []string{"Core.Rain", "core.rain+", "core.rain+core.rain", "**"} {
+		_, err := p.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: proto.AnyEngineClass, Variant: bad})
+		wantStatus(t, err, proto.StatusBadRequest)
 	}
 }
 
@@ -648,7 +785,8 @@ func TestModeration(t *testing.T) {
 	if mine, _ := p.c.MyRuns(ctx, track); len(mine) != 1 || !mine[0].Hidden || mine[0].Rank != 0 {
 		t.Fatalf("own hidden run %+v", mine)
 	}
-	if bs, _ := other.c.ListBoards(ctx, track, proto.AnyEngineClass, 0); bs[0].Players != 1 || bs[0].BestMs != 93_500 {
+	if bs, _ := other.c.ListBoards(ctx, proto.ListBoards{TrackID: track, EngineClass: proto.AnyEngineClass,
+		Variant: proto.AnyVariant}); bs[0].Players != 1 || bs[0].BestMs != 93_500 {
 		t.Fatalf("board stats with a hidden run %+v", bs[0])
 	}
 	if err := mod.c.ModUnhideRun(ctx, id); err != nil {

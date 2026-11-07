@@ -40,6 +40,7 @@ type Racer struct {
 type Spec struct {
 	LobbyID     uint64
 	TrackID     string
+	Variant     string // variant key of TrackID ("" = the track's default); the server checks its syntax only
 	Mode        uint8
 	EngineClass uint8
 	Laps        uint8 // 0 = the track's default (the clients resolve it and report it in RaceLoaded)
@@ -75,12 +76,8 @@ type Callbacks struct {
 
 // Catalog answers content questions about racers; the lobby's content catalog implements it.
 type Catalog interface {
-	// PackCommit is the commit of packID the account announced in ContentHello, "" when none.
-	PackCommit(accountID uint64, packID string) string
-	// InMajority reports whether the catalog-majority manifest of the account's version of packID lists (kind, id).
-	InMajority(accountID uint64, packID string, kind uint8, id string) bool
-	// Strike records a content strike against the account (stored, visible to moderators).
-	Strike(accountID uint64, packID, reason string)
+	// Has reports whether the manifest of the account's announced version of packID lists (kind, id).
+	Has(accountID uint64, packID string, kind uint8, id string) bool
 }
 
 // Races is what lobbies use. The implementation (Engine) also registers the race notify handlers on the server and

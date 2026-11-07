@@ -47,7 +47,7 @@ type Config struct {
 	Log     *slog.Logger
 	Hub     Pusher
 	Kicks   Kicks
-	Catalog Catalog      // nil: no content strikes, UnknownContent never counts as fabricated
+	Catalog Catalog      // nil: UnknownContent never counts as fabricated
 	UDP     *net.UDPConn // realtime socket; the Engine owns it from now on. nil = no UDP (UDPPort 0)
 }
 
@@ -206,19 +206,20 @@ func (e *Engine) Start(spec Spec, racers []Racer, cb Callbacks) (uint64, error) 
 			continue
 		}
 		e.cfg.Hub.Push(s.racer.AccountID, proto.PushRaceSetup, &proto.RaceSetup{
-			RaceID: id, LobbyID: spec.LobbyID, TrackID: spec.TrackID, Mode: spec.Mode, EngineClass: spec.EngineClass,
-			Laps: spec.Laps, Items: spec.Items, ItemOdds: spec.ItemOdds, Anticheat: spec.Anticheat, AIHost: aiHost,
+			RaceID: id, LobbyID: spec.LobbyID, TrackID: spec.TrackID, Variant: spec.Variant, Mode: spec.Mode,
+			EngineClass: spec.EngineClass, Laps: spec.Laps, Items: spec.Items, ItemOdds: spec.ItemOdds,
+			Anticheat: spec.Anticheat, AIHost: aiHost,
 			Seed: raceSeed, Grid: grid, YourSlot: s.slot, UDPPort: e.udpPort,
 			UDPToken: s.token, UDPKey: s.key, SetRace: spec.SetRace, SetSize: spec.SetSize,
 		})
 		e.log.Debug("race setup", "race", id, "slot", s.slot, "account", s.racer.AccountID, "user", s.racer.Username,
-			"character", s.racer.CharacterID, "kart", s.racer.KartID, "track", spec.TrackID, "mode", spec.Mode,
-			"laps", spec.Laps, "items", spec.Items, "anticheat", spec.Anticheat, "aiHost", aiHost,
+			"character", s.racer.CharacterID, "kart", s.racer.KartID, "track", spec.TrackID, "variant", spec.Variant,
+			"mode", spec.Mode, "laps", spec.Laps, "items", spec.Items, "anticheat", spec.Anticheat, "aiHost", aiHost,
 			"everKicked", s.everKicked, "udpPort", e.udpPort)
 	}
 	e.wg.Go(run.loop)
-	e.log.Info("race started", "race", id, "lobby", spec.LobbyID, "track", spec.TrackID, "karts", len(racers),
-		"humans", len(ids), "ai", len(racers)-len(ids), "aiHost", aiHost, "setRace", spec.SetRace)
+	e.log.Info("race started", "race", id, "lobby", spec.LobbyID, "track", spec.TrackID, "variant", spec.Variant,
+		"karts", len(racers), "humans", len(ids), "ai", len(racers)-len(ids), "aiHost", aiHost, "setRace", spec.SetRace)
 	return id, nil
 }
 

@@ -18,6 +18,7 @@ const (
 	FrameLookBack        = 4
 	FrameBurned          = 8
 	FrameCut             = 16
+	FrameHeadlights      = 32
 )
 
 // Frame is one tick of a ghost: the kart state the game recorded, minus the visual-only channels.

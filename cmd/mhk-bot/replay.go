@@ -79,6 +79,9 @@ func (r *replay) state(t time.Duration) proto.KartState {
 	if f.Flags&ghost.FrameLookBack != 0 {
 		st.Flags |= proto.KartLookBack
 	}
+	if f.Flags&ghost.FrameHeadlights != 0 {
+		st.Flags |= proto.KartHeadlights
+	}
 	st.Steer = int8(max(min(math.Round(float64(f.InputSteer)*127), 127), -127))
 	st.Lap = 1
 	for _, end := range r.lapEnds {

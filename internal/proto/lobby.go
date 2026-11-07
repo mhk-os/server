@@ -37,11 +37,8 @@ const (
 const (
 	MaxPackID         = 64
 	MaxPackCommit     = 40
-	MaxManifestHash   = 32
-	MaxFingerprint    = 32
 	MaxAnnouncedPacks = 64
 	MaxManifestItems  = 4096
-	MaxStrikeMessage  = 256
 	MaxRoomName       = 32
 	MaxLobbyName      = 64
 	MaxRoomPacks      = 32
@@ -55,13 +52,12 @@ const (
 	MaxKickReason     = 256
 	MaxLobbyMessage   = 256
 
-	packRefMinSize       = 1 + 1 + 1
-	strikeMinSize        = 1 + 1
-	manifestItemMinSize  = 1 + 1 + 1
-	packManifestMinSize  = 1 + 1 + 4 + 1 + 1
+	packRefMinSize       = 1 + 1
+	manifestItemMinSize  = 1 + 1 + 4
+	packManifestMinSize  = 1 + 1 + 4 + 1
 	lobbySummaryMinSize  = 8 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 1 + 1 + 1 + 1
 	lobbyMemberMinSize   = 8 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 4 + 8 + 1
-	lobbyVoteMinSize     = 8 + 1
+	lobbyVoteMinSize     = 8 + 1 + 1
 	raceResultRowMinSize = 1 + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 1
 	aiDriverMinSize      = 1 + 1 + 4
 )
@@ -130,34 +126,31 @@ func decodeStrings(r *wire.Reader, maxCount, maxLen int) []string {
 	return list
 }
 
-// PackRef is one announced pack of ContentHello.
+// PackRef is one announced pack of ContentHello: a pack at a commit.
 type PackRef struct {
-	PackID       string
-	Commit       string
-	ManifestHash string
+	PackID string
+	Commit string
 }
 
 func (m *PackRef) Encode(w *wire.Writer) {
 	w.String(m.PackID)
 	w.String(m.Commit)
-	w.String(m.ManifestHash)
 }
 
 func (m *PackRef) Decode(r *wire.Reader) error {
 	m.PackID = r.String(MaxPackID)
 	m.Commit = r.String(MaxPackCommit)
-	m.ManifestHash = r.String(MaxManifestHash)
 	return r.Err()
 }
 
 // ContentHello is request 256: the content packs the client has enabled.
 type ContentHello struct {
-	ContentVersion int32
-	Packs          []PackRef
+	RulesVersion int32
+	Packs        []PackRef
 }
 
 func (m *ContentHello) Encode(w *wire.Writer) {
-	w.I32(m.ContentVersion)
+	w.I32(m.RulesVersion)
 	w.Count(len(m.Packs))
 	for i := range m.Packs {
 		m.Packs[i].Encode(w)
@@ -165,7 +158,7 @@ func (m *ContentHello) Encode(w *wire.Writer) {
 }
 
 func (m *ContentHello) Decode(r *wire.Reader) error {
-	m.ContentVersion = r.I32()
+	m.RulesVersion = r.I32()
 	m.Packs = make([]PackRef, r.Count(MaxAnnouncedPacks, packRefMinSize))
 	for i := range m.Packs {
 		m.Packs[i].Decode(r)
@@ -173,77 +166,56 @@ func (m *ContentHello) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// ContentStrike names a pack whose announced copy differs from the catalog majority.
-type ContentStrike struct {
-	PackID  string
-	Message string
-}
-
 // ContentHelloResult is the response to ContentHello.
 type ContentHelloResult struct {
-	Missing []string // manifest hashes the server wants (ContentManifests)
-	Strikes []ContentStrike
+	Missing []string // ids of the announced packs whose manifests the server wants (ContentManifests)
 }
 
-func (m *ContentHelloResult) Encode(w *wire.Writer) {
-	encodeStrings(w, m.Missing)
-	w.Count(len(m.Strikes))
-	for _, s := range m.Strikes {
-		w.String(s.PackID)
-		w.String(s.Message)
-	}
-}
+func (m *ContentHelloResult) Encode(w *wire.Writer) { encodeStrings(w, m.Missing) }
 
 func (m *ContentHelloResult) Decode(r *wire.Reader) error {
-	m.Missing = decodeStrings(r, MaxAnnouncedPacks, MaxManifestHash)
-	m.Strikes = make([]ContentStrike, r.Count(MaxAnnouncedPacks, strikeMinSize))
-	for i := range m.Strikes {
-		m.Strikes[i].PackID = r.String(MaxPackID)
-		m.Strikes[i].Message = r.String(MaxStrikeMessage)
-	}
+	m.Missing = decodeStrings(r, MaxAnnouncedPacks, MaxPackID)
 	return r.Err()
 }
 
-// ManifestItem is one gameplay item a pack registers.
+// ManifestItem is one gameplay item a pack registers. Version is the item's content version: at least 1 for
+// tracks, karts and arenas (records of an older version are invalid), 0 for kinds without one.
 type ManifestItem struct {
-	Kind        uint8
-	ID          string
-	Fingerprint string
+	Kind    uint8
+	ID      string
+	Version int32
 }
 
 // PackManifest describes the gameplay content of one pack version.
 type PackManifest struct {
-	PackID         string
-	Commit         string
-	ContentVersion int32
-	ManifestHash   string
-	Items          []ManifestItem
+	PackID       string
+	Commit       string
+	RulesVersion int32
+	Items        []ManifestItem
 }
 
 func (m *PackManifest) Encode(w *wire.Writer) {
 	w.String(m.PackID)
 	w.String(m.Commit)
-	w.I32(m.ContentVersion)
-	w.String(m.ManifestHash)
+	w.I32(m.RulesVersion)
 	EncodeManifestItems(w, m.Items)
 }
 
 func (m *PackManifest) Decode(r *wire.Reader) error {
 	m.PackID = r.String(MaxPackID)
 	m.Commit = r.String(MaxPackCommit)
-	m.ContentVersion = r.I32()
-	m.ManifestHash = r.String(MaxManifestHash)
+	m.RulesVersion = r.I32()
 	m.Items = DecodeManifestItems(r)
 	return r.Err()
 }
 
-// EncodeManifestItems writes list<(kind, id, fingerprint)>; the server also stores manifests in this form.
+// EncodeManifestItems writes list<(kind, id, version)>; the server also stores manifests in this form.
 func EncodeManifestItems(w *wire.Writer, items []ManifestItem) {
 	w.Count(len(items))
 	for _, it := range items {
 		w.U8(it.Kind)
 		w.String(it.ID)
-		w.String(it.Fingerprint)
+		w.I32(it.Version)
 	}
 }
 
@@ -253,7 +225,7 @@ func DecodeManifestItems(r *wire.Reader) []ManifestItem {
 	for i := range items {
 		items[i].Kind = r.U8()
 		items[i].ID = r.String(MaxContentID)
-		items[i].Fingerprint = r.String(MaxFingerprint)
+		items[i].Version = r.I32()
 	}
 	return items
 }
@@ -333,22 +305,22 @@ func (m *RoomSettings) Decode(r *wire.Reader) error {
 
 // LobbySummary is one lobby in ListLobbies and the head of LobbyState.
 type LobbySummary struct {
-	LobbyID        uint64
-	Kind           uint8
-	Category       uint8
-	Instance       uint16
-	Name           string
-	Mode           uint8
-	Anticheat      bool
-	Packs          []string
-	Players        uint8
-	MaxPlayers     uint8
-	Phase          uint8
-	ContentVersion int32
-	EngineClass    uint8
-	SetRace        uint8 // as LobbyState.SetRace
-	SetSize        uint8
-	MaxAI          uint8 // as RoomSettings.MaxAI
+	LobbyID      uint64
+	Kind         uint8
+	Category     uint8
+	Instance     uint16
+	Name         string
+	Mode         uint8
+	Anticheat    bool
+	Packs        []string
+	Players      uint8
+	MaxPlayers   uint8
+	Phase        uint8
+	RulesVersion int32
+	EngineClass  uint8
+	SetRace      uint8 // as LobbyState.SetRace
+	SetSize      uint8
+	MaxAI        uint8 // as RoomSettings.MaxAI
 }
 
 func (m *LobbySummary) Encode(w *wire.Writer) {
@@ -363,7 +335,7 @@ func (m *LobbySummary) Encode(w *wire.Writer) {
 	w.U8(m.Players)
 	w.U8(m.MaxPlayers)
 	w.U8(m.Phase)
-	w.I32(m.ContentVersion)
+	w.I32(m.RulesVersion)
 	w.U8(m.EngineClass)
 	w.U8(m.SetRace)
 	w.U8(m.SetSize)
@@ -382,7 +354,7 @@ func (m *LobbySummary) Decode(r *wire.Reader) error {
 	m.Players = r.U8()
 	m.MaxPlayers = r.U8()
 	m.Phase = r.U8()
-	m.ContentVersion = r.I32()
+	m.RulesVersion = r.I32()
 	m.EngineClass = r.U8()
 	m.SetRace = r.U8()
 	m.SetSize = r.U8()
@@ -460,10 +432,11 @@ func (m *LobbyMember) Decode(r *wire.Reader) error {
 	return r.Err()
 }
 
-// LobbyVote is one member's track vote; TrackID "" = Random.
+// LobbyVote is one member's track vote; TrackID "" = Random (Variant then "").
 type LobbyVote struct {
 	AccountID uint64
 	TrackID   string
+	Variant   string
 }
 
 // RaceResultRow is one racer's result with the points the lobby gave. AI rows have AccountID 0 and Username "".
@@ -540,6 +513,7 @@ type LobbyState struct {
 	SetSize     uint8
 	Votes       []LobbyVote
 	TrackID     string
+	Variant     string // variant key of TrackID; "" = the track's default
 	RaceID      uint64
 	LastResults []RaceResultRow
 	AIDrivers   []AIDriver
@@ -562,8 +536,10 @@ func (m *LobbyState) Encode(w *wire.Writer) {
 	for _, v := range m.Votes {
 		w.U64(v.AccountID)
 		w.String(v.TrackID)
+		w.String(v.Variant)
 	}
 	w.String(m.TrackID)
+	w.String(m.Variant)
 	w.U64(m.RaceID)
 	encodeRows(w, m.LastResults)
 	w.Count(len(m.AIDrivers))
@@ -591,8 +567,10 @@ func (m *LobbyState) Decode(r *wire.Reader) error {
 	for i := range m.Votes {
 		m.Votes[i].AccountID = r.U64()
 		m.Votes[i].TrackID = r.String(MaxTrackID)
+		m.Votes[i].Variant = r.String(MaxVariant)
 	}
 	m.TrackID = r.String(MaxTrackID)
+	m.Variant = r.String(MaxVariant)
 	m.RaceID = r.U64()
 	m.LastResults = decodeRows(r, MaxRaceRows)
 	m.AIDrivers = make([]AIDriver, r.Count(MaxAIDrivers, aiDriverMinSize))
@@ -656,13 +634,23 @@ type SetReady struct {
 func (m *SetReady) Encode(w *wire.Writer)       { w.Bool(m.Ready) }
 func (m *SetReady) Decode(r *wire.Reader) error { m.Ready = r.Bool(); return r.Err() }
 
-// TrackChoice is the body of Vote (266) and StartRace (267); "" = Random (Vote) or none (StartRace).
+// TrackChoice is the body of Vote (266) and StartRace (267): a track and its variant key. TrackID "" = Random
+// (Vote) or none (StartRace).
 type TrackChoice struct {
 	TrackID string
+	Variant string
 }
 
-func (m *TrackChoice) Encode(w *wire.Writer)       { w.String(m.TrackID) }
-func (m *TrackChoice) Decode(r *wire.Reader) error { m.TrackID = r.String(MaxTrackID); return r.Err() }
+func (m *TrackChoice) Encode(w *wire.Writer) {
+	w.String(m.TrackID)
+	w.String(m.Variant)
+}
+
+func (m *TrackChoice) Decode(r *wire.Reader) error {
+	m.TrackID = r.String(MaxTrackID)
+	m.Variant = r.String(MaxVariant)
+	return r.Err()
+}
 
 // StartCup is request 270: the owner of an owner-pick race room starts a cup as the next set.
 type StartCup struct {

@@ -15,32 +15,31 @@ import (
 // manifestFile is the -manifests file: the packs a bot announces in ContentHello, with their items so it can
 // answer the server's requests for missing manifests. `mhk-bot dump-manifests` writes it.
 type manifestFile struct {
-	ContentVersion int32          `json:"contentVersion"`
-	Packs          []manifestPack `json:"packs"`
+	RulesVersion int32          `json:"rulesVersion"`
+	Packs        []manifestPack `json:"packs"`
 }
 
 type manifestPack struct {
-	PackID       string         `json:"packId"`
-	Commit       string         `json:"commit"`
-	ManifestHash string         `json:"manifestHash"`
-	Items        []manifestItem `json:"items"`
+	PackID string         `json:"packId"`
+	Commit string         `json:"commit"`
+	Items  []manifestItem `json:"items"`
 }
 
 type manifestItem struct {
-	Kind        uint8  `json:"kind"`
-	ID          string `json:"id"`
-	Fingerprint string `json:"fingerprint"`
+	Kind    uint8  `json:"kind"`
+	ID      string `json:"id"`
+	Version int32  `json:"version"`
 }
 
 func (p *manifestPack) items() []proto.ManifestItem {
 	items := make([]proto.ManifestItem, len(p.Items))
 	for i, it := range p.Items {
-		items[i] = proto.ManifestItem{Kind: it.Kind, ID: it.ID, Fingerprint: it.Fingerprint}
+		items[i] = proto.ManifestItem{Kind: it.Kind, ID: it.ID, Version: it.Version}
 	}
 	return items
 }
 
-// loadManifests reads and checks a manifest file: every hash must match its items, as the server checks.
+// loadManifests reads and checks a manifest file: every item list must pass the server's checks.
 func loadManifests(path string) (*manifestFile, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -54,12 +53,8 @@ func loadManifests(path string) (*manifestFile, error) {
 		return nil, fmt.Errorf("%s: no packs", path)
 	}
 	for _, p := range f.Packs {
-		h, err := content.ManifestHash(p.items())
-		if err != nil {
+		if err := content.ValidateItems(p.items()); err != nil {
 			return nil, fmt.Errorf("%s: pack %s: %w", path, p.PackID, err)
-		}
-		if h != strings.ToLower(p.ManifestHash) {
-			return nil, fmt.Errorf("%s: pack %s: manifestHash %s, items hash to %s", path, p.PackID, p.ManifestHash, h)
 		}
 	}
 	return &f, nil
@@ -69,19 +64,19 @@ func loadManifests(path string) (*manifestFile, error) {
 func (f *manifestFile) refs() []proto.PackRef {
 	refs := make([]proto.PackRef, len(f.Packs))
 	for i, p := range f.Packs {
-		refs[i] = proto.PackRef{PackID: p.PackID, Commit: p.Commit, ManifestHash: p.ManifestHash}
+		refs[i] = proto.PackRef{PackID: p.PackID, Commit: p.Commit}
 	}
 	return refs
 }
 
-// manifests returns the PackManifests whose hashes the server asked for.
+// manifests returns the PackManifests of the packs the server asked for.
 func (f *manifestFile) manifests(missing []string) []proto.PackManifest {
 	var out []proto.PackManifest
 	for _, p := range f.Packs {
-		for _, h := range missing {
-			if strings.EqualFold(h, p.ManifestHash) {
-				out = append(out, proto.PackManifest{PackID: p.PackID, Commit: p.Commit, ContentVersion: f.ContentVersion,
-					ManifestHash: p.ManifestHash, Items: p.items()})
+		for _, id := range missing {
+			if strings.EqualFold(id, p.PackID) {
+				out = append(out, proto.PackManifest{PackID: p.PackID, Commit: p.Commit, RulesVersion: f.RulesVersion,
+					Items: p.items()})
 				break
 			}
 		}
@@ -89,17 +84,17 @@ func (f *manifestFile) manifests(missing []string) []proto.PackManifest {
 	return out
 }
 
-// dumpManifests writes the most reported manifest of every pack for contentVersion from the server's database.
-func dumpManifests(ctx context.Context, st *store.Store, contentVersion int32, packs []string, out string) error {
-	f := manifestFile{ContentVersion: contentVersion}
+// dumpManifests writes the most recently stored manifest of every pack for rulesVersion from the server's database.
+func dumpManifests(ctx context.Context, st *store.Store, rulesVersion int32, packs []string, out string) error {
+	f := manifestFile{RulesVersion: rulesVersion}
 	for _, id := range packs {
-		m, err := st.MostReportedManifest(ctx, id, contentVersion)
+		m, err := st.LatestManifest(ctx, id, rulesVersion)
 		if err != nil {
 			return fmt.Errorf("pack %s: %w", id, err)
 		}
-		p := manifestPack{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.Hash}
+		p := manifestPack{PackID: m.PackID, Commit: m.Commit}
 		for _, it := range m.Items {
-			p.Items = append(p.Items, manifestItem{Kind: it.Kind, ID: it.ID, Fingerprint: it.Fingerprint})
+			p.Items = append(p.Items, manifestItem{Kind: it.Kind, ID: it.ID, Version: it.Version})
 		}
 		f.Packs = append(f.Packs, p)
 	}

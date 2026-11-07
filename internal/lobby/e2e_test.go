@@ -18,7 +18,7 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 	packs := s.packs("e2e")
 	a, b := s.connect(t, false), s.connect(t, false)
 	for _, p := range []*itPlayer{a, b} {
-		p.announce(t, s.contentVersion, packs)
+		p.announce(t, s.rulesVersion, packs)
 		if _, err := p.QuickJoin(ctx, 1); err != nil {
 			t.Fatal(err)
 		}
@@ -27,7 +27,7 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 		}
 	}
 	for _, p := range []*itPlayer{a, b} {
-		if err := p.Vote(ctx, "mhk2.rome"); err != nil {
+		if err := p.Vote(ctx, "mhk2.rome", "core.reverse+core.rain"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -38,7 +38,8 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 		if err := p.WaitPushMsg(ctx, proto.PushRaceSetup, &setup); err != nil {
 			t.Fatal(err)
 		}
-		if setup.TrackID != "mhk2.rome" || len(setup.Grid) != 2 || setup.AIHost != proto.NoSlot || setup.SetRace != 1 ||
+		if setup.TrackID != "mhk2.rome" || setup.Variant != "core.reverse+core.rain" || len(setup.Grid) != 2 ||
+			setup.AIHost != proto.NoSlot || setup.SetRace != 1 ||
 			setup.SetSize != 4 || setup.EngineClass != 2 || !setup.Anticheat || setup.UDPPort == 0 ||
 			setup.Grid[0].Platform != proto.PlatformMacOS || setup.Grid[1].Platform != proto.PlatformMacOS {
 			t.Fatalf("RaceSetup %+v", setup)
@@ -53,7 +54,7 @@ func TestLobbyRaceResultsEndToEnd(t *testing.T) {
 	}
 	raceID := setups[a].RaceID
 	for _, p := range []*itPlayer{a, b} {
-		loaded := &proto.RaceLoaded{RaceID: raceID, TrackHash: "00112233445566778899aabbccddeeff", Laps: 3,
+		loaded := &proto.RaceLoaded{RaceID: raceID, TrackVersion: 2, Variant: "core.reverse+core.rain", Laps: 3,
 			Rules: proto.ItemRules{RouletteMs: 0}}
 		if err := p.Notify(proto.NotifyRaceLoaded, loaded); err != nil {
 			t.Fatal(err)
@@ -111,7 +112,7 @@ func TestRoomAIRaceEndToEnd(t *testing.T) {
 	packs := s.packs("e2eai")
 	a, b := s.connect(t, false), s.connect(t, false)
 	for _, p := range []*itPlayer{a, b} {
-		p.announce(t, s.contentVersion, packs)
+		p.announce(t, s.rulesVersion, packs)
 	}
 	room, err := a.CreateRoom(ctx, &proto.RoomSettings{Mode: proto.RoomRaceSet, Packs: []string{"mhk2"},
 		Anticheat: true, EngineClass: 2, Items: true, MaxAI: 8, MaxPlayers: 10, TrackPick: proto.PickOwner,
@@ -127,7 +128,7 @@ func TestRoomAIRaceEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := a.StartRace(ctx, "mhk2.rome"); err != nil {
+	if err := a.StartRace(ctx, "mhk2.rome", ""); err != nil {
 		t.Fatal(err)
 	}
 	setups := map[*itPlayer]*proto.RaceSetup{}
@@ -163,7 +164,7 @@ func TestRoomAIRaceEndToEnd(t *testing.T) {
 	}
 	for _, p := range []*itPlayer{a, b} {
 		if err := p.Notify(proto.NotifyRaceLoaded, &proto.RaceLoaded{RaceID: raceID,
-			TrackHash: "00112233445566778899aabbccddeeff", Laps: 3}); err != nil {
+			TrackVersion: 1, Laps: 3}); err != nil {
 			t.Fatal(err)
 		}
 	}

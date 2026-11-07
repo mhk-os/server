@@ -34,18 +34,18 @@ func sampleRow(slot uint8) RaceResultRow {
 func lobbyMessages() []Message {
 	summary := LobbySummary{LobbyID: 4, Kind: LobbyPublic, Category: 3, Instance: 2, Name: "Races #2",
 		Mode: RoomRaceSet, Anticheat: true, Packs: []string{"mhk2", "mhk3"}, Players: 3, MaxPlayers: 10,
-		Phase: PhaseVoting, ContentVersion: 7, EngineClass: 2, SetRace: 3, SetSize: 4, MaxAI: 9}
+		Phase: PhaseVoting, RulesVersion: 7, EngineClass: 2, SetRace: 3, SetSize: 4, MaxAI: 9}
 	member := LobbyMember{AccountID: 1, Username: "Hans", Country: "DE", CharacterID: "mhk2.char.huhn",
 		KartID: "mhk2.kart.speedy", Ready: true, Owner: true, Moderator: true, InRace: true, PingMs: 48,
 		SetPoints: 37, Joined: when, Platform: PlatformMacOS}
 	return []Message{
-		&PackRef{PackID: "mhk2", Commit: "v1.2", ManifestHash: "00112233445566778899aabbccddeeff"},
-		&ContentHello{ContentVersion: 7, Packs: []PackRef{{"game", "abc", "ff"}, {"mhk2", "", "00"}}},
-		&ContentHello{ContentVersion: -1, Packs: []PackRef{}},
-		&ContentHelloResult{Missing: []string{"aa", "bb"}, Strikes: []ContentStrike{{"mhk3", "differs"}}},
-		&ContentHelloResult{Missing: []string{}, Strikes: []ContentStrike{}},
-		&PackManifest{PackID: "mhk2", Commit: "c", ContentVersion: 7, ManifestHash: "h",
-			Items: []ManifestItem{{ContentTrack, "mhk2.rome", "f1"}, {ContentArena, "mhk2.arena", ""}}},
+		&PackRef{PackID: "mhk2", Commit: "v1.2"},
+		&ContentHello{RulesVersion: 7, Packs: []PackRef{{"game", "abc"}, {"mhk2", ""}}},
+		&ContentHello{RulesVersion: -1, Packs: []PackRef{}},
+		&ContentHelloResult{Missing: []string{"mhk2", "mhk3"}},
+		&ContentHelloResult{Missing: []string{}},
+		&PackManifest{PackID: "mhk2", Commit: "c", RulesVersion: 7,
+			Items: []ManifestItem{{ContentTrack, "mhk2.rome", 3}, {ContentCharacter, "mhk2.huhn", 0}}},
 		new(sampleSettings()),
 		&RoomSettings{Packs: []string{}, MaxPlayers: 2, RacesPerSet: 1, TrackIDs: []string{}},
 		&summary,
@@ -54,10 +54,12 @@ func lobbyMessages() []Message {
 		new(sampleRow(2)),
 		new(sampleRow(3)),
 		&LobbyState{Summary: summary, Code: "ABC234", Settings: sampleSettings(), Members: []LobbyMember{member},
-			PhaseEnds: when, SetRace: 2, SetSize: 4, Votes: []LobbyVote{{1, "mhk2.rome"}, {2, ""}},
-			TrackID: "mhk2.rome", RaceID: 99, LastResults: []RaceResultRow{sampleRow(0), sampleRow(3)},
-			AIDrivers: []AIDriver{{"mhk2.char.kurt", "mhk2.kart.speedy", 15}, {"game.huhn", "game.kart", 0}},
-			CupID:     "mhk2.cup", CupTrackIDs: []string{"mhk2.rome", "mhk2.alps"}},
+			PhaseEnds: when, SetRace: 2, SetSize: 4,
+			Votes:   []LobbyVote{{1, "mhk2.rome", "core.reverse+core.night"}, {2, "", ""}},
+			TrackID: "mhk2.rome", Variant: "core.rain", RaceID: 99,
+			LastResults: []RaceResultRow{sampleRow(0), sampleRow(3)},
+			AIDrivers:   []AIDriver{{"mhk2.char.kurt", "mhk2.kart.speedy", 15}, {"game.huhn", "game.kart", 0}},
+			CupID:       "mhk2.cup", CupTrackIDs: []string{"mhk2.rome", "mhk2.alps"}},
 		&LobbyState{Summary: summary, Settings: RoomSettings{Packs: []string{}, TrackIDs: []string{}},
 			Members: []LobbyMember{}, Votes: []LobbyVote{}, LastResults: []RaceResultRow{}, AIDrivers: []AIDriver{},
 			CupTrackIDs: []string{}},
@@ -65,7 +67,8 @@ func lobbyMessages() []Message {
 		&QuickJoin{Category: 20},
 		&SetLoadout{CharacterID: "mhk2.char.huhn", KartID: ""},
 		&SetReady{Ready: true},
-		&TrackChoice{TrackID: "mhk3.arena"},
+		&TrackChoice{TrackID: "mhk3.arena", Variant: "core.night"},
+		&TrackChoice{},
 		&StartCup{CupID: "mhk2.cup", TrackIDs: []string{"mhk2.rome", "mhk2.alps", "mhk2.rome"}},
 		&KickMember{AccountID: 3, Reason: "rude"},
 		&LobbyLeft{Reason: LeftModKick, Message: "cheating"},
@@ -132,12 +135,12 @@ func pinHex(t *testing.T, m Message, want string) []byte {
 
 func TestLobbySummaryBytes(t *testing.T) {
 	s := LobbySummary{LobbyID: 1, Kind: LobbyPrivate, Category: 0, Instance: 2, Name: "n", Mode: RoomBattleSet,
-		Anticheat: true, Packs: []string{"p"}, Players: 3, MaxPlayers: 4, Phase: PhaseResults, ContentVersion: -5,
+		Anticheat: true, Packs: []string{"p"}, Players: 3, MaxPlayers: 4, Phase: PhaseResults, RulesVersion: -5,
 		EngineClass: 1, SetRace: 2, SetSize: 16, MaxAI: 3}
 	want := strings.Join([]string{
 		"0100000000000000", "01", "00", "0200", // lobbyId, kind, category, instance
 		"016e", "01", "01", "010170", // name, mode, anticheat, packs
-		"03", "04", "05", "fbffffff", // players, maxPlayers, phase, contentVersion
+		"03", "04", "05", "fbffffff", // players, maxPlayers, phase, rulesVersion
 		"01", "02", "10", "03", // engineClass, setRace, setSize, maxAi
 	}, "")
 	b := pinHex(t, &s, want)
@@ -204,12 +207,41 @@ func TestLobbyStateBytes(t *testing.T) {
 	z := func(n int) string { return strings.Repeat("00", n) }
 	want := strings.Join([]string{
 		z(lobbySummaryMinSize), "00", z(14), "00", // summary, code, settings, members
-		z(8), "00", "00", "00", "00", z(8), "00", // phaseEnds, setRace, setSize, votes, trackId, raceId, lastResults
+		z(8), "00", "00", "00", // phaseEnds, setRace, setSize, votes
+		"00", "00", z(8), "00", // trackId, variant, raceId, lastResults
 		"01" + "0163" + "016b" + "ffffffff", // aiDrivers
 		"0163", "01" + "0174",               // cupId, cupTrackIds
 	}, "")
 	pinHex(t, &s, want)
 	pinHex(t, &StartCup{CupID: "c", TrackIDs: []string{"t", "u"}}, "0163"+"02"+"0174"+"0175")
+
+	s.Votes = []LobbyVote{{AccountID: 9, TrackID: "t", Variant: "core.reverse"}}
+	s.TrackID, s.Variant = "t", "core.reverse"
+	pinHex(t, &s, strings.Join([]string{
+		z(lobbySummaryMinSize), "00", z(14), "00", // summary, code, settings, members
+		z(8), "00", "00", // phaseEnds, setRace, setSize
+		"01" + "0900000000000000" + "0174" + "0c636f72652e72657665727365", // votes
+		"0174", "0c636f72652e72657665727365", z(8), "00", // trackId, variant, raceId, lastResults
+		"01" + "0163" + "016b" + "ffffffff", // aiDrivers
+		"0163", "01" + "0174",               // cupId, cupTrackIds
+	}, ""))
+}
+
+// TestContentMessageBytes pins the content and track choice layouts; the C# codec tests assert the same vectors.
+func TestContentMessageBytes(t *testing.T) {
+	pinHex(t, &ContentHello{RulesVersion: 7, Packs: []PackRef{{"game", "abc"}, {"mhk2", ""}}},
+		"07000000"+"02"+"0467616d65"+"03616263"+"046d686b32"+"00")
+	pinHex(t, &ContentHelloResult{Missing: []string{"mhk2"}}, "01"+"046d686b32")
+	b := pinHex(t, &PackManifest{PackID: "mhk2", Commit: "c", RulesVersion: 7,
+		Items: []ManifestItem{{ContentTrack, "mhk2.rome", 3}, {ContentArena, "mhk2.arena", 1}}},
+		"046d686b32"+"0163"+"07000000"+"02"+"01"+"096d686b322e726f6d65"+"03000000"+"07"+"0a6d686b322e6172656e61"+
+			"01000000")
+	if packManifestMinSize != len(b)-4-1-(1+10+4)-(1+11+4) || packRefMinSize != 2 ||
+		manifestItemMinSize != len(Encode(&PackManifest{Items: []ManifestItem{{}}}))-packManifestMinSize {
+		t.Fatal("content minimum sizes out of date")
+	}
+	pinHex(t, &TrackChoice{TrackID: "t", Variant: "core.reverse"}, "0174"+"0c636f72652e72657665727365")
+	pinHex(t, &TrackChoice{}, "00"+"00")
 }
 
 func TestLobbyLimits(t *testing.T) {
@@ -224,11 +256,11 @@ func TestLobbyLimits(t *testing.T) {
 	decodeFails("65-byte pack id", &ContentHello{},
 		Encode(&ContentHello{Packs: []PackRef{{PackID: strings.Repeat("p", MaxPackID+1)}}}))
 	decodeFails("41-byte commit", &PackRef{}, Encode(&PackRef{Commit: strings.Repeat("c", MaxPackCommit+1)}))
-	decodeFails("33-byte hash", &PackRef{}, Encode(&PackRef{ManifestHash: strings.Repeat("h", 33)}))
 	decodeFails("4097 manifest items", &PackManifest{},
 		Encode(&PackManifest{Items: make([]ManifestItem, MaxManifestItems+1)}))
-	decodeFails("33-byte fingerprint", &PackManifest{},
-		Encode(&PackManifest{Items: []ManifestItem{{1, "a", strings.Repeat("f", 33)}}}))
+	decodeFails("129-byte variant", &TrackChoice{}, Encode(&TrackChoice{Variant: strings.Repeat("v", MaxVariant+1)}))
+	decodeFails("129-byte vote variant", &LobbyState{},
+		Encode(&LobbyState{Votes: []LobbyVote{{Variant: strings.Repeat("v", MaxVariant+1)}}}))
 	decodeFails("33-byte room name", &RoomSettings{}, Encode(&RoomSettings{Name: strings.Repeat("n", 33)}))
 	decodeFails("33 room packs", &RoomSettings{}, Encode(&RoomSettings{Packs: make([]string, MaxRoomPacks+1)}))
 	decodeFails("65 item odds", &RoomSettings{}, Encode(&RoomSettings{ItemOdds: make([]ItemOdds, MaxItemOdds+1)}))
@@ -256,7 +288,7 @@ func TestLobbyLimits(t *testing.T) {
 	// A large count with a short body is rejected before allocating.
 	w := wire.NewWriter(8)
 	w.VarUint(MaxManifestItems)
-	decodeFails("count beyond the body", &PackManifest{}, append([]byte{0, 0, 0, 0, 0, 0, 0}, w.Bytes()...))
+	decodeFails("count beyond the body", &PackManifest{}, append([]byte{0, 0, 0, 0, 0, 0}, w.Bytes()...))
 }
 
 func TestLobbyHostileBodies(t *testing.T) {
@@ -284,5 +316,25 @@ func TestLobbyRanges(t *testing.T) {
 	}
 	if !RangeRaceControl.Contains(PushRaceResults) {
 		t.Error("RaceResults outside the race-control range")
+	}
+}
+
+func TestValidVariant(t *testing.T) {
+	long := strings.Repeat("a", MaxVariantToken)
+	for _, key := range []string{"", "core.reverse", "core.night+core.rain", "x", "a_b-c.d9", long,
+		"a+b+c+d+e+f+g+h", long + "+" + strings.Repeat("b", MaxVariant-MaxVariantToken-1)} {
+		if !ValidVariant(key) {
+			t.Errorf("%q rejected", key)
+		}
+	}
+	for _, key := range []string{"+", "core.reverse+", "+core.reverse", "a++b", "Core.Reverse", "core reverse",
+		"core.night+core.night", "a+b+c+d+e+f+g+h+i", long + "a", "*", "ä", "a/b",
+		strings.Repeat("abcdefg+", 16) + "z"} {
+		if ValidVariant(key) {
+			t.Errorf("%q accepted", key)
+		}
+	}
+	if len(strings.Repeat("abcdefg+", 16)+"z") <= MaxVariant {
+		t.Fatal("the over-long key is not over-long")
 	}
 }

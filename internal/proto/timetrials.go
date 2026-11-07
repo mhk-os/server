@@ -8,23 +8,23 @@ import (
 
 // Field and list limits of the time-trial and moderation messages (docs/protocol.md, phase 2).
 const (
-	MaxTrackID        = 96
-	MaxContentID      = 96 // kartId, characterId
-	MaxHash           = 32 // trackHash, ghost id
-	MaxContinent      = 2
-	MaxLapTimes       = 99
-	MaxGhostFile      = 8 << 20
-	MaxReportDetail   = 512
-	MaxModReason      = 256
-	MaxBoards         = 200
-	MaxPage           = 100 // limit of every paged request (leaderboards, run pages, player lists)
-	MaxMyRuns         = 500
-	MaxRunReports     = 500
-	AnyEngineClass    = 255
-	AnyContentVersion = 0
-	boardInfoMinSize  = 8 + 1 + 1 + 1 + 4 + 1 + 4 + 4 + 8
-	runEntryMinSize   = 8 + 4 + 8 + 1 + 1 + 4 + 4 + 1 + 1 + 1 + 1 + 8 + 8 + 4 + 1 + 1 + 4 + 8 + 1 + 1
-	runReportMinSize  = 1 + 1 + 4 + 1 + 8 + 1
+	MaxTrackID       = 96
+	MaxContentID     = 96 // kartId, characterId
+	MaxHash          = 32 // ghost id
+	MaxContinent     = 2
+	MaxLapTimes      = 99
+	MaxGhostFile     = 8 << 20
+	MaxReportDetail  = 512
+	MaxModReason     = 256
+	MaxBoards        = 200
+	MaxPage          = 100 // limit of every paged request (leaderboards, run pages, player lists)
+	MaxMyRuns        = 500
+	MaxRunReports    = 500
+	AnyEngineClass   = 255
+	AnyRulesVersion  = 0
+	boardInfoMinSize = 8 + 1 + 4 + 1 + 1 + 1 + 4 + 4 + 4 + 8
+	runEntryMinSize  = 8 + 4 + 8 + 1 + 1 + 4 + 4 + 1 + 1 + 4 + 1 + 1 + 8 + 8 + 4 + 1 + 4 + 8 + 1 + 1 + 4 + 1 + 1 + 4
+	runReportMinSize = 1 + 1 + 4 + 1 + 8 + 1
 )
 
 // optTime writes "0 when none" times: the zero time.Time encodes as 0.
@@ -45,46 +45,53 @@ func readOptTime(r *wire.Reader) time.Time {
 	return t
 }
 
-// ListBoards is request 128. EngineClass AnyEngineClass and ContentVersion AnyContentVersion match every board.
+// ListBoards is request 128. EngineClass AnyEngineClass, RulesVersion AnyRulesVersion and Variant AnyVariant match
+// every board; any other Variant (including "", the default variant) must satisfy ValidVariant and matches exactly.
 type ListBoards struct {
-	TrackID        string
-	EngineClass    uint8
-	ContentVersion int32
+	TrackID      string
+	EngineClass  uint8
+	RulesVersion int32
+	Variant      string
 }
 
 func (m *ListBoards) Encode(w *wire.Writer) {
 	w.String(m.TrackID)
 	w.U8(m.EngineClass)
-	w.I32(m.ContentVersion)
+	w.I32(m.RulesVersion)
+	w.String(m.Variant)
 }
 
 func (m *ListBoards) Decode(r *wire.Reader) error {
 	m.TrackID = r.String(MaxTrackID)
 	m.EngineClass = r.U8()
-	m.ContentVersion = r.I32()
+	m.RulesVersion = r.I32()
+	m.Variant = r.String(MaxVariant)
 	return r.Err()
 }
 
-// BoardInfo describes one leaderboard. Players, BestMs and LastUpload count visible runs only.
+// BoardInfo describes one leaderboard: (trackId, trackVersion, variant, laps, engineClass, rulesVersion) is its
+// identity. Players, BestMs and LastUpload count visible runs of the current kart versions only.
 type BoardInfo struct {
-	BoardID        uint64
-	TrackID        string
-	EngineClass    uint8
-	Laps           uint8
-	ContentVersion int32
-	TrackHash      string
-	Players        uint32
-	BestMs         int32
-	LastUpload     time.Time // zero = none
+	BoardID      uint64
+	TrackID      string
+	TrackVersion int32
+	Variant      string
+	EngineClass  uint8
+	Laps         uint8
+	RulesVersion int32
+	Players      uint32
+	BestMs       int32
+	LastUpload   time.Time // zero = none
 }
 
 func (m *BoardInfo) Encode(w *wire.Writer) {
 	w.U64(m.BoardID)
 	w.String(m.TrackID)
+	w.I32(m.TrackVersion)
+	w.String(m.Variant)
 	w.U8(m.EngineClass)
 	w.U8(m.Laps)
-	w.I32(m.ContentVersion)
-	w.String(m.TrackHash)
+	w.I32(m.RulesVersion)
 	w.U32(m.Players)
 	w.I32(m.BestMs)
 	optTime(w, m.LastUpload)
@@ -93,10 +100,11 @@ func (m *BoardInfo) Encode(w *wire.Writer) {
 func (m *BoardInfo) Decode(r *wire.Reader) error {
 	m.BoardID = r.U64()
 	m.TrackID = r.String(MaxTrackID)
+	m.TrackVersion = r.I32()
+	m.Variant = r.String(MaxVariant)
 	m.EngineClass = r.U8()
 	m.Laps = r.U8()
-	m.ContentVersion = r.I32()
-	m.TrackHash = r.String(MaxHash)
+	m.RulesVersion = r.I32()
 	m.Players = r.U32()
 	m.BestMs = r.I32()
 	m.LastUpload = readOptTime(r)
@@ -125,26 +133,30 @@ func (m *BoardList) Decode(r *wire.Reader) error {
 
 // RunEntry is one uploaded run as clients see it.
 type RunEntry struct {
-	RunID         uint64
-	Rank          uint32 // 0 = not ranked
-	AccountID     uint64
-	Username      string
-	Country       string
-	FinishMs      int32
-	BestLapMs     int32
-	LapMs         []int32
-	KartID        string
-	CharacterID   string
-	GhostID       string
-	Recorded      time.Time
-	Uploaded      time.Time
-	Flags         uint32
-	SetupMismatch bool
-	Hidden        bool
-	FileSize      uint32
-	BoardID       uint64
-	TrackID       string // the board's track
-	EngineClass   uint8  // the board's engine class
+	RunID        uint64
+	Rank         uint32 // 0 = not ranked
+	AccountID    uint64
+	Username     string
+	Country      string
+	FinishMs     int32
+	BestLapMs    int32
+	LapMs        []int32
+	KartID       string
+	KartVersion  int32
+	CharacterID  string
+	GhostID      string
+	Recorded     time.Time
+	Uploaded     time.Time
+	Flags        uint32
+	Hidden       bool
+	FileSize     uint32
+	BoardID      uint64
+	TrackID      string // the board's track
+	EngineClass  uint8  // the board's engine class
+	TrackVersion int32  // the board's track version
+	Variant      string // the board's variant
+	Laps         uint8  // the board's lap count
+	RulesVersion int32  // the board's rules version
 }
 
 func (m *RunEntry) Encode(w *wire.Writer) {
@@ -160,17 +172,21 @@ func (m *RunEntry) Encode(w *wire.Writer) {
 		w.I32(ms)
 	}
 	w.String(m.KartID)
+	w.I32(m.KartVersion)
 	w.String(m.CharacterID)
 	w.String(m.GhostID)
 	w.Time(m.Recorded)
 	w.Time(m.Uploaded)
 	w.U32(m.Flags)
-	w.Bool(m.SetupMismatch)
 	w.Bool(m.Hidden)
 	w.U32(m.FileSize)
 	w.U64(m.BoardID)
 	w.String(m.TrackID)
 	w.U8(m.EngineClass)
+	w.I32(m.TrackVersion)
+	w.String(m.Variant)
+	w.U8(m.Laps)
+	w.I32(m.RulesVersion)
 }
 
 func (m *RunEntry) Decode(r *wire.Reader) error {
@@ -186,17 +202,21 @@ func (m *RunEntry) Decode(r *wire.Reader) error {
 		m.LapMs[i] = r.I32()
 	}
 	m.KartID = r.String(MaxContentID)
+	m.KartVersion = r.I32()
 	m.CharacterID = r.String(MaxContentID)
 	m.GhostID = r.String(MaxHash)
 	m.Recorded = r.Time()
 	m.Uploaded = r.Time()
 	m.Flags = r.U32()
-	m.SetupMismatch = r.Bool()
 	m.Hidden = r.Bool()
 	m.FileSize = r.U32()
 	m.BoardID = r.U64()
 	m.TrackID = r.String(MaxTrackID)
 	m.EngineClass = r.U8()
+	m.TrackVersion = r.I32()
+	m.Variant = r.String(MaxVariant)
+	m.Laps = r.U8()
+	m.RulesVersion = r.I32()
 	return r.Err()
 }
 

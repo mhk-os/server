@@ -33,6 +33,7 @@ const (
 	KartIntangible uint8 = 1 << 4
 	KartAirborne   uint8 = 1 << 5
 	KartLookBack   uint8 = 1 << 6
+	KartHeadlights uint8 = 1 << 7
 )
 
 // UDPHeader is the clear part in front of every datagram's payload.

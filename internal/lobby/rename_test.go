@@ -16,8 +16,8 @@ func TestRenameInRoomOverTCP(t *testing.T) {
 	ctx := itCtx(t)
 	packs := s.packs("rename")
 	owner, guest := s.connect(t, false), s.connect(t, false)
-	owner.announce(t, s.contentVersion, packs)
-	guest.announce(t, s.contentVersion, packs)
+	owner.announce(t, s.rulesVersion, packs)
+	guest.announce(t, s.rulesVersion, packs)
 	st, err := owner.CreateRoom(ctx, &proto.RoomSettings{Name: "Umbenennen", Mode: proto.RoomRaceSet,
 		Packs: []string{"mhk2", "mhk3"}, EngineClass: 1, Laps: 2, Items: true, MaxPlayers: 4,
 		TrackPick: proto.PickOwner, RacesPerSet: 3})
@@ -30,7 +30,7 @@ func TestRenameInRoomOverTCP(t *testing.T) {
 	if err := guest.SetLoadout(ctx, "game.huhn", "game.kart"); err != nil {
 		t.Fatal(err)
 	}
-	if err := owner.StartRace(ctx, "mhk2.rome"); err != nil {
+	if err := owner.StartRace(ctx, "mhk2.rome", ""); err != nil {
 		t.Fatal(err)
 	}
 	call := s.waitStart(t, 1)

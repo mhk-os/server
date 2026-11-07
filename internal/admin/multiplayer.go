@@ -7,15 +7,6 @@ import (
 	"text/tabwriter"
 )
 
-var contentCommand = &Command{
-	Name: "content",
-	Subs: []*Command{
-		{Name: "strikes", Usage: "[--account U] [--limit N]",
-			Summary: "list content strikes (copies that differ from the catalog majority), newest first",
-			Run:     contentStrikes},
-	},
-}
-
 var kicksCommand = &Command{
 	Name: "kicks", Usage: "[--account U] [--limit N]", Summary: "list race kicks for cheating, newest first",
 	Run: cheatKicks,
@@ -50,27 +41,6 @@ func accountFilterArgs(ctx context.Context, env *Env, name string, args []string
 		return 0, 0, err
 	}
 	return a.ID, *limit, nil
-}
-
-func contentStrikes(ctx context.Context, env *Env, args []string) error {
-	id, limit, err := accountFilterArgs(ctx, env, "content strikes", args)
-	if err != nil {
-		return err
-	}
-	strikes, err := env.Store.ContentStrikes(ctx, id, limit)
-	if err != nil {
-		return err
-	}
-	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "TIME\tACCOUNT\tPACK\tCOMMIT\tSIM\tHASH\tMAJORITY\tREASON")
-	for i := range strikes {
-		k := &strikes[i]
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", formatTime(&k.CreatedAt), k.Username, k.PackID,
-			orDash(k.Commit), k.ContentVersion, orDash(k.ManifestHash), orDash(k.MajorityHash), k.Reason)
-	}
-	tw.Flush()
-	fmt.Fprintf(env.Out, "%d strike(s)\n", len(strikes))
-	return nil
 }
 
 func cheatKicks(ctx context.Context, env *Env, args []string) error {

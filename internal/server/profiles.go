@@ -110,8 +110,7 @@ func (s *Server) handleGetProfile(ctx context.Context, c *Conn, r *wire.Reader) 
 	}
 	if mod {
 		out.Disabled, out.DisabledReason = p.Disabled, p.DisabledReason
-		out.CheatKicks, out.ContentStrikes, out.HiddenRuns, out.FlaggedRuns = p.CheatKicks, p.ContentStrikes,
-			p.HiddenRuns, p.FlaggedRuns
+		out.CheatKicks, out.HiddenRuns, out.FlaggedRuns = p.CheatKicks, p.HiddenRuns, p.FlaggedRuns
 	}
 	return out, nil
 }

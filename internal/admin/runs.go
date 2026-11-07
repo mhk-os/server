@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/mhk-os/server/internal/blobs"
+	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/store"
 )
 
@@ -56,6 +57,14 @@ func findRun(ctx context.Context, env *Env, arg string) (*store.RunView, error) 
 // formatMs renders a race time as m:ss.mmm.
 func formatMs(ms int32) string {
 	return fmt.Sprintf("%d:%02d.%03d", ms/60000, ms/1000%60, ms%1000)
+}
+
+// variantLabel shows the default variant "" as "default".
+func variantLabel(key string) string {
+	if key == "" {
+		return "default"
+	}
+	return key
 }
 
 func runStatus(v *store.RunView) string {
@@ -131,15 +140,13 @@ func runShow(ctx context.Context, env *Env, args []string) error {
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", v.ID)
 	fmt.Fprintf(tw, "Account\t%s (id %d, %s)\n", v.Username, v.AccountID, orDash(v.Country))
-	fmt.Fprintf(tw, "Board\t%d: %s, engine class %d, %d laps, content version %d\n", v.BoardID,
-		v.BoardTrackID, v.EngineClass, v.Laps, v.ContentVersion)
-	fmt.Fprintf(tw, "Track hash\t%s\n", v.TrackHash)
+	fmt.Fprintf(tw, "Board\t%d: %s v%d, variant %s, engine class %d, %d laps, rules version %d\n", v.BoardID,
+		v.BoardTrackID, v.TrackVersion, variantLabel(v.Variant), v.EngineClass, v.Laps, v.RulesVersion)
 	fmt.Fprintf(tw, "Track pack\t%s\n", v.TrackPackID)
-	fmt.Fprintf(tw, "Kart / character\t%s / %s\n", v.KartID, v.CharacterID)
+	fmt.Fprintf(tw, "Kart / character\t%s v%d / %s\n", v.KartID, v.KartVersion, v.CharacterID)
 	fmt.Fprintf(tw, "Time\t%s (best lap %s; laps %s)\n", formatMs(v.FinishMs), formatMs(v.BestLapMs),
 		strings.Join(laps, ", "))
 	fmt.Fprintf(tw, "Rank\t%d\n", v.Rank)
-	fmt.Fprintf(tw, "Setup hash\t%s (mismatch: %t)\n", v.SetupHash, v.SetupMismatch)
 	fmt.Fprintf(tw, "Ghost id\t%s\n", v.GhostID)
 	fmt.Fprintf(tw, "Game build\t%s\n", orDash(v.GameBuild))
 	fmt.Fprintf(tw, "Frames\t%d\n", v.FrameCount)
@@ -304,20 +311,20 @@ func boardList(ctx context.Context, env *Env, args []string) error {
 	if err := exactArgs(pos, 0, "board list [--track T]"); err != nil {
 		return err
 	}
-	boards, err := env.Store.ListBoards(ctx, store.BoardFilter{TrackID: *track})
+	boards, err := env.Store.ListBoards(ctx, store.BoardFilter{TrackID: *track, Variant: proto.AnyVariant})
 	if err != nil {
 		return err
 	}
 	tw := tabwriter.NewWriter(env.Out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTRACK\tCLASS\tLAPS\tSIM\tLATEST TRACK HASH\tPLAYERS\tBEST\tLAST UPLOAD")
+	fmt.Fprintln(tw, "ID\tTRACK\tTRACK VERSION\tVARIANT\tCLASS\tLAPS\tRULES\tPLAYERS\tBEST\tLAST UPLOAD")
 	for i := range boards {
 		b := &boards[i]
 		best := "-"
 		if b.BestMs > 0 {
 			best = formatMs(b.BestMs)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%d\t%d\t%d\t%s\t%d\t%s\t%s\n", b.ID, b.TrackID, b.EngineClass, b.Laps, b.ContentVersion,
-			orDash(b.TrackHash), b.Players, best, formatTime(b.LastUpload))
+		fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n", b.ID, b.TrackID, b.TrackVersion,
+			variantLabel(b.Variant), b.EngineClass, b.Laps, b.RulesVersion, b.Players, best, formatTime(b.LastUpload))
 	}
 	tw.Flush()
 	fmt.Fprintf(env.Out, "%d board(s)\n", len(boards))

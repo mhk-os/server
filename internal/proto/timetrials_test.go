@@ -2,7 +2,6 @@ package proto
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math"
 	"strings"
 	"testing"
@@ -14,17 +13,19 @@ import (
 func sampleRun(id uint64) RunEntry {
 	return RunEntry{
 		RunID: id, Rank: 3, AccountID: 9, Username: "Hans_Huhn", Country: "DE", FinishMs: 93_456, BestLapMs: 30_100,
-		LapMs: []int32{31_000, 30_100, 32_356}, KartID: "mhk2.kart.speedy", CharacterID: "mhk2.char.moorhuhn",
+		LapMs: []int32{31_000, 30_100, 32_356}, KartID: "mhk2.kart.speedy", KartVersion: 2, CharacterID: "mhk2.char.moorhuhn",
 		GhostID: "0123456789abcdef0123456789abcdef", Recorded: when, Uploaded: when.Add(time.Hour), Flags: 2,
-		SetupMismatch: true, Hidden: true, FileSize: 67_361, BoardID: 4, TrackID: "mhk3.rome", EngineClass: 2,
+		Hidden: true, FileSize: 67_361, BoardID: 4, TrackID: "mhk3.rome", EngineClass: 2, TrackVersion: 3,
+		Variant: "core.night+core.rain", Laps: 3, RulesVersion: 1,
 	}
 }
 
 func timeTrialMessages() []Message {
 	return []Message{
-		&ListBoards{TrackID: "mhk3.rome", EngineClass: AnyEngineClass, ContentVersion: 7},
-		&BoardInfo{BoardID: 1, TrackID: "mhk3.rome", EngineClass: 2, Laps: 3, ContentVersion: 7,
-			TrackHash: "ffeeddccbbaa99887766554433221100", Players: 12, BestMs: 90_000, LastUpload: when},
+		&ListBoards{TrackID: "mhk3.rome", EngineClass: AnyEngineClass, RulesVersion: 7, Variant: AnyVariant},
+		&ListBoards{TrackID: "mhk3.rome", EngineClass: 1, RulesVersion: AnyRulesVersion, Variant: "core.reverse"},
+		&BoardInfo{BoardID: 1, TrackID: "mhk3.rome", TrackVersion: 2, Variant: "core.reverse", EngineClass: 2,
+			Laps: 3, RulesVersion: 7, Players: 12, BestMs: 90_000, LastUpload: when},
 		&BoardList{Boards: []BoardInfo{{BoardID: 1, TrackID: "a", LastUpload: when}, {BoardID: 2, TrackID: "b"}}},
 		new(sampleRun(5)),
 		&LeaderboardFilter{Username: "huhn", Country: "SK", Continent: "EU", KartID: "k", CharacterID: "c",
@@ -56,34 +57,65 @@ func timeTrialMessages() []Message {
 // TestRunEntryBytes pins the RunEntry layout so the C# codec can assert the same bytes.
 func TestRunEntryBytes(t *testing.T) {
 	e := RunEntry{RunID: 1, Rank: 2, AccountID: 3, Username: "ab", Country: "DE", FinishMs: 4, BestLapMs: 5,
-		LapMs: []int32{6, 7}, KartID: "k", CharacterID: "c", GhostID: "g", Recorded: time.UnixMilli(8),
-		Uploaded: time.UnixMilli(9), Flags: 10, SetupMismatch: true, Hidden: false, FileSize: 11, BoardID: 12,
-		TrackID: "t", EngineClass: 2}
-	le := binary.LittleEndian
-	var want []byte
-	want = le.AppendUint64(want, 1)
-	want = le.AppendUint32(want, 2)
-	want = le.AppendUint64(want, 3)
-	want = append(want, 2, 'a', 'b', 2, 'D', 'E')
-	want = le.AppendUint32(want, 4)
-	want = le.AppendUint32(want, 5)
-	want = append(want, 2)
-	want = le.AppendUint32(want, 6)
-	want = le.AppendUint32(want, 7)
-	want = append(want, 1, 'k', 1, 'c', 1, 'g')
-	want = le.AppendUint64(want, 8)
-	want = le.AppendUint64(want, 9)
-	want = le.AppendUint32(want, 10)
-	want = append(want, 1, 0)
-	want = le.AppendUint32(want, 11)
-	want = le.AppendUint64(want, 12)
-	want = append(want, 1, 't', 2)
-	if got := Encode(&e); !bytes.Equal(got, want) {
-		t.Fatalf("got  % x\nwant % x", got, want)
+		LapMs: []int32{6, 7}, KartID: "k", KartVersion: 13, CharacterID: "c", GhostID: "g", Recorded: time.UnixMilli(8),
+		Uploaded: time.UnixMilli(9), Flags: 10, Hidden: true, FileSize: 11, BoardID: 12, TrackID: "t", EngineClass: 2,
+		TrackVersion: 14, Variant: "v", Laps: 3, RulesVersion: 15}
+	want := strings.Join([]string{
+		"0100000000000000", "02000000", "0300000000000000", // runId, rank, accountId
+		"026162", "024445", // username "ab", country "DE"
+		"04000000", "05000000", // finishMs, bestLapMs
+		"02", "06000000", "07000000", // lapMs
+		"016b", "0d000000", "0163", "0167", // kartId, kartVersion, characterId, ghostId
+		"0800000000000000", "0900000000000000", // recorded, uploaded
+		"0a000000", "01", "0b000000", // flags, hidden, fileSize
+		"0c00000000000000", "0174", "02", // boardId, trackId, engineClass
+		"0e000000", "0176", "03", "0f000000", // trackVersion, variant, laps, rulesVersion
+	}, "")
+	b := pinHex(t, &e, want)
+	// Beyond the empty minimum: username +2, country +2, two lap times +8, one-character kart, character, ghost,
+	// track and variant ids +5.
+	if len(b) != runEntryMinSize+2+2+8+5 {
+		t.Fatalf("runEntryMinSize out of date: %d", len(b))
 	}
-	if len(want) != runEntryMinSize+2+2+8+1+1+1+1 {
-		t.Fatalf("runEntryMinSize out of date: %d", len(want))
+}
+
+// TestBoardInfoBytes pins the BoardInfo layout.
+func TestBoardInfoBytes(t *testing.T) {
+	bi := BoardInfo{BoardID: 1, TrackID: "t", TrackVersion: 2, Variant: "core.night", EngineClass: 2, Laps: 3,
+		RulesVersion: 4, Players: 5, BestMs: 6, LastUpload: time.UnixMilli(7)}
+	want := strings.Join([]string{
+		"0100000000000000", "0174", "02000000", // boardId, trackId, trackVersion
+		"0a636f72652e6e69676874", // variant "core.night"
+		"02", "03", "04000000",   // engineClass, laps, rulesVersion
+		"05000000", "06000000", // players, bestMs
+		"0700000000000000", // lastUpload
+	}, "")
+	b := pinHex(t, &bi, want)
+	if len(b) != boardInfoMinSize+1+10 {
+		t.Fatalf("boardInfoMinSize out of date: %d", len(b))
 	}
+}
+
+// TestListBoardsBytes pins the ListBoards layout.
+func TestListBoardsBytes(t *testing.T) {
+	pinHex(t, &ListBoards{TrackID: "t", EngineClass: AnyEngineClass, RulesVersion: AnyRulesVersion,
+		Variant: AnyVariant}, "0174"+"ff"+"00000000"+"012a")
+	pinHex(t, &ListBoards{TrackID: "t", EngineClass: 1, RulesVersion: 2, Variant: ""}, "0174"+"01"+"02000000"+"00")
+}
+
+// TestClientVectors pins the vectors the C# client tests assert.
+func TestClientVectors(t *testing.T) {
+	pinHex(t, &ListBoards{TrackID: "t", EngineClass: 255, RulesVersion: 1, Variant: "*"}, "0174ff01000000012a")
+	pinHex(t, &BoardInfo{BoardID: 1, TrackID: "t", TrackVersion: 2, Variant: "core.rain", EngineClass: 1, Laps: 3,
+		RulesVersion: 1, Players: 4, BestMs: 5},
+		"0100000000000000"+"0174"+"02000000"+"09636f72652e7261696e"+"01"+"03"+"01000000"+"04000000"+"05000000"+
+			"0000000000000000")
+	pinHex(t, &RunEntry{RunID: 1, AccountID: 2, Username: "u", FinishMs: 3, BestLapMs: 4, LapMs: []int32{},
+		KartID: "k", KartVersion: 5, CharacterID: "c", Recorded: time.UnixMilli(0), Uploaded: time.UnixMilli(0),
+		FileSize: 6, BoardID: 7, TrackID: "t", EngineClass: 1, TrackVersion: 8, Laps: 3, RulesVersion: 1},
+		"0100000000000000"+"00000000"+"0200000000000000"+"0175"+"00"+"03000000"+"04000000"+"00"+"016b"+"05000000"+
+			"0163"+"00"+"0000000000000000"+"0000000000000000"+"00000000"+"00"+"06000000"+"0700000000000000"+"0174"+
+			"01"+"08000000"+"00"+"03"+"01000000")
 }
 
 func TestOptionalTimes(t *testing.T) {
@@ -123,6 +155,12 @@ func TestTimeTrialLimits(t *testing.T) {
 		Encode(&ModHideRun{RunID: 1, Reason: strings.Repeat("x", MaxModReason+1)}))
 	decodeFails("97-byte track id", &MyRuns{}, Encode(&MyRuns{TrackID: strings.Repeat("t", MaxTrackID+1)}))
 	decodeFails("3-byte continent", &LeaderboardFilter{}, Encode(&LeaderboardFilter{Continent: "EUR"}))
+	long := strings.Repeat("v", MaxVariant+1)
+	decodeFails("129-byte list variant", &ListBoards{}, Encode(&ListBoards{TrackID: "t", Variant: long}))
+	decodeFails("129-byte board variant", &BoardInfo{}, Encode(&BoardInfo{TrackID: "t", Variant: long}))
+	e = sampleRun(1)
+	e.Variant = long
+	decodeFails("129-byte run variant", &RunEntry{}, Encode(&e))
 
 	// The upload length prefix is checked before the bytes: no 8 MiB+1 allocation for a short body.
 	w := wire.NewWriter(8)

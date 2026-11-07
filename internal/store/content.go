@@ -5,37 +5,23 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/mhk-os/server/internal/proto"
 	"github.com/mhk-os/server/internal/wire"
 )
 
-// PackVersion identifies what the catalog majority is computed over: a pack at a commit for a content version.
+// PackVersion identifies a pack manifest: a pack at a commit for a rules version.
 type PackVersion struct {
-	PackID         string
-	Commit         string
-	ContentVersion int32
+	PackID       string
+	Commit       string
+	RulesVersion int32
 }
 
 // Manifest is a row of pack_manifests.
 type Manifest struct {
 	PackVersion
-	Hash  string // lowercase hex
 	Items []proto.ManifestItem
-}
-
-// ContentStrike is a row of content_strikes, with the account's name for listings.
-type ContentStrike struct {
-	ID        uint64
-	AccountID uint64
-	Username  string
-	PackVersion
-	ManifestHash string // "" = unknown
-	MajorityHash string // "" = unknown
-	Reason       string
-	CreatedAt    time.Time
 }
 
 // CheatKickView is a cheat_kicks row with the account's name.
@@ -47,32 +33,36 @@ type CheatKickView struct {
 // Audit action written when a moderator kicks a player from a lobby.
 const ActionLobbyKick = "lobby.kick"
 
-// HasManifest reports whether the manifest with hash is stored for the pack version.
-func (s *Store) HasManifest(ctx context.Context, v PackVersion, hash string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pack_manifests
-		WHERE pack_id = ? AND pack_commit = ? AND content_version = ? AND manifest_hash = ?`,
-		v.PackID, v.Commit, v.ContentVersion, hash).Scan(&n)
-	return n > 0, err
-}
-
-// PutManifest stores a verified manifest; storing one that exists already is a no-op.
+// PutManifest stores a validated manifest. The first manifest stored for a pack version is kept: storing another
+// one for the same version is a no-op.
 func (s *Store) PutManifest(ctx context.Context, m *Manifest, at time.Time) error {
 	w := wire.NewWriter(16 + 40*len(m.Items))
 	proto.EncodeManifestItems(w, m.Items)
-	_, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO pack_manifests (pack_id, pack_commit, content_version,
-		manifest_hash, items, item_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		m.PackID, m.Commit, m.ContentVersion, m.Hash, w.Bytes(), len(m.Items), at)
+	_, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO pack_manifests (pack_id, pack_commit, rules_version, items,
+		item_count, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		m.PackID, m.Commit, m.RulesVersion, w.Bytes(), len(m.Items), at)
 	return err
 }
 
-// ManifestByHash returns a stored manifest, ErrNotFound when there is none.
-func (s *Store) ManifestByHash(ctx context.Context, v PackVersion, hash string) (*Manifest, error) {
+// Manifest returns the stored manifest of a pack version, ErrNotFound when there is none.
+func (s *Store) Manifest(ctx context.Context, v PackVersion) (*Manifest, error) {
+	return s.scanManifest(s.db.QueryRowContext(ctx, `SELECT pack_id, pack_commit, rules_version, items
+		FROM pack_manifests WHERE pack_id = ? AND pack_commit = ? AND rules_version = ?`,
+		v.PackID, v.Commit, v.RulesVersion), v.PackID)
+}
+
+// LatestManifest returns the most recently stored manifest of packID for rulesVersion over every commit. Dev bots
+// announce it to look like a current client of the server.
+func (s *Store) LatestManifest(ctx context.Context, packID string, rulesVersion int32) (*Manifest, error) {
+	return s.scanManifest(s.db.QueryRowContext(ctx, `SELECT pack_id, pack_commit, rules_version, items
+		FROM pack_manifests WHERE pack_id = ? AND rules_version = ? ORDER BY created_at DESC LIMIT 1`,
+		packID, rulesVersion), packID)
+}
+
+func (s *Store) scanManifest(row *sql.Row, packID string) (*Manifest, error) {
 	var blob []byte
 	m := &Manifest{}
-	err := s.db.QueryRowContext(ctx, `SELECT pack_id, pack_commit, content_version, manifest_hash, items
-		FROM pack_manifests WHERE pack_id = ? AND pack_commit = ? AND content_version = ? AND manifest_hash = ?`,
-		v.PackID, v.Commit, v.ContentVersion, hash).Scan(&m.PackID, &m.Commit, &m.ContentVersion, &m.Hash, &blob)
+	err := row.Scan(&m.PackID, &m.Commit, &m.RulesVersion, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -82,87 +72,9 @@ func (s *Store) ManifestByHash(ctx context.Context, v PackVersion, hash string) 
 	r := wire.NewReader(blob)
 	m.Items = proto.DecodeManifestItems(r)
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("store: manifest %s of %s: %w", hash, v.PackID, err)
+		return nil, fmt.Errorf("store: manifest of %s: %w", packID, err)
 	}
 	return m, nil
-}
-
-// PackVotes returns the manifest hash every account reported for the pack version.
-func (s *Store) PackVotes(ctx context.Context, v PackVersion) (map[uint64]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT account_id, manifest_hash FROM pack_votes
-		WHERE pack_id = ? AND pack_commit = ? AND content_version = ?`, v.PackID, v.Commit, v.ContentVersion)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	votes := map[uint64]string{}
-	for rows.Next() {
-		var (
-			id   uint64
-			hash string
-		)
-		if err := rows.Scan(&id, &hash); err != nil {
-			return nil, err
-		}
-		votes[id] = strings.ToLower(hash)
-	}
-	return votes, rows.Err()
-}
-
-// SetPackVote records the account's latest manifest hash for the pack version.
-func (s *Store) SetPackVote(ctx context.Context, v PackVersion, accountID uint64, hash string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO pack_votes (pack_id, pack_commit, content_version, account_id,
-		manifest_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE manifest_hash = VALUES(manifest_hash), updated_at = VALUES(updated_at)`,
-		v.PackID, v.Commit, v.ContentVersion, accountID, hash, at)
-	return err
-}
-
-// AddContentStrike stores a strike. With once, a strike with the same account, pack version and both hashes is
-// written only the first time, so announcing the same differing copy again does not pile up strikes.
-func (s *Store) AddContentStrike(ctx context.Context, k *ContentStrike, once bool) error {
-	q := `INSERT INTO content_strikes (account_id, pack_id, pack_commit, content_version, manifest_hash, majority_hash,
-		reason, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM DUAL`
-	args := []any{k.AccountID, k.PackID, k.Commit, k.ContentVersion, k.ManifestHash, k.MajorityHash, k.Reason, k.CreatedAt}
-	if once {
-		q += ` WHERE NOT EXISTS (SELECT 1 FROM content_strikes WHERE account_id = ? AND pack_id = ? AND
-			pack_commit = ? AND content_version = ? AND manifest_hash = ? AND majority_hash = ?)`
-		args = append(args, k.AccountID, k.PackID, k.Commit, k.ContentVersion, k.ManifestHash, k.MajorityHash)
-	}
-	_, err := s.db.ExecContext(ctx, q, args...)
-	return err
-}
-
-// ContentStrikes lists strikes newest first; accountID 0 means every account, limit 0 no limit.
-func (s *Store) ContentStrikes(ctx context.Context, accountID uint64, limit int) ([]ContentStrike, error) {
-	q := `SELECT cs.id, cs.account_id, a.username, cs.pack_id, cs.pack_commit, cs.content_version, cs.manifest_hash,
-		cs.majority_hash, cs.reason, cs.created_at FROM content_strikes cs JOIN accounts a ON a.id = cs.account_id`
-	var args []any
-	if accountID != 0 {
-		q += " WHERE cs.account_id = ?"
-		args = append(args, accountID)
-	}
-	q += " ORDER BY cs.id DESC"
-	if limit > 0 {
-		q += " LIMIT ?"
-		args = append(args, limit)
-	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []ContentStrike
-	for rows.Next() {
-		var k ContentStrike
-		if err := rows.Scan(&k.ID, &k.AccountID, &k.Username, &k.PackID, &k.Commit, &k.ContentVersion, &k.ManifestHash,
-			&k.MajorityHash, &k.Reason, &k.CreatedAt); err != nil {
-			return nil, err
-		}
-		k.CreatedAt = k.CreatedAt.UTC()
-		out = append(out, k)
-	}
-	return out, rows.Err()
 }
 
 // CheatKicks lists cheat kicks newest first; accountID 0 means every account, limit 0 no limit.

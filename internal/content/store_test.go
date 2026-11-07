@@ -15,7 +15,8 @@ import (
 	"github.com/mhk-os/server/internal/store"
 )
 
-// TestCatalogOnMariaDB runs the catalog on the real store (MHK_TEST_DSN) and lists the results with the admin CLI.
+// TestCatalogOnMariaDB runs the catalog on the real store (MHK_TEST_DSN) and lists cheat kicks and reports with the
+// admin CLI.
 func TestCatalogOnMariaDB(t *testing.T) {
 	dsn := os.Getenv("MHK_TEST_DSN")
 	if dsn == "" {
@@ -33,8 +34,8 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	var rb [5]byte
 	rand.Read(rb[:])
 	suffix := hex.EncodeToString(rb[:])
-	ids := make([]uint64, 4)
-	names := make([]string, 4)
+	ids := make([]uint64, 2)
+	names := make([]string, 2)
 	for i := range ids {
 		a := &store.Account{Username: "ct" + suffix + string(rune('a'+i)), PasswordHash: "x", CreatedAt: store.Now()}
 		if err := st.CreateAccount(ctx, a); err != nil {
@@ -44,50 +45,42 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	}
 
 	commit := "it-" + suffix // a fresh pack version for this run
-	good := proto.PackManifest{PackID: "mhk2", Commit: commit, ContentVersion: contentVersion,
-		Items: []proto.ManifestItem{it(proto.ContentTrack, "mhk2.Rome", "f"), it(proto.ContentKart, "mhk2.kart", "")}}
-	good.ManifestHash, _ = ManifestHash(good.Items)
-	bad := good
-	bad.Items = append([]proto.ManifestItem{it(proto.ContentKart, "mhk2.turbo", "")}, good.Items...)
-	bad.ManifestHash, _ = ManifestHash(bad.Items)
+	first := manifest("mhk2", it(proto.ContentTrack, "mhk2.Rome", 3), it(proto.ContentKart, "mhk2.kart", 1))
+	first.Commit = commit
+	second := manifest("mhk2", it(proto.ContentKart, "mhk2.turbo", 1))
+	second.Commit = commit
 
 	c := New(st, nil)
-	for _, id := range ids[:3] {
-		announce(t, c, id, good)
+	if res := announce(t, c, ids[0], first); len(res.Missing) != 1 {
+		t.Fatalf("first announce %+v", res)
 	}
-	res := announce(t, c, ids[3], bad)
-	if len(res.Strikes) != 1 || !c.Differs(ids[3], "MHK2") {
-		t.Fatalf("no strike on MariaDB: %+v", res)
+	// The stored manifest keeps the ids as reported; storing another one for the version changes nothing.
+	if err := st.PutManifest(ctx, &store.Manifest{PackVersion: store.PackVersion{PackID: "mhk2", Commit: commit,
+		RulesVersion: rulesVersion}, Items: second.Items}, store.Now()); err != nil {
+		t.Fatal(err)
 	}
-	announce(t, c, ids[3], bad)
-
-	// The stored manifest keeps the ids as reported; a fresh catalog reads votes and manifests back.
-	m, err := st.ManifestByHash(ctx, store.PackVersion{PackID: "MHK2", Commit: commit, ContentVersion: contentVersion},
-		good.ManifestHash)
-	if err != nil || len(m.Items) != 2 || m.Items[0].ID != "mhk2.Rome" {
+	m, err := st.Manifest(ctx, store.PackVersion{PackID: "MHK2", Commit: strings.ToUpper(commit),
+		RulesVersion: rulesVersion})
+	if err != nil || len(m.Items) != 2 || m.Items[0] != it(proto.ContentTrack, "mhk2.Rome", 3) {
 		t.Fatalf("stored manifest %+v %v", m, err)
 	}
+	if _, err := st.Manifest(ctx, store.PackVersion{PackID: "mhk2", Commit: commit,
+		RulesVersion: rulesVersion + 1}); err != store.ErrNotFound {
+		t.Fatalf("other rules version: %v", err)
+	}
+	if latest, err := st.LatestManifest(ctx, "mhk2", rulesVersion); err != nil || latest.RulesVersion != rulesVersion {
+		t.Fatalf("latest manifest %+v %v", latest, err)
+	}
+	// A fresh catalog reads it back and asks for nothing.
 	c2 := New(st, nil)
-	announce(t, c2, ids[3], bad)
-	if !c2.Differs(ids[3], "mhk2") || c2.Has(ids[3], "mhk2", proto.ContentKart, "mhk2.turbo") ||
-		!c2.Has(ids[3], "mhk2", proto.ContentTrack, "MHK2.ROME") {
+	if res := announce(t, c2, ids[1], second); len(res.Missing) != 0 {
+		t.Fatalf("reloaded catalog asked for %v", res.Missing)
+	}
+	if c2.Has(ids[1], "mhk2", proto.ContentKart, "mhk2.turbo") || !c2.Has(ids[1], "mhk2", proto.ContentTrack, "MHK2.ROME") {
 		t.Fatal("reloaded catalog disagrees")
 	}
-	c2.Strike(ids[3], "mhk2", "race content desync")
 
-	strikes, err := st.ContentStrikes(ctx, ids[3], 0)
-	if err != nil || len(strikes) != 2 {
-		t.Fatalf("strikes %+v %v", strikes, err)
-	}
-	if s := strikes[1]; s.ManifestHash != bad.ManifestHash || s.MajorityHash != good.ManifestHash ||
-		!strings.EqualFold(s.Commit, commit) || s.Username != names[3] {
-		t.Fatalf("hello strike %+v", s)
-	}
-	if strikes[0].Reason != "race content desync" {
-		t.Fatalf("race strike %+v", strikes[0])
-	}
-
-	if err := st.AddCheatKick(ctx, &store.CheatKick{AccountID: ids[3], LobbyRef: "lobby 1", RaceRef: "race 2",
+	if err := st.AddCheatKick(ctx, &store.CheatKick{AccountID: ids[1], LobbyRef: "lobby 1", RaceRef: "race 2",
 		Reason: "speed", Reporters: names[0], CreatedAt: store.Now().Add(-time.Second)}); err != nil {
 		t.Fatal(err)
 	}
@@ -98,15 +91,7 @@ func TestCatalogOnMariaDB(t *testing.T) {
 		}
 		return out.String()
 	}
-	out := run("content", "strikes", "--account", names[3])
-	if !strings.Contains(out, "2 strike(s)") || !strings.Contains(out, bad.ManifestHash) ||
-		!strings.Contains(out, "race content desync") {
-		t.Fatalf("content strikes:\n%s", out)
-	}
-	if out := run("content", "strikes", "--account", names[0]); !strings.Contains(out, "0 strike(s)") {
-		t.Fatalf("strikes of a good account:\n%s", out)
-	}
-	out = run("kicks", "--account", names[3])
+	out := run("kicks", "--account", names[1])
 	if !strings.Contains(out, "1 kick(s)") || !strings.Contains(out, "speed") || !strings.Contains(out, "race 2") {
 		t.Fatalf("kicks:\n%s", out)
 	}
@@ -115,11 +100,11 @@ func TestCatalogOnMariaDB(t *testing.T) {
 	}
 
 	if err := st.AddCheatReport(ctx, &store.CheatReport{LobbyRef: "lobby 1", RaceRef: "race 3", ReporterID: ids[0],
-		SuspectID: ids[3], Reason: "Teleport", Detail: "jumped 40 m", Note: "suspect ping unknown or over 200 ms",
+		SuspectID: ids[1], Reason: "Teleport", Detail: "jumped 40 m", Note: "suspect ping unknown or over 200 ms",
 		CreatedAt: store.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	out = run("cheat-reports", "--account", names[3])
+	out = run("cheat-reports", "--account", names[1])
 	if !strings.Contains(out, "1 report(s)") || !strings.Contains(out, names[0]) ||
 		!strings.Contains(out, "no: suspect ping") || !strings.Contains(out, "jumped 40 m") {
 		t.Fatalf("cheat-reports:\n%s", out)

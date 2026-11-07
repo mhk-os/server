@@ -423,8 +423,8 @@ func (rs *raceState) onLoaded(s *seat, m *proto.RaceLoaded, now time.Time) {
 	}
 	rs.lobbySpecials(m)
 	s.loaded, s.loadedHash = m, loadHash(m)
-	rs.debug("race loaded", s, "hash", shortHash(s.loadedHash), "trackHash", m.TrackHash, "laps", m.Laps,
-		"boxes", len(m.Boxes), "pool", len(m.Pool), "effects", len(m.Effects))
+	rs.debug("race loaded", s, "hash", shortHash(s.loadedHash), "trackVersion", m.TrackVersion, "variant", m.Variant,
+		"laps", m.Laps, "boxes", len(m.Boxes), "pool", len(m.Pool), "effects", len(m.Effects))
 	rs.maybeDecideLoad(now)
 }
 
@@ -485,7 +485,7 @@ func (rs *raceState) decideLoad(now time.Time) {
 		}
 	}
 	rs.debug("load agreement", agreed, "majority", ok, "loaded", len(loaded), "agreedHash", shortHash(best),
-		"trackHash", agreed.loaded.TrackHash)
+		"trackVersion", agreed.loaded.TrackVersion, "variant", agreed.loaded.Variant)
 	rs.agreed = agreed.loaded
 	rs.isEffect = make(map[string]bool, len(rs.agreed.Effects))
 	for _, e := range rs.agreed.Effects {
@@ -507,34 +507,12 @@ func (rs *raceState) decideLoad(now time.Time) {
 	rs.env.going(rs.id)
 }
 
+// dropDissenters takes out every racer whose loaded content differs from the agreed one.
 func (rs *raceState) dropDissenters(loaded []*seat, best [32]byte, now time.Time) {
-	pack := packOf(rs.spec.TrackID)
-	majorityCommit := ""
-	if rs.cat != nil {
-		commits := map[string]int{}
-		for _, s := range loaded {
-			if s.loadedHash == best {
-				commits[rs.cat.PackCommit(s.racer.AccountID, pack)]++
-			}
-		}
-		top := 0
-		for c, n := range commits {
-			if n > top || (n == top && c < majorityCommit) {
-				majorityCommit, top = c, n
-			}
-		}
-	}
 	for _, s := range loaded {
-		if s.loadedHash == best {
-			continue
+		if s.loadedHash != best {
+			rs.leave(s, OutcomeDesync, "Your game content differs from the other players' (track, items or rules).", now)
 		}
-		// Same pack version but different content: the copy was modified (or broken), which moderators see.
-		if rs.cat != nil && majorityCommit != "" && rs.cat.PackCommit(s.racer.AccountID, pack) == majorityCommit {
-			rs.debug("content strike", s, "pack", pack, "commit", majorityCommit)
-			rs.cat.Strike(s.racer.AccountID, pack, "race content of "+rs.spec.TrackID+
-				" differs from other players with the same pack version")
-		}
-		rs.leave(s, OutcomeDesync, "Your game content differs from the other players' (track, items or rules).", now)
 	}
 }
 
@@ -1181,8 +1159,8 @@ func (rs *raceState) onUnknownContent(rep *seat, m *proto.UnknownContent, now ti
 		return
 	}
 	delete(rs.unknown, x.slot)
-	// Content absent from the catalog majority of x's own pack version cannot come from an honest copy.
-	if rs.spec.Anticheat && rs.cat != nil && !rs.cat.InMajority(x.racer.AccountID, packOf(m.ID), m.Kind, m.ID) {
+	// Content absent from the stored manifest of x's own pack version cannot come from an honest copy.
+	if rs.spec.Anticheat && rs.cat != nil && !rs.cat.Has(x.racer.AccountID, packOf(m.ID), m.Kind, m.ID) {
 		var reporters []string
 		for slot := range c.reporters {
 			reporters = append(reporters, formatID(rs.seats[slot].racer.AccountID))

@@ -215,7 +215,6 @@ type PlayerProfile struct {
 	Disabled       bool
 	DisabledReason string
 	CheatKicks     uint32
-	ContentStrikes uint32
 	HiddenRuns     uint32
 	FlaggedRuns    uint32
 }
@@ -232,7 +231,6 @@ func (m *PlayerProfile) Encode(w *wire.Writer) {
 	w.Bool(m.Disabled)
 	w.String(m.DisabledReason)
 	w.U32(m.CheatKicks)
-	w.U32(m.ContentStrikes)
 	w.U32(m.HiddenRuns)
 	w.U32(m.FlaggedRuns)
 	encodePlaytimes(w, nil, &m.Player)
@@ -250,7 +248,6 @@ func (m *PlayerProfile) Decode(r *wire.Reader) error {
 	m.Disabled = r.Bool()
 	m.DisabledReason = r.String(MaxModReason)
 	m.CheatKicks = r.U32()
-	m.ContentStrikes = r.U32()
 	m.HiddenRuns = r.U32()
 	m.FlaggedRuns = r.U32()
 	decodePlaytimes(r, nil, &m.Player)

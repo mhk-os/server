@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"strconv"
 	"sync/atomic"
@@ -27,6 +26,7 @@ type botConfig struct {
 	character string
 	kart      string
 	trackID   string // the ghost's track: voted for when the lobby offers it
+	variant   string // the ghost's variant key, voted with trackID
 	replay    *replay
 	manifests *manifestFile
 	keepAlive time.Duration     // TCP Ping interval
@@ -88,7 +88,7 @@ func (b *bot) connect(ctx context.Context) error {
 	b.c = c
 	hello := testclient.DefaultHello()
 	hello.GameCommit, hello.Platform = "mhk-bot", b.cfg.platform
-	hello.ContentVersion = b.cfg.manifests.ContentVersion
+	hello.RulesVersion = b.cfg.manifests.RulesVersion
 	sent := time.Now()
 	ok, err := c.Hello(ctx, hello)
 	if err != nil {
@@ -107,13 +107,10 @@ func (b *bot) connect(ctx context.Context) error {
 		return fmt.Errorf("login %s: %w", b.name, err)
 	}
 	b.acc = s.Account.ID
-	res, err := c.ContentHello(ctx, b.cfg.manifests.ContentVersion, b.cfg.manifests.refs())
+	res, err := c.ContentHello(ctx, b.cfg.manifests.RulesVersion, b.cfg.manifests.refs())
 	if err != nil {
 		c.Close()
 		return fmt.Errorf("content hello: %w", err)
-	}
-	for _, s := range res.Strikes {
-		b.log.Warn("content differs from the server's majority", "pack", s.PackID, "message", s.Message)
 	}
 	if len(res.Missing) > 0 {
 		if err := c.ContentManifests(ctx, b.cfg.manifests.manifests(res.Missing)); err != nil {
@@ -229,9 +226,9 @@ func (b *bot) onLobbyState(ctx context.Context, st *proto.LobbyState) {
 			return
 		}
 		b.votedRound = st.PhaseEnds
-		// The ghost only makes sense on its own track; Random when the lobby does not offer it.
-		if err := b.c.Vote(ctx, b.cfg.trackID); err != nil {
-			if err := b.c.Vote(ctx, ""); err != nil {
+		// The ghost only makes sense on its own track and variant; Random when the lobby does not offer it.
+		if err := b.c.Vote(ctx, b.cfg.trackID, b.cfg.variant); err != nil {
+			if err := b.c.Vote(ctx, "", ""); err != nil {
 				b.log.Warn("vote failed", "err", err)
 			}
 		}
@@ -269,11 +266,11 @@ func (b *bot) startRace(ctx context.Context, setup *proto.RaceSetup) {
 	}()
 }
 
-// loadedHash is unique per bot: content agreement then sees no majority among bots, and a lone human (or bots
-// only) ties with everyone, so nobody leaves as desync. The real track data is unknown to a bot.
-func loadedHash(accountID uint64) string {
-	h := sha256.Sum256([]byte("mhk-bot:" + strconv.FormatUint(accountID, 10)))
-	return hex.EncodeToString(h[:16])
+// loadedTrackVersion is unique per bot and below 1, a version no game sends: content agreement then sees no
+// majority among bots, and a lone human (or bots only) ties with everyone, so nobody leaves as desync. The real
+// track data is unknown to a bot.
+func loadedTrackVersion(accountID uint64) int32 {
+	return -int32(accountID % math.MaxInt32)
 }
 
 // race runs one race: UDP, RaceLoaded, the ghost replay from GO, Finished at the ghost's finish time.
@@ -291,7 +288,8 @@ func (b *bot) race(ctx context.Context, setup *proto.RaceSetup, goCh <-chan time
 	if laps == 0 {
 		laps = uint8(rp.g.Laps)
 	}
-	loaded := &proto.RaceLoaded{RaceID: setup.RaceID, TrackHash: loadedHash(b.acc), Laps: laps}
+	loaded := &proto.RaceLoaded{RaceID: setup.RaceID, TrackVersion: loadedTrackVersion(b.acc), Variant: setup.Variant,
+		Laps: laps}
 	if b.cfg.loaded != nil {
 		copied := *b.cfg.loaded
 		copied.RaceID = setup.RaceID

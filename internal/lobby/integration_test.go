@@ -28,10 +28,10 @@ import (
 const itPassword = "kart-racer-2026"
 
 type itServer struct {
-	addr           string
-	st             *store.Store
-	races          *fakeRaces
-	contentVersion int32
+	addr         string
+	st           *store.Store
+	races        *fakeRaces
+	rulesVersion int32
 }
 
 // startServer runs the server with faked races, or with the real race engine and UDP when realRaces is set.
@@ -99,11 +99,11 @@ func startServer(t *testing.T, realRaces bool) *itServer {
 			engine.Close()
 		}
 	})
-	// A random content version keeps this run's catalog votes apart from earlier runs on the same database.
+	// A random rules version keeps this run's stored manifests apart from earlier runs on the same database.
 	var b [3]byte
 	rand.Read(b[:])
 	its.addr = ln.Addr().String()
-	its.contentVersion = 1_000_000 + int32(b[0])<<16 | int32(b[1])<<8 | int32(b[2])
+	its.rulesVersion = 1_000_000 + int32(b[0])<<16 | int32(b[1])<<8 | int32(b[2])
 	return its
 }
 
@@ -130,7 +130,7 @@ func (s *itServer) connect(t *testing.T, moderator bool) *itPlayer {
 		}
 		t.Cleanup(func() { c.Close() })
 		h := testclient.DefaultHello()
-		h.ContentVersion, h.Platform = s.contentVersion, "OSXEditor" // LobbyMember/RaceSlot.platform 2
+		h.RulesVersion, h.Platform = s.rulesVersion, "OSXEditor" // LobbyMember/RaceSlot.platform 2
 		if _, err := c.Hello(ctx, h); err != nil {
 			t.Fatal(err)
 		}
@@ -158,47 +158,43 @@ func (s *itServer) connect(t *testing.T, moderator bool) *itPlayer {
 	return &itPlayer{Client: c, id: sess.Account.ID, name: name}
 }
 
-func manifest(id, commit string, contentVersion int32, items ...proto.ManifestItem) proto.PackManifest {
-	m := proto.PackManifest{PackID: id, Commit: commit, ContentVersion: contentVersion, Items: items}
-	m.ManifestHash, _ = content.ManifestHash(items)
-	return m
+func manifest(id, commit string, rulesVersion int32, items ...proto.ManifestItem) proto.PackManifest {
+	return proto.PackManifest{PackID: id, Commit: commit, RulesVersion: rulesVersion, Items: items}
 }
 
 func item(kind uint8, id string) proto.ManifestItem {
-	return proto.ManifestItem{Kind: kind, ID: id, Fingerprint: "0123456789abcdef"}
+	return proto.ManifestItem{Kind: kind, ID: id, Version: 1}
 }
 
 // packs are the built-in pack and the classic packs of category 1, at a commit unique to the test run.
 func (s *itServer) packs(commit string) []proto.PackManifest {
 	return []proto.PackManifest{
-		manifest("game", commit, s.contentVersion, item(proto.ContentCharacter, "game.huhn"),
+		manifest("game", commit, s.rulesVersion, item(proto.ContentCharacter, "game.huhn"),
 			item(proto.ContentKart, "game.kart")),
-		manifest("mhk2", commit, s.contentVersion, item(proto.ContentTrack, "mhk2.rome"),
+		manifest("mhk2", commit, s.rulesVersion, item(proto.ContentTrack, "mhk2.rome"),
 			item(proto.ContentTrack, "mhk2.alps"), item(proto.ContentKart, "mhk2.speedy")),
-		manifest("mhk3", commit, s.contentVersion, item(proto.ContentTrack, "mhk3.paris"), item(proto.ContentCup, "mhk3.cup")),
-		manifest("mhke", commit, s.contentVersion),
-		manifest("mhkt", commit, s.contentVersion, item(proto.ContentArena, "mhkt.arena")),
+		manifest("mhk3", commit, s.rulesVersion, item(proto.ContentTrack, "mhk3.paris"), item(proto.ContentCup, "mhk3.cup")),
+		manifest("mhke", commit, s.rulesVersion),
+		manifest("mhkt", commit, s.rulesVersion, item(proto.ContentArena, "mhkt.arena")),
 	}
 }
 
 // announce runs ContentHello and sends what the server asks for.
-func (p *itPlayer) announce(t *testing.T, contentVersion int32, ms []proto.PackManifest) *proto.ContentHelloResult {
+func (p *itPlayer) announce(t *testing.T, rulesVersion int32, ms []proto.PackManifest) *proto.ContentHelloResult {
 	t.Helper()
 	ctx := itCtx(t)
 	refs := make([]proto.PackRef, len(ms))
 	for i, m := range ms {
-		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.ManifestHash}
+		refs[i] = proto.PackRef{PackID: m.PackID, Commit: m.Commit}
 	}
-	res, err := p.ContentHello(ctx, contentVersion, refs)
+	res, err := p.ContentHello(ctx, rulesVersion, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var send []proto.PackManifest
 	for _, m := range ms {
-		for _, h := range res.Missing {
-			if h == m.ManifestHash {
-				send = append(send, m)
-			}
+		if slices.Contains(res.Missing, m.PackID) {
+			send = append(send, m)
 		}
 	}
 	if len(send) > 0 {
@@ -243,7 +239,7 @@ func (s *itServer) waitStart(t *testing.T, n int) startCall {
 func TestPublicLobbyOverTCP(t *testing.T) {
 	s := startServer(t, false)
 	ctx := itCtx(t)
-	commit := "c" + hex.EncodeToString([]byte{byte(s.contentVersion), byte(s.contentVersion >> 8)})
+	commit := "c" + hex.EncodeToString([]byte{byte(s.rulesVersion), byte(s.rulesVersion >> 8)})
 	packs := s.packs(commit)
 
 	a, b, mod := s.connect(t, false), s.connect(t, false), s.connect(t, true)
@@ -251,18 +247,18 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 	// Lobby requests need the content announced first.
 	_, err := a.ListLobbies(ctx)
 	itStatus(t, err, proto.StatusBadRequest, "content not announced")
-	res := a.announce(t, s.contentVersion, packs)
-	if len(res.Missing) != len(packs) || len(res.Strikes) != 0 {
+	res := a.announce(t, s.rulesVersion, packs)
+	if len(res.Missing) != len(packs) {
 		t.Fatalf("first ContentHello %+v", res)
 	}
-	if res := b.announce(t, s.contentVersion, packs); len(res.Missing) != 0 {
+	if res := b.announce(t, s.rulesVersion, packs); len(res.Missing) != 0 {
 		t.Fatalf("known manifests requested again: %+v", res)
 	}
-	mod.announce(t, s.contentVersion, packs)
-	// ContentHello must carry the Hello's content version.
-	_, err = a.ContentHello(ctx, s.contentVersion+1, nil)
-	itStatus(t, err, proto.StatusBadRequest, "contentVersion")
-	a.announce(t, s.contentVersion, packs)
+	mod.announce(t, s.rulesVersion, packs)
+	// ContentHello must carry the Hello's rules version.
+	_, err = a.ContentHello(ctx, s.rulesVersion+1, nil)
+	itStatus(t, err, proto.StatusBadRequest, "rulesVersion")
+	a.announce(t, s.rulesVersion, packs)
 
 	list, err := a.ListLobbies(ctx)
 	if err != nil || len(list) != maxCategory {
@@ -276,7 +272,7 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 	if err := a.SetLoadout(ctx, "game.huhn", "mhk2.speedy"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.StartRace(ctx, "mhk2.rome"); err != nil {
+	if err := a.StartRace(ctx, "mhk2.rome", ""); err != nil {
 		t.Fatal(err)
 	}
 	solo := s.waitStart(t, 1)
@@ -297,11 +293,11 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 		t.Fatalf("second QuickJoin %+v %v", stB, err)
 	}
 	a.waitState(t, func(st *proto.LobbyState) bool { return len(st.Members) == 2 })
-	itStatus(t, a.StartRace(ctx, ""), proto.StatusForbidden, "voting")
+	itStatus(t, a.StartRace(ctx, "", ""), proto.StatusForbidden, "voting")
 
 	// Missing packs are refused with a list.
 	c := s.connect(t, false)
-	c.announce(t, s.contentVersion, packs[:2])
+	c.announce(t, s.rulesVersion, packs[:2])
 	_, err = c.QuickJoin(ctx, 1)
 	itStatus(t, err, proto.StatusBadRequest, "mhk3, mhke, mhkt")
 
@@ -312,12 +308,12 @@ func TestPublicLobbyOverTCP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	itStatus(t, a.Vote(ctx, "mhkt.arena"), proto.StatusBadRequest, "not a track")
-	if err := a.Vote(ctx, "mhk2.alps"); err != nil {
+	itStatus(t, a.Vote(ctx, "mhkt.arena", ""), proto.StatusBadRequest, "not a track")
+	if err := a.Vote(ctx, "mhk2.alps", ""); err != nil {
 		t.Fatal(err)
 	}
 	b.waitState(t, func(st *proto.LobbyState) bool { return len(st.Votes) == 1 && st.Votes[0].TrackID == "mhk2.alps" })
-	if err := b.Vote(ctx, "mhk2.alps"); err != nil {
+	if err := b.Vote(ctx, "mhk2.alps", ""); err != nil {
 		t.Fatal(err)
 	}
 	call := s.waitStart(t, 2)
@@ -399,8 +395,8 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 	ctx := itCtx(t)
 	packs := s.packs("room")
 	owner, guest := s.connect(t, false), s.connect(t, false)
-	owner.announce(t, s.contentVersion, packs)
-	guest.announce(t, s.contentVersion, packs)
+	owner.announce(t, s.rulesVersion, packs)
+	guest.announce(t, s.rulesVersion, packs)
 
 	settings := proto.RoomSettings{Name: "Hühnerstall", Mode: proto.RoomRaceSet, Packs: []string{"mhk2", "mhk3"},
 		Anticheat: true, EngineClass: 1, Laps: 2, Items: true, MaxPlayers: 4, TrackPick: proto.PickOwner,
@@ -430,10 +426,10 @@ func TestPrivateRoomOverTCP(t *testing.T) {
 	if err := guest.SetLoadout(ctx, "game.huhn", "game.kart"); err != nil {
 		t.Fatal(err)
 	}
-	itStatus(t, guest.StartRace(ctx, "mhk2.rome"), proto.StatusForbidden, "owner")
+	itStatus(t, guest.StartRace(ctx, "mhk2.rome", ""), proto.StatusForbidden, "owner")
 	itStatus(t, guest.StartCup(ctx, "mhk3.cup", []string{"mhk3.paris"}), proto.StatusForbidden, "owner")
 	itStatus(t, owner.StartCup(ctx, "mhk3.cup", []string{"mhk3.paris", "mhk3.lyon"}), proto.StatusBadRequest, "mhk3.lyon")
-	if err := owner.StartRace(ctx, "mhk3.paris"); err != nil {
+	if err := owner.StartRace(ctx, "mhk3.paris", ""); err != nil {
 		t.Fatal(err)
 	}
 	call := s.waitStart(t, 1)
@@ -463,20 +459,20 @@ func TestLobbyContentRulesOverTCP(t *testing.T) {
 	ctx := itCtx(t)
 	packs := s.packs("rules")
 	a, b, modded := s.connect(t, false), s.connect(t, false), s.connect(t, false)
-	a.announce(t, s.contentVersion, packs)
+	a.announce(t, s.rulesVersion, packs)
 
 	// A mod replacing a kart of a lobby pack is refused, also without anticheat.
-	mod := manifest("actest", "rules", s.contentVersion,
-		proto.ManifestItem{Kind: proto.ContentKart, ID: "mhk2.speedy", Fingerprint: "twice as fast"})
-	modded.announce(t, s.contentVersion, append(slices.Clone(packs), mod))
+	mod := manifest("actest", "rules", s.rulesVersion, proto.ManifestItem{Kind: proto.ContentKart, ID: "mhk2.speedy",
+		Version: 2})
+	modded.announce(t, s.rulesVersion, append(slices.Clone(packs), mod))
 	_, err := modded.QuickJoin(ctx, 2)
 	itStatus(t, err, proto.StatusBadRequest, "actest replaces content of this lobby (mhk2.speedy)")
 
-	// Another version of mhk3 races in its own public instance and cannot enter a's anticheat lobbies.
+	// Another commit of mhk3 races in its own public instance and cannot enter a's anticheat lobbies.
 	other := slices.Clone(packs)
-	other[2] = manifest("mhk3", "rules", s.contentVersion, item(proto.ContentTrack, "mhk3.paris"),
+	other[2] = manifest("mhk3", "rules2", s.rulesVersion, item(proto.ContentTrack, "mhk3.paris"),
 		item(proto.ContentTrack, "mhk3.lyon"))
-	b.announce(t, s.contentVersion, other)
+	b.announce(t, s.rulesVersion, other)
 	stA, err := a.QuickJoin(ctx, 1)
 	if err != nil {
 		t.Fatal(err)

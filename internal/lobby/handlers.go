@@ -122,7 +122,7 @@ func (m *Manager) handleVote(_ context.Context, p Player, r *wire.Reader) (proto
 	if err := req.Decode(r); err != nil {
 		return nil, err
 	}
-	return nil, m.Vote(p, req.TrackID)
+	return nil, m.Vote(p, req.TrackID, req.Variant)
 }
 
 func (m *Manager) handleStartRace(_ context.Context, p Player, r *wire.Reader) (proto.Message, error) {
@@ -130,7 +130,7 @@ func (m *Manager) handleStartRace(_ context.Context, p Player, r *wire.Reader) (
 	if err := req.Decode(r); err != nil {
 		return nil, err
 	}
-	return nil, m.StartRace(p, req.TrackID)
+	return nil, m.StartRace(p, req.TrackID, req.Variant)
 }
 
 func (m *Manager) handleStartCup(_ context.Context, p Player, r *wire.Reader) (proto.Message, error) {

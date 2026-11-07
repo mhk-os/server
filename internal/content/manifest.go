@@ -1,15 +1,10 @@
-// Package content keeps the content catalog (docs/protocol.md, "Content agreement"): which pack manifests exist,
-// which manifest every account reported for each pack version, the catalog majority, content strikes, and what
-// each connection announced. Lobbies ask it which ids are lobby content; races ask it through race.Catalog.
+// Package content keeps the content catalog (docs/protocol.md, "Content agreement"): the stored pack manifests and
+// what each connection announced. Lobbies ask it which ids are lobby content, races ask it through race.Catalog and
+// time-trial uploads through server.Content.
 package content
 
 import (
-	"cmp"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/mhk-os/server/internal/proto"
@@ -24,7 +19,7 @@ func validPackID(s string) bool {
 	return len(s) <= proto.MaxPackID && validID(s) && !strings.Contains(s, ".")
 }
 
-// printable rejects control characters; they would make the newline-separated canonical form ambiguous.
+// printable rejects control characters in commits.
 func printable(s string) bool {
 	for i := range len(s) {
 		if s[i] < 0x20 || s[i] == 0x7f {
@@ -32,14 +27,6 @@ func printable(s string) bool {
 		}
 	}
 	return true
-}
-
-func validHash(s string) bool {
-	if len(s) != 32 {
-		return false
-	}
-	_, err := hex.DecodeString(s)
-	return err == nil
 }
 
 // PackOf returns the pack an item id belongs to: the text before its first dot ("" when there is none).
@@ -51,43 +38,34 @@ func PackOf(id string) string {
 	return pack
 }
 
-// ManifestHash computes the canonical manifest hash: items sorted by kind, then by lowercased id (ordinal), each
-// contributing the UTF-8 text "<kind>\n<id lowercase>\n<fingerprint>\n"; SHA-256 of the concatenation, first 16
-// bytes as lowercase hex. Invalid ids, kind 0, control characters and duplicate (kind, lowercase id) are errors.
-func ManifestHash(items []proto.ManifestItem) (string, error) {
-	type entry struct {
-		kind    uint8
-		id, fpr string
+// versioned reports whether items of kind carry a content version (at least 1): tracks, karts and arenas.
+func versioned(kind uint8) bool {
+	return kind == proto.ContentTrack || kind == proto.ContentKart || kind == proto.ContentArena
+}
+
+// ValidateItems checks a manifest's item list: kind not 0, valid ids, no (kind, lowercase id) twice, version at
+// least 1 for tracks, karts and arenas and at least 0 for the other kinds.
+func ValidateItems(items []proto.ManifestItem) error {
+	type key struct {
+		kind uint8
+		id   string
 	}
-	sorted := make([]entry, len(items))
-	for i, it := range items {
+	seen := make(map[key]bool, len(items))
+	for _, it := range items {
 		if it.Kind == 0 {
-			return "", fmt.Errorf("item %q has kind 0", it.ID)
+			return fmt.Errorf("item %q has kind 0", it.ID)
 		}
 		if !validID(it.ID) {
-			return "", fmt.Errorf("item id %q is not 1-96 characters of A-Z a-z 0-9 _ . -", it.ID)
+			return fmt.Errorf("item id %q is not 1-96 characters of A-Z a-z 0-9 _ . -", it.ID)
 		}
-		if !printable(it.Fingerprint) {
-			return "", fmt.Errorf("fingerprint of %q has control characters", it.ID)
+		if it.Version < 0 || versioned(it.Kind) && it.Version < 1 {
+			return fmt.Errorf("item %q has version %d", it.ID, it.Version)
 		}
-		sorted[i] = entry{it.Kind, strings.ToLower(it.ID), it.Fingerprint}
+		k := key{it.Kind, strings.ToLower(it.ID)}
+		if seen[k] {
+			return fmt.Errorf("item %q of kind %d is listed twice", it.ID, it.Kind)
+		}
+		seen[k] = true
 	}
-	slices.SortFunc(sorted, func(a, b entry) int {
-		return cmp.Or(cmp.Compare(a.kind, b.kind), strings.Compare(a.id, b.id))
-	})
-	h := sha256.New()
-	buf := make([]byte, 0, 160)
-	for i, e := range sorted {
-		if i > 0 && e.kind == sorted[i-1].kind && e.id == sorted[i-1].id {
-			return "", fmt.Errorf("item %q of kind %d is listed twice", e.id, e.kind)
-		}
-		buf = strconv.AppendUint(buf[:0], uint64(e.kind), 10)
-		buf = append(buf, '\n')
-		buf = append(buf, e.id...)
-		buf = append(buf, '\n')
-		buf = append(buf, e.fpr...)
-		buf = append(buf, '\n')
-		h.Write(buf)
-	}
-	return hex.EncodeToString(h.Sum(nil)[:16]), nil
+	return nil
 }

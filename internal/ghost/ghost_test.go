@@ -20,7 +20,7 @@ func TestParseValid(t *testing.T) {
 	}
 	h := s.Header
 	if h.ID != g.Header.ID || h.TrackID != "test.track" || h.KartID != "test.kart" || h.Laps != 3 ||
-		h.EngineClass != 2 || h.ContentVersion != 4 || h.PlayerName != "Test Driver" || h.FrameCount != g.Header.FrameCount {
+		h.EngineClass != 2 || h.RulesVersion != 1 || h.TrackVersion != 1 || h.KartVersion != 1 || h.Variant != "" || h.PlayerName != "Test Driver" || h.FrameCount != g.Header.FrameCount {
 		t.Fatalf("header %+v", h)
 	}
 	if s.FinishMs != 90_500 || s.BestLapMs != 29_500 || len(s.LapMs) != 3 || s.LapMs[2] != 30_500 {
@@ -45,6 +45,15 @@ func TestParseValid(t *testing.T) {
 	g.SetFrames(int32(math.Floor((float64(g.Header.FinishTime) + 10) * 60)))
 	if _, err := ghost.Parse(g.Encode()); err != nil {
 		t.Errorf("10 s tail: %v", err)
+	}
+	g = ghosttest.New()
+	g.Header.RulesVersion, g.Header.TrackVersion, g.Header.KartVersion = 3, 7, 2
+	g.Header.Variant = "core.night+core.rain"
+	if s, err := ghost.Parse(g.Encode()); err != nil {
+		t.Errorf("variant: %v", err)
+	} else if h := s.Header; h.Variant != "core.night+core.rain" || h.RulesVersion != 3 || h.TrackVersion != 7 ||
+		h.KartVersion != 2 || h.KartID != "test.kart" || h.CharacterID != "test.char" {
+		t.Errorf("variant header %+v", h)
 	}
 }
 
@@ -73,7 +82,8 @@ func TestParseRejects(t *testing.T) {
 			raw[0] = 'X'
 			return ghosttest.Gzip(raw)
 		}, "not a ghost file"},
-		{"version 2", func(g *ghosttest.Ghost) { g.Version = 2 }, nil, "format version 2"},
+		{"version 1", func(g *ghosttest.Ghost) { g.Version = 1 }, nil, "format version 1 (want 2)"},
+		{"version 3", func(g *ghosttest.Ghost) { g.Version = 3 }, nil, "format version 3 (want 2)"},
 		{"no body", func(g *ghosttest.Ghost) { g.NoBody = true }, nil, "before the body block"},
 		{"block length beyond data", nil, func(g *ghosttest.Ghost) []byte {
 			raw := g.Raw()
@@ -90,8 +100,17 @@ func TestParseRejects(t *testing.T) {
 		{"long kart", func(g *ghosttest.Ghost) { g.Header.KartID = strings.Repeat("k", 97) }, nil, "kart id"},
 		{"empty pack", func(g *ghosttest.Ghost) { g.Header.TrackPackID = "" }, nil, "track pack id"},
 		{"character space", func(g *ghosttest.Ghost) { g.Header.CharacterID = "moor huhn" }, nil, "character id"},
-		{"track hash", func(g *ghosttest.Ghost) { g.Header.TrackHash = "xyz" }, nil, "track hash"},
-		{"setup hash", func(g *ghosttest.Ghost) { g.Header.SetupHash = strings.Repeat("0", 31) }, nil, "setup hash"},
+		{"rules version 0", func(g *ghosttest.Ghost) { g.Header.RulesVersion = 0 }, nil, "rules version 0"},
+		{"track version 0", func(g *ghosttest.Ghost) { g.Header.TrackVersion = 0 }, nil, "track version 0"},
+		{"track version -1", func(g *ghosttest.Ghost) { g.Header.TrackVersion = -1 }, nil, "track version -1"},
+		{"kart version 0", func(g *ghosttest.Ghost) { g.Header.KartVersion = 0 }, nil, "kart version 0"},
+		{"variant upper case", func(g *ghosttest.Ghost) { g.Header.Variant = "core.Night" }, nil, "variant"},
+		{"variant empty option", func(g *ghosttest.Ghost) { g.Header.Variant = "core.night+" }, nil, "variant"},
+		{"variant duplicate", func(g *ghosttest.Ghost) { g.Header.Variant = "core.rain+core.rain" }, nil, "variant"},
+		{"variant any", func(g *ghosttest.Ghost) { g.Header.Variant = "*" }, nil, "variant"},
+		{"variant too long", func(g *ghosttest.Ghost) {
+			g.Header.Variant = strings.Repeat("a", 64) + "+" + strings.Repeat("b", 64)
+		}, nil, "variant"},
 		{"engine class 3", func(g *ghosttest.Ghost) { g.Header.EngineClass = 3 }, nil, "engine class"},
 		{"engine class -1", func(g *ghosttest.Ghost) { g.Header.EngineClass = -1 }, nil, "engine class"},
 		{"zero laps", func(g *ghosttest.Ghost) { g.Header.Laps = 0; g.Header.LapTimes = nil }, nil, "lap count"},

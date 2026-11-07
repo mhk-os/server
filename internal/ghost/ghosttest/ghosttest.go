@@ -52,11 +52,11 @@ func NewID() string {
 func New() *Ghost {
 	g := &Ghost{
 		Header: ghost.Header{
-			ID: NewID(), GameBuild: "v0.9 abc1234", ContentVersion: 4, PlayerName: "Test Driver", PlayerID: "player-1",
+			ID: NewID(), GameBuild: "v0.9 abc1234", RulesVersion: 1, PlayerName: "Test Driver", PlayerID: "player-1",
 			DateTicks: Ticks(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)),
-			TrackID:   "test.track", TrackPackID: "test", TrackPackVersion: "1.0",
-			TrackHash: "9b7809579ee7ae57280e58893e32df90", KartID: "test.kart", CharacterID: "test.char",
-			EngineClass: 2, EngineClassLabel: "150cc", Laps: 3, SetupHash: "8a12b96cf90b6557e9d1d97d60051ba7",
+			TrackID:   "test.track", TrackPackID: "test", TrackPackVersion: "1.0", TrackVersion: 1,
+			KartID: "test.kart", KartVersion: 1, CharacterID: "test.char",
+			EngineClass: 2, EngineClassLabel: "150cc", Laps: 3,
 			TickSeconds: 1.0 / 60, SpeedScale: 1,
 		},
 		Effects: []string{"test.effect.boost", "test.effect.spin"},
@@ -183,20 +183,21 @@ func (g *Ghost) encodeHeader() []byte {
 	var w Writer
 	w.Str(h.ID)
 	w.Str(h.GameBuild)
-	w.I32(h.ContentVersion)
+	w.I32(h.RulesVersion)
 	w.Str(h.PlayerName)
 	w.Str(h.PlayerID)
 	w.I64(h.DateTicks)
 	w.Str(h.TrackID)
 	w.Str(h.TrackPackID)
 	w.Str(h.TrackPackVersion)
-	w.Str(h.TrackHash)
+	w.I32(h.TrackVersion)
+	w.Str(h.Variant)
 	w.Str(h.KartID)
+	w.I32(h.KartVersion)
 	w.Str(h.CharacterID)
 	w.I32(h.EngineClass)
 	w.Str(h.EngineClassLabel)
 	w.I32(h.Laps)
-	w.Str(h.SetupHash)
 	w.F32(h.TickSeconds)
 	w.F32(h.SpeedScale)
 	w.F32(h.FinishTime)

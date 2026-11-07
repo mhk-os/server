@@ -181,7 +181,7 @@ func integrationLoaded(raceID uint64) *proto.RaceLoaded {
 		flat[i] = 1
 	}
 	return &proto.RaceLoaded{
-		RaceID: raceID, TrackHash: "00112233445566778899aabbccddeeff", Laps: 3,
+		RaceID: raceID, TrackVersion: 1, Laps: 3,
 		Boxes: []proto.ItemBoxInfo{
 			{Pos: proto.Vec3{0, 0, 0}, RespawnTenths: 50, Fixed: "mhk2.egg"},
 			{Pos: proto.Vec3{100, 0, 0}, RespawnTenths: 50},

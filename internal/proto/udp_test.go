@@ -130,14 +130,14 @@ func TestStateAndWorldRoundTrip(t *testing.T) {
 
 func TestRaceMessagesRoundTrip(t *testing.T) {
 	msgs := []struct{ in, out Message }{
-		{&RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "mhk2.egypt", Mode: 1, EngineClass: 2, Laps: 3, Items: true,
-			ItemOdds: []ItemOdds{{"mhk2.rocket", 50}}, Anticheat: true, AIHost: NoSlot, Seed: 99,
+		{&RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "mhk2.egypt", Variant: "core.reverse", Mode: 1, EngineClass: 2,
+			Laps: 3, Items: true, ItemOdds: []ItemOdds{{"mhk2.rocket", 50}}, Anticheat: true, AIHost: NoSlot, Seed: 99,
 			Grid: []RaceSlot{{Slot: 0, AccountID: 5, Username: "a", Country: "DE", CharacterID: "c", KartID: "k",
 				Platform: PlatformLinux}},
 			YourSlot: 0, UDPPort: 7350, UDPToken: 42, UDPKey: bytes.Repeat([]byte{1}, 32), SetRace: 1, SetSize: 4},
 			&RaceSetup{}},
 		{&RaceGo{RaceID: 1, Go: time.UnixMilli(123456).UTC()}, &RaceGo{}},
-		{&RaceLoaded{RaceID: 1, TrackHash: "abc", Laps: 3,
+		{&RaceLoaded{RaceID: 1, TrackVersion: 4, Variant: "core.night+core.rain", Laps: 3,
 			Boxes:    []ItemBoxInfo{{Pos: Vec3{1, 2, 3}, RespawnTenths: 30, Fixed: "@special"}},
 			Pool:     []PoolEntry{{PowerupID: "p", Charges: 1, BattleCharges: 3, Weights: [11]float32{1, 2}}},
 			Specials: []Special{{Slot: 0, PowerupID: "s"}}, Rules: ItemRules{ReplacesHeld: true, RouletteMs: 900},
@@ -161,16 +161,30 @@ func TestRaceMessagesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRaceLoadedBytes pins the RaceLoaded layout; the C# codec tests assert the same vector.
+func TestRaceLoadedBytes(t *testing.T) {
+	m := RaceLoaded{RaceID: 1, TrackVersion: 2, Variant: "core.night", Laps: 3, Boxes: []ItemBoxInfo{},
+		Pool: []PoolEntry{}, Specials: []Special{}, Effects: []string{}}
+	want := "0100000000000000" + "02000000" + "0a636f72652e6e69676874" + "03" + "00" + "00" + "00" + "00" + "0000" + "00"
+	if got := hex.EncodeToString(Encode(&m)); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	var back RaceLoaded
+	if err := back.Decode(wire.NewReader(Encode(&m))); err != nil || !reflect.DeepEqual(back, m) {
+		t.Fatalf("decoded %+v (%v)", back, err)
+	}
+}
+
 // TestRaceMessageBytes pins the v3 layouts of the race messages (the C# codec tests assert the same hex).
 func TestRaceMessageBytes(t *testing.T) {
 	key := bytes.Repeat([]byte{7}, UDPKeySize)
-	setup := RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "t", Mode: 0, EngineClass: 2, Laps: 3, Items: true,
-		ItemOdds: []ItemOdds{}, Anticheat: true, AIHost: 1, Seed: 5,
+	setup := RaceSetup{RaceID: 1, LobbyID: 2, TrackID: "t", Variant: "core.reverse", Mode: 0, EngineClass: 2, Laps: 3,
+		Items: true, ItemOdds: []ItemOdds{}, Anticheat: true, AIHost: 1, Seed: 5,
 		Grid: []RaceSlot{{Slot: 0, CharacterID: "c", KartID: "k", AI: true},
 			{Slot: 1, AccountID: 9, Username: "u", Country: "DE", CharacterID: "c", KartID: "k", Platform: 2}},
 		YourSlot: 1, UDPPort: 7350, UDPToken: 0x42, UDPKey: key, SetRace: 1, SetSize: 4}
 	pinHex(t, &setup, strings.Join([]string{
-		"0100000000000000", "0200000000000000", "0174", // raceId, lobbyId, trackId
+		"0100000000000000", "0200000000000000", "0174", "0c636f72652e72657665727365", // raceId, lobbyId, trackId, variant
 		"00", "02", "03", "01", "00", "01", // mode, engineClass, laps, items, itemOdds, anticheat
 		"01", "0500000000000000", "02", // aiHost, seed, grid count
 		"00" + "0000000000000000" + "00" + "00" + "0163" + "016b" + "00" + "01",       // AI slot 0

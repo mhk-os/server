@@ -14,12 +14,12 @@ import (
 )
 
 // instances lists the instance numbers of a category and content version (every content set: tests use one).
-func instances(e *env, cat uint8, contentVersion int32) []uint16 {
+func instances(e *env, cat uint8, rulesVersion int32) []uint16 {
 	e.m.mu.Lock()
 	defer e.m.mu.Unlock()
 	var out []uint16
 	for k, list := range e.m.instances {
-		if k.category == cat && k.contentVersion == contentVersion {
+		if k.category == cat && k.rulesVersion == rulesVersion {
 			for _, l := range list {
 				out = append(out, l.instance)
 			}
@@ -42,7 +42,7 @@ func TestListOpensOneInstancePerCategory(t *testing.T) {
 			wantAI = 9
 		}
 		if s.Category != uint8(i+1) || s.Instance != 1 || s.Kind != proto.LobbyPublic ||
-			s.ContentVersion != testContentVersion || s.MaxPlayers != 10 || s.Mode != c.mode ||
+			s.RulesVersion != testRulesVersion || s.MaxPlayers != 10 || s.Mode != c.mode ||
 			s.Anticheat != c.anticheat || !slices.Equal(s.Packs, c.packs) ||
 			s.Phase != proto.PhaseWaiting || s.Name != c.name+" #1" || s.EngineClass != 2 || s.SetRace != 0 ||
 			s.SetSize != 4 || s.MaxAI != wantAI || c.ai != (i+1 > aiCategories) {
@@ -62,9 +62,9 @@ func TestListOpensOneInstancePerCategory(t *testing.T) {
 	if len(list2) != maxCategory || list2[0].LobbyID != list[0].LobbyID {
 		t.Fatal("second list changed the instances")
 	}
-	e.cat.announce(2, testContentVersion+1, allPacks...)
+	e.cat.announce(2, testRulesVersion+1, allPacks...)
 	list3, _ := e.m.List(Player{AccountID: 2, Username: "p2"})
-	if list3[0].ContentVersion != testContentVersion+1 || list3[0].LobbyID == list[0].LobbyID {
+	if list3[0].RulesVersion != testRulesVersion+1 || list3[0].LobbyID == list[0].LobbyID {
 		t.Fatal("content versions share instances")
 	}
 }
@@ -79,7 +79,7 @@ func TestInstancesOpenAndClose(t *testing.T) {
 		}
 	}
 	// #1 is full: #2 opened.
-	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testRulesVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	s11 := e.ok(e.m.QuickJoin(e.player(11), 1))
@@ -88,17 +88,17 @@ func TestInstancesOpenAndClose(t *testing.T) {
 	}
 	// #1 regains room, #2 still has a player: nothing closes.
 	e.m.Leave(3)
-	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testRulesVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	// #2 empties while #1 has room: #2 closes.
 	e.m.Leave(11)
-	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1}) {
+	if got := instances(e, 1, testRulesVersion); !slices.Equal(got, []uint16{1}) {
 		t.Fatalf("instances %v after #2 emptied", got)
 	}
 	// Fill #1 again: the new instance reuses number 2.
 	e.ok(e.m.QuickJoin(e.player(12), 1))
-	if got := instances(e, 1, testContentVersion); !slices.Equal(got, []uint16{1, 2}) {
+	if got := instances(e, 1, testRulesVersion); !slices.Equal(got, []uint16{1, 2}) {
 		t.Fatalf("instances %v", got)
 	}
 	// The last instance with room stays even when empty; Join by id works and full lobbies refuse.
@@ -136,24 +136,33 @@ func TestJoinErrors(t *testing.T) {
 	wantStatus(t, err, proto.StatusBadRequest, "content not announced")
 
 	// Missing packs are listed.
-	e.cat.announce(51, testContentVersion, "game", "mhk2")
+	e.cat.announce(51, testRulesVersion, "game", "mhk2")
 	_, err = e.m.QuickJoin(Player{AccountID: 51, Username: "x"}, 1)
 	wantStatus(t, err, proto.StatusBadRequest, "Missing content packs: mhk3, mhke, mhkt.")
 	if _, err := e.m.QuickJoin(Player{AccountID: 51, Username: "x"}, 9); err != nil {
 		t.Fatal("mhk2-only category refused:", err)
 	}
 
-	// Another content version cannot join by id.
+	// Another rules version cannot join by id.
 	host := e.ok(e.m.QuickJoin(e.player(1), 1))
-	e.cat.announce(52, testContentVersion+1, allPacks...)
+	e.cat.announce(52, testRulesVersion+1, allPacks...)
 	_, err = e.m.Join(Player{AccountID: 52, Username: "x"}, host.Summary.LobbyID, "")
 	wantStatus(t, err, proto.StatusBadRequest, "update the game")
 
-	// A differing copy keeps a player out of anticheat lobbies only.
+	// Another commit of a lobby pack: anticheat categories match it into instances of its own and refuse it in the
+	// others; the other categories mix commits.
 	p := e.player(53)
-	e.cat.differs[53] = "mhk3"
-	_, err = e.m.QuickJoin(p, 1)
-	wantStatus(t, err, proto.StatusForbidden, "Your copy of mhk3 differs")
+	e.cat.announceAt(53, testRulesVersion, "V2", allPacks...)
+	if own := e.ok(e.m.QuickJoin(p, 1)); own.Summary.LobbyID == host.Summary.LobbyID {
+		t.Fatal("another commit joined the anticheat instance")
+	}
+	_, err = e.m.Join(p, host.Summary.LobbyID, "")
+	wantStatus(t, err, proto.StatusForbidden, "Your version of game differs from this lobby's")
+	same := e.player(54)
+	e.cat.announceAt(54, testRulesVersion, "V1", allPacks...) // commits compare ignoring case
+	if st := e.ok(e.m.QuickJoin(same, 1)); st.Summary.LobbyID != host.Summary.LobbyID {
+		t.Fatal("the same commit in another case got another instance")
+	}
 	e.ok(e.m.QuickJoin(p, 2))
 
 	// A refused join keeps the player where they are (category 4 needs tincan).
@@ -176,7 +185,7 @@ func TestOneLobbyPerAccount(t *testing.T) {
 	if left := e.push.of(1, proto.PushLobbyLeft); len(left) != 0 {
 		t.Fatalf("LobbyLeft %v", left)
 	}
-	if got := instances(e, 1, testContentVersion); len(got) != 1 {
+	if got := instances(e, 1, testRulesVersion); len(got) != 1 {
 		t.Fatalf("category 1 instances %v", got)
 	}
 }
@@ -215,11 +224,11 @@ func TestPublicSet(t *testing.T) {
 	}
 	var p1Total int32
 	for n := uint8(1); n <= 4; n++ {
-		must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+		must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
 		if e.races.startCount() != int(n)-1 {
 			t.Fatal("race started before everyone voted")
 		}
-		must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+		must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 		call := e.races.last()
 		if call.spec.TrackID != "mhk2.rome" || call.spec.EngineClass != 2 || !call.spec.Items || !call.spec.Anticheat ||
 			call.spec.SetRace != n || call.spec.SetSize != 4 || len(call.racers) != 2 ||
@@ -295,9 +304,9 @@ func TestPointsTable(t *testing.T) {
 func TestVotingTimeoutAndRandom(t *testing.T) {
 	e := newEnv(t)
 	l := joinTwo(t, e)
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	wantStatus(t, e.m.Vote(Player{AccountID: 2}, "mhk2.arena"), proto.StatusBadRequest, "not a track")
-	wantStatus(t, e.m.Vote(Player{AccountID: 2}, "tincan.track"), proto.StatusBadRequest, "not a track")
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	wantStatus(t, e.m.Vote(Player{AccountID: 2}, "mhk2.arena", ""), proto.StatusBadRequest, "not a track")
+	wantStatus(t, e.m.Vote(Player{AccountID: 2}, "tincan.track", ""), proto.StatusBadRequest, "not a track")
 	e.clock.Advance(19 * time.Second)
 	if e.races.startCount() != 0 {
 		t.Fatal("voting ended early")
@@ -311,7 +320,7 @@ func TestVotingTimeoutAndRandom(t *testing.T) {
 	if e.phase(l) != proto.PhaseLoading {
 		t.Fatal("not loading")
 	}
-	wantStatus(t, e.m.Vote(Player{AccountID: 1}, ""), proto.StatusBadRequest, "Voting is not open")
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "", ""), proto.StatusBadRequest, "Voting is not open")
 }
 
 func TestPlatformCarried(t *testing.T) {
@@ -328,8 +337,8 @@ func TestPlatformCarried(t *testing.T) {
 			t.Fatalf("member %d platform %d", m.AccountID, m.Platform)
 		}
 	}
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
 	for _, r := range e.races.last().racers {
 		if want := map[uint64]uint8{1: proto.PlatformAndroid, 2: proto.PlatformWindows}[r.AccountID]; r.Platform != want {
 			t.Fatalf("racer %d platform %d", r.AccountID, r.Platform)
@@ -343,11 +352,42 @@ func TestBattleArenas(t *testing.T) {
 		e.ok(e.m.QuickJoin(e.player(id), 5))
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
 	}
-	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"), proto.StatusBadRequest, "not a track")
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""), proto.StatusBadRequest, "not a track")
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
 	if call := e.races.last(); call.spec.TrackID != "mhk2.arena" || call.spec.Mode != race.ModeBattle {
 		t.Fatalf("battle spec %+v", call.spec)
+	}
+}
+
+func TestVoteVariants(t *testing.T) {
+	e := newEnv(t)
+	joinTwo(t, e)
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", "Core.Reverse"), proto.StatusBadRequest, "invalid")
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", "core.night+core.night"), proto.StatusBadRequest,
+		"invalid")
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "", "core.reverse"), proto.StatusBadRequest, "random track")
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", "core.reverse+core.night"))
+	want := proto.LobbyVote{AccountID: 1, TrackID: "mhk2.rome", Variant: "core.reverse+core.night"}
+	if st := e.push.lastState(t, 2); len(st.Votes) != 1 || st.Votes[0] != want {
+		t.Fatalf("votes %+v", st.Votes)
+	}
+	// The drawn vote races in its variant.
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", "core.reverse+core.night"))
+	if call := e.races.last(); call.spec.TrackID != "mhk2.rome" || call.spec.Variant != "core.reverse+core.night" {
+		t.Fatalf("spec %+v", call.spec)
+	}
+	if st := e.push.lastState(t, 1); st.TrackID != "mhk2.rome" || st.Variant != "core.reverse+core.night" {
+		t.Fatalf("state track %q variant %q", st.TrackID, st.Variant)
+	}
+
+	// Random races a random track in its default variant.
+	e = newEnv(t)
+	joinTwo(t, e)
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
+	if call := e.races.last(); call.spec.TrackID == "" || call.spec.Variant != "" {
+		t.Fatalf("random spec %+v", call.spec)
 	}
 }
 
@@ -356,8 +396,8 @@ func TestNoLoadoutsVotesAgain(t *testing.T) {
 	e.ok(e.m.QuickJoin(e.player(1), 1))
 	e.ok(e.m.QuickJoin(e.player(2), 1))
 	l := e.lobbyOf(1)
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
-	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 	if e.races.startCount() != 0 || e.phase(l) != proto.PhaseVoting {
 		t.Fatal("a race started without loadouts")
 	}
@@ -367,8 +407,8 @@ func TestNoLoadoutsVotesAgain(t *testing.T) {
 	// A failing engine also returns to voting.
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
 	e.races.fail = errors.New("boom")
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
-	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 	if e.phase(l) != proto.PhaseVoting {
 		t.Fatal("engine failure not handled")
 	}
@@ -385,14 +425,14 @@ func TestPublicNeedsTwoHumans(t *testing.T) {
 	if e.races.startCount() != 0 || e.phase(l) != proto.PhaseWaiting {
 		t.Fatal("something started by itself")
 	}
-	wantStatus(t, e.m.Vote(Player{AccountID: 1}, ""), proto.StatusBadRequest, "Voting is not open")
+	wantStatus(t, e.m.Vote(Player{AccountID: 1}, "", ""), proto.StatusBadRequest, "Voting is not open")
 
 	// The second human starts the voting; dropping back to one during it returns to Waiting.
 	e.ok(e.m.QuickJoin(e.player(2), 1))
 	if e.phase(l) != proto.PhaseVoting {
 		t.Fatal("two humans do not vote")
 	}
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
 	e.m.Leave(2)
 	st := e.push.lastState(t, 1)
 	if st.Summary.Phase != proto.PhaseWaiting || len(st.Votes) != 0 || !st.PhaseEnds.IsZero() {
@@ -407,7 +447,7 @@ func TestPublicNeedsTwoHumans(t *testing.T) {
 	e.ok(e.m.QuickJoin(e.player(2), 1))
 	for _, id := range []uint64{1, 2} {
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
-		must(t, e.m.Vote(Player{AccountID: id}, ""))
+		must(t, e.m.Vote(Player{AccountID: id}, "", ""))
 	}
 	call := e.races.last()
 	e.m.Leave(2)
@@ -428,16 +468,16 @@ func TestSoloRace(t *testing.T) {
 	e := newEnv(t)
 	e.ok(e.m.QuickJoin(e.player(1), 1))
 	l := e.lobbyOf(1)
-	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps"), proto.StatusBadRequest, "character")
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps", ""), proto.StatusBadRequest, "character")
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
-	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"), proto.StatusBadRequest, "not a track")
-	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps"))
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena", ""), proto.StatusBadRequest, "not a track")
+	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.alps", ""))
 	call := e.races.last()
 	if ai, humans := aiOf(call.racers), humansOf(call.racers); len(ai) != 6 || len(humans) != 1 ||
 		call.spec.TrackID != "mhk2.alps" || call.spec.SetRace != 0 || call.spec.SetSize != 0 || call.racers[6].AI {
 		t.Fatalf("solo spec %+v", call.spec)
 	}
-	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, ""), proto.StatusBadRequest, "waits")
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "", ""), proto.StatusBadRequest, "waits")
 	call.cb.Going(call.id)
 	e.waitPhase(t, l, proto.PhaseCountdown)
 
@@ -450,7 +490,7 @@ func TestSoloRace(t *testing.T) {
 	if len(waiting) != 1 || waiting[0].(*proto.SoloRaceJoinWaiting).Username != "p2" {
 		t.Fatalf("SoloRaceJoinWaiting %v", waiting)
 	}
-	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, ""), proto.StatusForbidden, "voting")
+	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, "", ""), proto.StatusForbidden, "voting")
 	wantStatus(t, e.m.EndRaceEarly(Player{AccountID: 2}), proto.StatusBadRequest, "alone")
 	must(t, e.m.EndRaceEarly(Player{AccountID: 1}))
 	if !slices.Equal(e.races.ended, []uint64{call.id}) {
@@ -470,8 +510,8 @@ func TestSoloRace(t *testing.T) {
 
 	// The next race starts with the humans only and is race 1 of the set.
 	must(t, e.m.SetLoadout(Player{AccountID: 2}, "game.huhn", "game.kart"))
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
 	if call := e.races.last(); len(aiOf(call.racers)) != 0 || len(call.racers) != 2 ||
 		call.spec.SetRace != 1 || call.spec.SetSize != 4 {
 		t.Fatalf("second race %+v", call.spec)
@@ -484,7 +524,7 @@ func TestSoloRaceAloneAgain(t *testing.T) {
 	e.ok(e.m.QuickJoin(e.player(1), 5)) // battles
 	l := e.lobbyOf(1)
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
-	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
+	must(t, e.m.StartRace(Player{AccountID: 1}, "", ""))
 	call := e.races.last()
 	if call.spec.TrackID != "mhk2.arena" || call.spec.Mode != race.ModeBattle || call.spec.SetRace != 0 ||
 		len(aiOf(call.racers)) != 6 {
@@ -493,7 +533,7 @@ func TestSoloRaceAloneAgain(t *testing.T) {
 	call.cb.Finished(call.id, []race.Placement{{AccountID: 1, Username: "p1", Position: 1}})
 	// Still alone: waiting at once, ready for another solo race.
 	e.waitPhase(t, l, proto.PhaseWaiting)
-	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena"))
+	must(t, e.m.StartRace(Player{AccountID: 1}, "mhk2.arena", ""))
 }
 
 func TestRaceScores(t *testing.T) {
@@ -501,7 +541,7 @@ func TestRaceScores(t *testing.T) {
 	e.ok(e.m.QuickJoin(e.player(1), 1))
 	l := e.lobbyOf(1)
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "mhk2.speedy"))
-	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
+	must(t, e.m.StartRace(Player{AccountID: 1}, "", ""))
 	// A solo race against AI scores nothing.
 	e.races.last().cb.Finished(e.races.last().id, []race.Placement{
 		{AccountID: 0, Username: "AI", Position: 1, FinishMs: 59_000, AI: true},
@@ -514,7 +554,7 @@ func TestRaceScores(t *testing.T) {
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "mhk2.speedy"))
 	}
 	for id := uint64(1); id <= 3; id++ {
-		must(t, e.m.Vote(Player{AccountID: id}, ""))
+		must(t, e.m.Vote(Player{AccountID: id}, "", ""))
 	}
 	finish(t, e, l, e.races.last(), []race.Placement{
 		{Slot: 2, AccountID: 3, Username: "p3", Position: 1, FinishMs: 60_000},
@@ -534,8 +574,8 @@ func TestRaceScores(t *testing.T) {
 func TestLeaveDuringRace(t *testing.T) {
 	e := newEnv(t)
 	l := joinTwo(t, e)
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
 	call := e.races.last()
 	e.m.Leave(2)
 	if len(e.races.removes) != 1 || e.races.removes[0] != (removeCall{call.id, 2, race.OutcomeLeft, ""}) {
@@ -579,19 +619,20 @@ func TestPrivateRoom(t *testing.T) {
 
 	// Only the owner starts, changes settings or kicks; ready is informational.
 	must(t, e.m.SetReady(Player{AccountID: 2}, true))
-	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, "mhk2.rome"), proto.StatusForbidden, "owner")
+	wantStatus(t, e.m.StartRace(Player{AccountID: 2}, "mhk2.rome", ""), proto.StatusForbidden, "owner")
 	upd := room()
 	upd.MaxPlayers, upd.MaxAI = 2, 1
 	wantStatus(t, e.m.UpdateRoom(owner, upd), proto.StatusBadRequest, "3 players")
 	wantStatus(t, e.m.UpdateRoom(Player{AccountID: 2}, room()), proto.StatusForbidden, "owner")
-	wantStatus(t, e.m.StartRace(owner, "mhk2.rome"), proto.StatusBadRequest, "character")
+	wantStatus(t, e.m.StartRace(owner, "mhk2.rome", ""), proto.StatusBadRequest, "character")
 	must(t, e.m.SetLoadout(Player{AccountID: 2}, "game.huhn", "mhk2.speedy"))
-	wantStatus(t, e.m.StartRace(owner, "mhk3.paris"), proto.StatusBadRequest, "not a track")
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	wantStatus(t, e.m.StartRace(owner, "mhk3.paris", ""), proto.StatusBadRequest, "not a track")
+	wantStatus(t, e.m.StartRace(owner, "", "core.night"), proto.StatusBadRequest, "random track has no variant")
+	must(t, e.m.StartRace(owner, "mhk2.rome", "core.night"))
 	call := e.races.last()
-	if h := humansOf(call.racers); call.spec.TrackID != "mhk2.rome" || call.spec.EngineClass != 1 || len(h) != 1 ||
-		h[0].AccountID != 2 || len(aiOf(call.racers)) != 3 || call.spec.SetSize != 2 ||
-		len(call.spec.ItemOdds) != 1 || call.spec.SetRace != 1 {
+	if h := humansOf(call.racers); call.spec.TrackID != "mhk2.rome" || call.spec.Variant != "core.night" ||
+		call.spec.EngineClass != 1 || len(h) != 1 || h[0].AccountID != 2 || len(aiOf(call.racers)) != 3 ||
+		call.spec.SetSize != 2 || len(call.spec.ItemOdds) != 1 || call.spec.SetRace != 1 {
 		t.Fatalf("private race %+v %+v", call.spec, call.racers)
 	}
 	wantStatus(t, e.m.UpdateRoom(owner, room()), proto.StatusBadRequest, "waits")
@@ -612,8 +653,8 @@ func TestPrivateRoom(t *testing.T) {
 	}
 	must(t, e.m.SetLoadout(Player{AccountID: 2}, "game.huhn", "game.kart"))
 	// Vote mode: StartRace opens the voting.
-	wantStatus(t, e.m.StartRace(owner, "mhk3.paris"), proto.StatusBadRequest, "votes")
-	must(t, e.m.StartRace(owner, ""))
+	wantStatus(t, e.m.StartRace(owner, "mhk3.paris", ""), proto.StatusBadRequest, "votes")
+	must(t, e.m.StartRace(owner, "", ""))
 	if e.phase(l) != proto.PhaseVoting {
 		t.Fatal("vote room did not open the voting")
 	}
@@ -667,10 +708,11 @@ func TestRoomValidation(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	// A differing copy of a room pack forbids anticheat rooms.
-	e.cat.differs[1] = "mhk2"
-	_, err := e.m.CreateRoom(p, room())
-	wantStatus(t, err, proto.StatusForbidden, "differs")
+	// An anticheat room keeps its creator's pack commits: another commit cannot join.
+	ac := e.ok(e.m.CreateRoom(p, room()))
+	e.cat.announceAt(2, testRulesVersion, "v2", allPacks...)
+	_, err := e.m.Join(Player{AccountID: 2, Username: "p2"}, 0, ac.Code)
+	wantStatus(t, err, proto.StatusForbidden, "differs from this lobby's")
 	s := room()
 	s.Anticheat = false
 	s.Mode, s.CupID = proto.RoomChampionship, "mhk2.cup"
@@ -681,11 +723,12 @@ func TestRoomValidation(t *testing.T) {
 	// With company, championships need the next track from the owner.
 	must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
 	e.ok(e.m.Join(e.player(2), 0, st.Code))
-	wantStatus(t, e.m.StartRace(p, ""), proto.StatusBadRequest, "cup")
+	wantStatus(t, e.m.StartRace(p, "", ""), proto.StatusBadRequest, "cup")
 	// Alone, the owner still names the cup's track; the race belongs to the set, against the room's AI.
 	e.m.Leave(2)
-	wantStatus(t, e.m.StartRace(p, ""), proto.StatusBadRequest, "cup")
-	must(t, e.m.StartRace(p, "mhk2.alps"))
+	wantStatus(t, e.m.StartRace(p, "", ""), proto.StatusBadRequest, "cup")
+	wantStatus(t, e.m.StartRace(p, "mhk2.alps", "core.reverse"), proto.StatusBadRequest, "default variant")
+	must(t, e.m.StartRace(p, "mhk2.alps", ""))
 	call := e.races.last()
 	if len(aiOf(call.racers)) != 3 || len(humansOf(call.racers)) != 1 || call.spec.SetRace != 1 ||
 		call.spec.SetSize != 2 || call.spec.TrackID != "mhk2.alps" {
@@ -712,7 +755,7 @@ func TestPrivateAloneWithoutAI(t *testing.T) {
 	p := e.player(1)
 	e.ok(e.m.CreateRoom(p, s))
 	must(t, e.m.SetLoadout(p, "game.huhn", "game.kart"))
-	must(t, e.m.StartRace(p, ""))
+	must(t, e.m.StartRace(p, "", ""))
 	if call := e.races.last(); len(call.racers) != 1 || call.spec.SetRace != 1 || call.spec.TrackID != "mhk2.rome" &&
 		call.spec.TrackID != "mhk2.alps" {
 		t.Fatalf("spec %+v", call.spec)
@@ -759,7 +802,7 @@ func TestOwnerKickDuringRace(t *testing.T) {
 	for id := uint64(1); id <= 2; id++ {
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
 	}
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	must(t, e.m.StartRace(owner, "mhk2.rome", ""))
 	call := e.races.last()
 	must(t, e.m.Kick(context.Background(), owner, 2, "rude"))
 	if len(e.races.removes) != 1 || e.races.removes[0] != (removeCall{call.id, 2, race.OutcomeLeft, "rude"}) {
@@ -770,8 +813,8 @@ func TestOwnerKickDuringRace(t *testing.T) {
 func TestModeratorKick(t *testing.T) {
 	e := newEnv(t)
 	l := joinTwo(t, e)
-	must(t, e.m.Vote(Player{AccountID: 1}, ""))
-	must(t, e.m.Vote(Player{AccountID: 2}, ""))
+	must(t, e.m.Vote(Player{AccountID: 1}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "", ""))
 	call := e.races.last()
 	mod := e.player(9)
 	mod.Moderator = true

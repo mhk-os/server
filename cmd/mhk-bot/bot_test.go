@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -78,15 +79,13 @@ func TestReplay(t *testing.T) {
 	}
 }
 
-func testManifests(contentVersion int32) *manifestFile {
-	f := &manifestFile{ContentVersion: contentVersion}
+func testManifests(rulesVersion int32) *manifestFile {
+	f := &manifestFile{RulesVersion: rulesVersion}
 	add := func(id string, items ...manifestItem) {
-		p := manifestPack{PackID: id, Commit: "botcommit", Items: items}
-		p.ManifestHash, _ = content.ManifestHash(p.items())
-		f.Packs = append(f.Packs, p)
+		f.Packs = append(f.Packs, manifestPack{PackID: id, Commit: "botcommit", Items: items})
 	}
-	add("game", manifestItem{proto.ContentCharacter, "game.huhn", "f1"}, manifestItem{proto.ContentKart, "game.kart", "f2"})
-	add("mhk2", manifestItem{proto.ContentTrack, "mhk2.rome", "f3"})
+	add("game", manifestItem{proto.ContentCharacter, "game.huhn", 0}, manifestItem{proto.ContentKart, "game.kart", 2})
+	add("mhk2", manifestItem{proto.ContentTrack, "mhk2.rome", 3})
 	return f
 }
 
@@ -109,16 +108,17 @@ func TestManifestFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refs := got.refs(); len(refs) != 2 || refs[1].PackID != "mhk2" || refs[1].ManifestHash != f.Packs[1].ManifestHash {
+	if refs := got.refs(); len(refs) != 2 || refs[1] != (proto.PackRef{PackID: "mhk2", Commit: "botcommit"}) {
 		t.Fatalf("refs %+v", refs)
 	}
-	ms := got.manifests([]string{f.Packs[1].ManifestHash})
-	if len(ms) != 1 || ms[0].PackID != "mhk2" || ms[0].ContentVersion != 7 || len(ms[0].Items) != 1 {
+	ms := got.manifests([]string{"MHK2"})
+	if len(ms) != 1 || ms[0].PackID != "mhk2" || ms[0].RulesVersion != 7 || len(ms[0].Items) != 1 ||
+		ms[0].Items[0] != (proto.ManifestItem{Kind: proto.ContentTrack, ID: "mhk2.rome", Version: 3}) {
 		t.Fatalf("manifests %+v", ms)
 	}
-	f.Packs[0].Items[0].Fingerprint = "changed"
+	f.Packs[0].Items[1].Version = 0
 	if _, err := loadManifests(writeJSON(t, f)); err == nil {
-		t.Fatal("a manifest whose items do not match its hash was accepted")
+		t.Fatal("a kart without a version was accepted")
 	}
 }
 
@@ -136,15 +136,15 @@ func TestParseServer(t *testing.T) {
 }
 
 // stack is an in-process server (content catalog, race engine, lobbies) on ephemeral ports with a fresh catalog
-// (its own contentVersion) and the files a bot needs.
+// (its own rulesVersion) and the files a bot needs.
 type stack struct {
-	addr           string
-	st             *store.Store
-	contentVersion int32
-	mf             *manifestFile
-	dir            string
-	ghost          string // path of the short ghost
-	manifests      string // path of the manifest file
+	addr         string
+	st           *store.Store
+	rulesVersion int32
+	mf           *manifestFile
+	dir          string
+	ghost        string // path of the short ghost
+	manifests    string // path of the manifest file
 }
 
 // startStack starts the server with the given idle timeout (0 = the protocol's 45 s).
@@ -203,8 +203,8 @@ func startStack(t *testing.T, idle time.Duration) *stack {
 	var versionBytes [4]byte
 	rand.Read(versionBytes[:])
 	s := &stack{addr: ln.Addr().String(), st: st, dir: t.TempDir(),
-		contentVersion: int32(binary.LittleEndian.Uint32(versionBytes[:])&0xFFFFFF) + 1_000_000}
-	s.mf = testManifests(s.contentVersion)
+		rulesVersion: int32(binary.LittleEndian.Uint32(versionBytes[:])&0xFFFFFF) + 1_000_000}
+	s.mf = testManifests(s.rulesVersion)
 	s.manifests = writeJSON(t, s.mf)
 	s.ghost = filepath.Join(s.dir, "run.mhkghost")
 	if err := os.WriteFile(s.ghost, shortGhost(t), 0o644); err != nil {
@@ -229,7 +229,7 @@ func (s *stack) human(t *testing.T, ctx context.Context) (*testclient.Client, *p
 	}
 	t.Cleanup(func() { c.Close() })
 	hello := testclient.DefaultHello()
-	hello.ContentVersion = s.contentVersion
+	hello.RulesVersion = s.rulesVersion
 	if _, err := c.Hello(ctx, hello); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func (s *stack) human(t *testing.T, ctx context.Context) (*testclient.Client, *p
 	if _, err := c.Register(ctx, randomName("hu"), "kart-racer-2026"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.ContentHello(ctx, s.contentVersion, s.mf.refs())
+	res, err := c.ContentHello(ctx, s.rulesVersion, s.mf.refs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestBotRacesHuman(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := human.StartRace(ctx, "mhk2.rome"); err != nil {
+	if err := human.StartRace(ctx, "mhk2.rome", ""); err != nil {
 		t.Fatal(err)
 	}
 	var setup proto.RaceSetup
@@ -294,8 +294,8 @@ func TestBotRacesHuman(t *testing.T) {
 	}
 	defer u.Close()
 	u.Run(ctx, true)
-	if err := human.Notify(proto.NotifyRaceLoaded, &proto.RaceLoaded{RaceID: setup.RaceID,
-		TrackHash: "00112233445566778899aabbccddeeff", Laps: 3}); err != nil {
+	if err := human.Notify(proto.NotifyRaceLoaded, &proto.RaceLoaded{RaceID: setup.RaceID, TrackVersion: 3,
+		Laps: 3}); err != nil {
 		t.Fatal(err)
 	}
 	var goMsg proto.RaceGo
@@ -332,15 +332,15 @@ func TestBotRacesHuman(t *testing.T) {
 
 	// Both announced the same manifests, so a dump reproduces the file the bot used.
 	out := filepath.Join(s.dir, "dump.json")
-	if err := dumpManifests(context.Background(), s.st, s.contentVersion, []string{"game", "mhk2"}, out); err != nil {
+	if err := dumpManifests(context.Background(), s.st, s.rulesVersion, []string{"game", "mhk2"}, out); err != nil {
 		t.Fatal(err)
 	}
 	dumped, err := loadManifests(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dumped.ContentVersion != s.contentVersion || len(dumped.Packs) != 2 ||
-		dumped.Packs[1].ManifestHash != s.mf.Packs[1].ManifestHash || dumped.Packs[0].Commit != "botcommit" {
+	if dumped.RulesVersion != s.rulesVersion || len(dumped.Packs) != 2 || dumped.Packs[0].Commit != "botcommit" ||
+		!slices.Equal(dumped.Packs[1].Items, s.mf.Packs[1].Items) {
 		t.Fatalf("dump %+v", dumped)
 	}
 }

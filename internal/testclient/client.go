@@ -216,13 +216,14 @@ func isClosed(ch chan struct{}) bool {
 	}
 }
 
-// DefaultHello is a valid Hello for the current protocol.
+// DefaultHello is a valid Hello for the current protocol, with rules version 1 (that of ghosttest's ghosts).
 func DefaultHello() *proto.Hello {
 	return &proto.Hello{
-		Magic:      proto.Magic,
-		Protocol:   proto.Version,
-		GameCommit: "testclient",
-		Platform:   "Go",
+		Magic:        proto.Magic,
+		Protocol:     proto.Version,
+		GameCommit:   "testclient",
+		RulesVersion: 1,
+		Platform:     "Go",
 	}
 }
 

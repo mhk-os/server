@@ -17,30 +17,34 @@ import (
 // ErrGhostExists means a run with the same ghost id is already stored.
 var ErrGhostExists = errors.New("store: ghost already uploaded")
 
-// Board is a row of boards with the statistics of its visible runs. A board is identified by (track id, engine
-// class, laps, content version); its runs keep their own track hash.
+// Board is a row of boards with the statistics of its ranked runs (visible, current kart version). A board is
+// identified by (track id, track version, variant, laps, engine class, rules version).
 type Board struct {
-	ID             uint64
-	TrackID        string
-	EngineClass    uint8
-	Laps           uint8
-	ContentVersion int32
-	TrackHash      string // of the newest visible upload, "" = none
-	CreatedAt      time.Time
-	Players        uint32     // accounts with a visible run
-	BestMs         int32      // fastest visible finish, 0 = none
-	LastUpload     *time.Time // newest visible upload
+	ID           uint64
+	TrackID      string
+	TrackVersion int32
+	Variant      string // proto.ValidVariant, "" = the track's default variant
+	EngineClass  uint8
+	Laps         uint8
+	RulesVersion int32
+	CreatedAt    time.Time
+	Players      uint32     // accounts with a ranked run
+	BestMs       int32      // fastest ranked finish, 0 = none
+	LastUpload   *time.Time // newest ranked upload
 }
 
-// BoardFilter narrows ListBoards; zero fields match everything.
+// BoardFilter narrows ListBoards. TrackID "", EngineClass nil, RulesVersion 0 and Variant proto.AnyVariant match
+// every board; any other Variant ("" included) matches exactly.
 type BoardFilter struct {
-	TrackID        string
-	EngineClass    *uint8
-	ContentVersion int32
-	Limit          int
+	TrackID      string
+	EngineClass  *uint8
+	RulesVersion int32
+	Variant      string
+	Limit        int
 }
 
-// Run is a row of runs: one uploaded ghost and the summary the server validated.
+// Run is a row of runs: one uploaded ghost and the summary the server validated. TrackVersion, Variant and
+// RulesVersion are its board's (CreateRun files the run under them).
 type Run struct {
 	ID             uint64
 	BoardID        uint64
@@ -48,13 +52,14 @@ type Run struct {
 	GhostID        string
 	TrackID        string
 	TrackPackID    string
+	TrackVersion   int32
+	Variant        string
 	KartID         string
+	KartVersion    int32
 	CharacterID    string
 	EngineClass    uint8
 	Laps           uint8
-	ContentVersion int32
-	TrackHash      string
-	SetupHash      string
+	RulesVersion   int32
 	GameBuild      string
 	FinishMs       int32
 	BestLapMs      int32
@@ -71,16 +76,15 @@ type Run struct {
 	DeletedByOwner bool // hidden because the player deleted their account and runs
 }
 
-// RunView is a run with what clients see next to it: owner, board, rank and setup mismatch.
+// RunView is a run with what clients see next to it: owner, board and rank.
 type RunView struct {
 	Run
 	Username        string
 	Country         string // the owner's effective country
 	AccountDisabled bool
 	BoardTrackID    string
-	Rank            uint32 // rank among the visible runs of the board (or in the requested list), 0 = hidden
-	OwnerBest       bool   // the owner's best visible run on its board
-	SetupMismatch   bool
+	Rank            uint32 // rank among the ranked runs of the board (or in the requested list), 0 = not ranked
+	OwnerBest       bool   // the owner's best ranked run on its board
 }
 
 // Hidden reports whether players no longer see the run (hidden by a moderator or the owner is disabled).
@@ -93,7 +97,7 @@ type RunFilter struct {
 	Limit     int
 }
 
-// LeaderboardQuery asks for one page of a board: every visible run matching the filter.
+// LeaderboardQuery asks for one page of a board: every ranked run matching the filter.
 type LeaderboardQuery struct {
 	BoardID       uint64
 	Offset, Limit int
@@ -183,6 +187,13 @@ const (
 // visible is the condition for runs players see; queries alias runs r and accounts a.
 const visible = "r.hidden_at IS NULL AND a.disabled_at IS NULL"
 
+// currentKart is the condition for runs driven with the highest kart version ever uploaded for their kart (an
+// older kart version is outdated content: its runs leave leaderboards, ranks and board statistics). Ranked runs
+// are visible and current. Queries alias runs r.
+const currentKart = "r.kart_version = (SELECT kv.version FROM kart_versions kv WHERE kv.kart_id = r.kart_id)"
+
+const rankedRun = visible + " AND " + currentKart
+
 // shownName and shownCountry are the owner's name and country as clients see them: anonymous accounts (role 2)
 // show as AnonymousName without a country. Queries alias accounts a.
 const (
@@ -193,8 +204,8 @@ const (
 // rankOrder orders runs of a board: fastest first, ties by earlier upload.
 const rankOrder = "finish_ms, uploaded_at, id"
 
-const runSelect = `SELECT r.id, r.board_id, r.account_id, r.ghost_id, r.track_id, r.track_pack_id, r.kart_id,
-	r.character_id, r.engine_class, r.laps, r.content_version, r.track_hash, r.setup_hash, r.game_build, r.finish_ms,
+const runSelect = `SELECT r.id, r.board_id, r.account_id, r.ghost_id, r.track_id, r.track_pack_id, b.track_version,
+	b.variant, r.kart_id, r.kart_version, r.character_id, r.engine_class, r.laps, b.rules_version, r.game_build, r.finish_ms,
 	r.best_lap_ms, r.lap_ms, r.frame_count, r.recorded_at, r.uploaded_at, r.blob_sha256, r.file_size, r.flags,
 	r.hidden_at, r.hidden_by, r.hidden_reason, r.deleted_by_owner, ` + shownName + `, ` + shownCountry + `,
 	a.disabled_at IS NOT NULL, b.track_id
@@ -208,8 +219,8 @@ func scanRun(row rowScanner) (*RunView, error) {
 		hiddenAt sql.NullTime
 		hiddenBy sql.Null[uint64]
 	)
-	err := row.Scan(&v.ID, &v.BoardID, &v.AccountID, &v.GhostID, &v.TrackID, &v.TrackPackID, &v.KartID,
-		&v.CharacterID, &v.EngineClass, &v.Laps, &v.ContentVersion, &v.TrackHash, &v.SetupHash, &v.GameBuild, &v.FinishMs,
+	err := row.Scan(&v.ID, &v.BoardID, &v.AccountID, &v.GhostID, &v.TrackID, &v.TrackPackID, &v.TrackVersion,
+		&v.Variant, &v.KartID, &v.KartVersion, &v.CharacterID, &v.EngineClass, &v.Laps, &v.RulesVersion, &v.GameBuild, &v.FinishMs,
 		&v.BestLapMs, &lapMs, &v.FrameCount, &v.RecordedAt, &v.UploadedAt, &blob, &v.FileSize, &v.Flags, &hiddenAt,
 		&hiddenBy, &v.HiddenReason, &v.DeletedByOwner, &v.Username, &v.Country, &v.AccountDisabled, &v.BoardTrackID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -271,13 +282,13 @@ func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run
 	return out, rows.Err()
 }
 
-// CreateRun stores r, creating its board on first use, and sets r.ID and r.BoardID. ErrGhostExists when the ghost
-// id is taken.
+// CreateRun stores r, creating its board on first use, raises the kart's current version to r.KartVersion and sets
+// r.ID and r.BoardID. ErrGhostExists when the ghost id is taken.
 func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, engine_class, laps, content_version, created_at)
-			VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-			r.TrackID, r.EngineClass, r.Laps, r.ContentVersion, r.UploadedAt)
+		res, err := tx.ExecContext(ctx, `INSERT INTO boards (track_id, track_version, variant, laps, engine_class,
+			rules_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+			r.TrackID, r.TrackVersion, r.Variant, r.Laps, r.EngineClass, r.RulesVersion, r.UploadedAt)
 		if err != nil {
 			return fmt.Errorf("store: board: %w", err)
 		}
@@ -287,12 +298,12 @@ func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 		}
 		r.BoardID = uint64(boardID)
 		res, err = tx.ExecContext(ctx, `INSERT INTO runs (board_id, account_id, ghost_id, track_id, track_pack_id,
-			kart_id, character_id, engine_class, laps, content_version, track_hash, setup_hash, game_build, finish_ms,
-			best_lap_ms, lap_ms, frame_count, recorded_at, uploaded_at, blob_sha256, file_size)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			r.BoardID, r.AccountID, r.GhostID, r.TrackID, r.TrackPackID, r.KartID, r.CharacterID, r.EngineClass,
-			r.Laps, r.ContentVersion, r.TrackHash, r.SetupHash, r.GameBuild, r.FinishMs, r.BestLapMs, formatLapMs(r.LapMs),
-			r.FrameCount, r.RecordedAt, r.UploadedAt, r.Blob[:], r.FileSize)
+			kart_id, kart_version, character_id, engine_class, laps, game_build, finish_ms, best_lap_ms, lap_ms,
+			frame_count, recorded_at, uploaded_at, blob_sha256, file_size)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.BoardID, r.AccountID, r.GhostID, r.TrackID, r.TrackPackID, r.KartID, r.KartVersion, r.CharacterID,
+			r.EngineClass, r.Laps, r.GameBuild, r.FinishMs, r.BestLapMs, formatLapMs(r.LapMs), r.FrameCount,
+			r.RecordedAt, r.UploadedAt, r.Blob[:], r.FileSize)
 		if isDuplicate(err) {
 			return ErrGhostExists
 		}
@@ -304,6 +315,11 @@ func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 			return err
 		}
 		r.ID = uint64(id)
+		// After the run insert: a duplicate ghost leaves the kart versions alone.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO kart_versions (kart_id, version) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE version = GREATEST(version, VALUES(version))`, r.KartID, r.KartVersion); err != nil {
+			return fmt.Errorf("store: kart version: %w", err)
+		}
 		return nil
 	})
 }
@@ -320,7 +336,7 @@ func (s *Store) runWhere(ctx context.Context, cond string, arg any) (*RunView, e
 	return &views[0], nil
 }
 
-// RunByID returns the run with its board rank and setup mismatch.
+// RunByID returns the run with its board rank.
 func (s *Store) RunByID(ctx context.Context, id uint64) (*RunView, error) {
 	return s.runWhere(ctx, "r.id = ?", id)
 }
@@ -337,19 +353,12 @@ func (s *Store) CountUploadsSince(ctx context.Context, accountID uint64, since t
 	return n, err
 }
 
-// decorate fills Rank (on the unfiltered board), OwnerBest and SetupMismatch of views.
+// decorate fills Rank (on the unfiltered board) and OwnerBest of views: the position of each ranked run among the
+// ranked runs of its board.
 func (s *Store) decorate(ctx context.Context, views []RunView) error {
 	if len(views) == 0 {
 		return nil
 	}
-	if err := s.rankOnBoards(ctx, views); err != nil {
-		return err
-	}
-	return s.markSetupMismatch(ctx, views)
-}
-
-// rankOnBoards sets Rank to the position of each visible run among the visible runs of its board and OwnerBest.
-func (s *Store) rankOnBoards(ctx context.Context, views []RunView) error {
 	boardSet := map[uint64]bool{}
 	var boards, ids []any
 	for i := range views {
@@ -362,7 +371,7 @@ func (s *Store) rankOnBoards(ctx context.Context, views []RunView) error {
 	query := `WITH vis AS (
 			SELECT r.id, r.board_id, r.account_id, r.finish_ms, r.uploaded_at
 			FROM runs r JOIN accounts a ON a.id = r.account_id
-			WHERE r.board_id IN (` + placeholders(len(boards)) + `) AND ` + visible + `
+			WHERE r.board_id IN (` + placeholders(len(boards)) + `) AND ` + rankedRun + `
 		), ranked AS (
 			SELECT id, ROW_NUMBER() OVER (PARTITION BY board_id ORDER BY ` + rankOrder + `) AS rnk,
 				ROW_NUMBER() OVER (PARTITION BY board_id, account_id ORDER BY ` + rankOrder + `) AS rn
@@ -401,99 +410,12 @@ func (s *Store) rankOnBoards(ctx context.Context, views []RunView) error {
 	return nil
 }
 
-type setupKey struct {
-	kart           string
-	engineClass    uint8
-	laps           uint8
-	contentVersion int32
-}
-
-func setupKeyOf(r *Run) setupKey {
-	return setupKey{strings.ToLower(r.KartID), r.EngineClass, r.Laps, r.ContentVersion}
-}
-
-// markSetupMismatch applies the majority rule: for every (kart, engine class, laps, content version) used by at least
-// 3 accounts, runs whose setup hash is used by fewer accounts than the most common one are mismatched.
-func (s *Store) markSetupMismatch(ctx context.Context, views []RunView) error {
-	keys := map[setupKey]bool{}
-	var args []any
-	for i := range views {
-		k := setupKeyOf(&views[i].Run)
-		if !keys[k] {
-			keys[k] = true
-			args = append(args, k.kart, k.engineClass, k.laps, k.contentVersion)
-		}
-	}
-	in := "(kart_id, engine_class, laps, content_version) IN ((?,?,?,?)" + strings.Repeat(",(?,?,?,?)", len(keys)-1) + ")"
-
-	type hashKey struct {
-		setupKey
-		hash string
-	}
-	perHash := map[hashKey]int{}
-	top := map[setupKey]int{}
-	rows, err := s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, content_version, setup_hash,
-		COUNT(DISTINCT account_id) FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, content_version, setup_hash`,
-		args...)
-	if err != nil {
-		return fmt.Errorf("store: setup votes: %w", err)
-	}
-	for rows.Next() {
-		var (
-			k    setupKey
-			hash string
-			n    int
-		)
-		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.contentVersion, &hash, &n); err != nil {
-			rows.Close()
-			return err
-		}
-		k.kart = strings.ToLower(k.kart)
-		perHash[hashKey{k, strings.ToLower(hash)}] = n
-		top[k] = max(top[k], n)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	totals := map[setupKey]int{}
-	rows, err = s.db.QueryContext(ctx, `SELECT kart_id, engine_class, laps, content_version, COUNT(DISTINCT account_id)
-		FROM runs WHERE `+in+` GROUP BY kart_id, engine_class, laps, content_version`, args...)
-	if err != nil {
-		return fmt.Errorf("store: setup votes: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			k setupKey
-			n int
-		)
-		if err := rows.Scan(&k.kart, &k.engineClass, &k.laps, &k.contentVersion, &n); err != nil {
-			return err
-		}
-		k.kart = strings.ToLower(k.kart)
-		totals[k] = n
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for i := range views {
-		k := setupKeyOf(&views[i].Run)
-		votes := perHash[hashKey{k, strings.ToLower(views[i].SetupHash)}]
-		views[i].SetupMismatch = totals[k] >= 3 && votes < top[k]
-	}
-	return nil
-}
-
-// boardSelect reads the board's track hash from its newest visible upload.
-const boardSelect = `SELECT b.id, b.track_id, b.engine_class, b.laps, b.content_version,
-	COALESCE((SELECT r.track_hash FROM runs r JOIN accounts a ON a.id = r.account_id
-		WHERE r.board_id = b.id AND ` + visible + ` ORDER BY r.uploaded_at DESC, r.id DESC LIMIT 1), ''),
+// boardSelect reads a board with the statistics of its ranked runs.
+const boardSelect = `SELECT b.id, b.track_id, b.track_version, b.variant, b.engine_class, b.laps, b.rules_version,
 	b.created_at, COUNT(DISTINCT v.account_id), COALESCE(MIN(v.finish_ms), 0), MAX(v.uploaded_at)
 	FROM boards b LEFT JOIN (
 		SELECT r.board_id, r.account_id, r.finish_ms, r.uploaded_at
-		FROM runs r JOIN accounts a ON a.id = r.account_id WHERE ` + visible + `
+		FROM runs r JOIN accounts a ON a.id = r.account_id WHERE ` + rankedRun + `
 	) v ON v.board_id = b.id`
 
 func scanBoard(row rowScanner) (*Board, error) {
@@ -501,8 +423,8 @@ func scanBoard(row rowScanner) (*Board, error) {
 		b    Board
 		last sql.NullTime
 	)
-	err := row.Scan(&b.ID, &b.TrackID, &b.EngineClass, &b.Laps, &b.ContentVersion, &b.TrackHash, &b.CreatedAt,
-		&b.Players, &b.BestMs, &last)
+	err := row.Scan(&b.ID, &b.TrackID, &b.TrackVersion, &b.Variant, &b.EngineClass, &b.Laps, &b.RulesVersion,
+		&b.CreatedAt, &b.Players, &b.BestMs, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -514,7 +436,7 @@ func scanBoard(row rowScanner) (*Board, error) {
 	return &b, nil
 }
 
-// ListBoards returns boards with their visible statistics, most recent visible upload first.
+// ListBoards returns boards with their ranked statistics, most recent ranked upload first.
 func (s *Store) ListBoards(ctx context.Context, f BoardFilter) ([]Board, error) {
 	var (
 		conds []string
@@ -528,9 +450,13 @@ func (s *Store) ListBoards(ctx context.Context, f BoardFilter) ([]Board, error) 
 		conds = append(conds, "b.engine_class = ?")
 		args = append(args, *f.EngineClass)
 	}
-	if f.ContentVersion != 0 {
-		conds = append(conds, "b.content_version = ?")
-		args = append(args, f.ContentVersion)
+	if f.RulesVersion != proto.AnyRulesVersion {
+		conds = append(conds, "b.rules_version = ?")
+		args = append(args, f.RulesVersion)
+	}
+	if f.Variant != proto.AnyVariant {
+		conds = append(conds, "b.variant = ?")
+		args = append(args, f.Variant)
 	}
 	query := boardSelect
 	if len(conds) > 0 {
@@ -566,11 +492,12 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
-// Leaderboard ranks every visible run on the board matching the filter; an account may appear several times. With
-// IncludeHidden every hidden run matching the filter joins the list with rank 0, so moderators see what players do
-// not, in finish order. Mine is the account's best visible run in the filtered list.
+// Leaderboard ranks every ranked run on the board matching the filter; an account may appear several times. With
+// IncludeHidden every hidden run of a current kart version matching the filter joins the list with rank 0, so
+// moderators see what players do not, in finish order. Runs of outdated kart versions never appear. Mine is the
+// account's best ranked run in the filtered list.
 func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*LeaderboardPage, error) {
-	conds := []string{"r.board_id = ?"}
+	conds := []string{"r.board_id = ?", currentKart}
 	args := []any{q.BoardID}
 	if !q.IncludeHidden {
 		conds = append(conds, visible)
@@ -658,9 +585,6 @@ func (s *Store) Leaderboard(ctx context.Context, q LeaderboardQuery) (*Leaderboa
 	}
 	views, err := s.queryRuns(ctx, runSelect+" WHERE r.id IN ("+placeholders(len(ids))+")", ids...)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.markSetupMismatch(ctx, views); err != nil {
 		return nil, err
 	}
 	byID := make(map[uint64]*RunView, len(views))

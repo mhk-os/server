@@ -71,20 +71,10 @@ func (f *fakeEnv) of(acc uint64, typ proto.Type) []proto.Message {
 func (f *fakeEnv) reset() { f.pushes = nil }
 
 type fakeCatalog struct {
-	commits     map[uint64]string
-	notInMajor  map[string]bool
-	strikes     []uint64
-	strikePacks []string
+	missing map[string]bool // ids no racer's manifest lists
 }
 
-func (c *fakeCatalog) PackCommit(acc uint64, _ string) string { return c.commits[acc] }
-func (c *fakeCatalog) InMajority(_ uint64, _ string, _ uint8, id string) bool {
-	return !c.notInMajor[id]
-}
-func (c *fakeCatalog) Strike(acc uint64, pack, _ string) {
-	c.strikes = append(c.strikes, acc)
-	c.strikePacks = append(c.strikePacks, pack)
-}
+func (c *fakeCatalog) Has(_ uint64, _ string, _ uint8, id string) bool { return !c.missing[id] }
 
 func acc(slot int) uint64 { return uint64(100 + slot) }
 
@@ -95,7 +85,7 @@ func newTestRace(n int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
 // newAIRace puts ai AI karts in front of humans human racers (slots ai…); human slot i has account acc(i).
 func newAIRace(ai, humans int, spec Spec) (*raceState, *fakeEnv, *fakeCatalog) {
 	env := &fakeEnv{}
-	cat := &fakeCatalog{commits: map[uint64]string{}, notInMajor: map[string]bool{}}
+	cat := &fakeCatalog{missing: map[string]bool{}}
 	seats := make([]*seat, ai+humans)
 	for i := range seats {
 		if i < ai {
@@ -130,7 +120,7 @@ func testLoaded() *proto.RaceLoaded {
 		return a
 	}
 	return &proto.RaceLoaded{
-		RaceID: 7, TrackHash: "0123456789abcdef0123456789abcdef", Laps: 3,
+		RaceID: 7, TrackVersion: 3, Variant: "core.night+core.rain", Laps: 3,
 		Boxes: []proto.ItemBoxInfo{
 			{Pos: proto.Vec3{0, 0, 0}, RespawnTenths: 30},
 			{Pos: proto.Vec3{100, 0, 0}, RespawnTenths: 30, Fixed: specialBox},
@@ -219,16 +209,24 @@ func TestLoadHashIgnoresPoolOrder(t *testing.T) {
 	}
 }
 
-func TestLoadAgreementDropsDissenter(t *testing.T) {
-	rs, env, cat := newTestRace(4, Spec{Items: true})
-	for i := range 4 {
-		cat.commits[acc(i)] = "c1"
+func TestLoadHashCoversTrackVersionAndVariant(t *testing.T) {
+	a, version, variant := testLoaded(), testLoaded(), testLoaded()
+	version.TrackVersion++
+	variant.Variant = "core.night"
+	if loadHash(a) == loadHash(version) || loadHash(a) == loadHash(variant) {
+		t.Fatal("track version or variant change not detected")
 	}
-	cat.commits[acc(2)] = "c0" // an older pack version: desync, no strike
+}
+
+func TestLoadAgreementDropsDissenter(t *testing.T) {
+	rs, env, _ := newTestRace(4, Spec{Items: true})
 	for i, s := range rs.seats {
 		m := testLoaded()
-		if i >= 2 {
-			m.Laps = uint8(i + 2) // two different minorities
+		switch i {
+		case 2:
+			m.Variant = "" // another variant: a minority
+		case 3:
+			m.TrackVersion = 4 // another track version: a second minority
 		}
 		rs.onLoaded(s, m, t0.Add(time.Second))
 	}
@@ -237,9 +235,6 @@ func TestLoadAgreementDropsDissenter(t *testing.T) {
 	}
 	if !rs.seats[2].out || !rs.seats[3].out || rs.seats[2].outcome != OutcomeDesync {
 		t.Fatal("dissenters still racing")
-	}
-	if !slices.Equal(cat.strikes, []uint64{acc(3)}) || cat.strikePacks[0] != "mhk2" {
-		t.Fatalf("content strikes %v %v", cat.strikes, cat.strikePacks)
 	}
 	if got := env.of(acc(3), proto.PushPlayerLeftRace); len(got) != 2 {
 		t.Fatalf("dissenter saw %d PlayerLeftRace", len(got))
@@ -253,13 +248,13 @@ func TestLoadAgreementDropsDissenter(t *testing.T) {
 func TestLoadAgreementTieKeepsEveryone(t *testing.T) {
 	rs, _, _ := newTestRace(2, Spec{})
 	other := testLoaded()
-	other.TrackHash = "ffffffffffffffffffffffffffffffff"
+	other.TrackVersion = 7
 	rs.onLoaded(rs.seats[1], other, t0)
 	rs.onLoaded(rs.seats[0], testLoaded(), t0)
 	if rs.phase != phaseRacing || rs.seats[0].out || rs.seats[1].out {
 		t.Fatal("tie dropped a racer")
 	}
-	if rs.agreed.TrackHash != testLoaded().TrackHash {
+	if rs.agreed.TrackVersion != testLoaded().TrackVersion {
 		t.Fatal("tie did not use the lowest slot's content")
 	}
 }
@@ -975,7 +970,7 @@ func TestUnknownContent(t *testing.T) {
 
 	rs, env, cat := newTestRace(4, Spec{Anticheat: true})
 	startRace(t, rs)
-	cat.notInMajor["mhk2.fake"] = true
+	cat.missing["mhk2.fake"] = true
 	uc(rs, 0, 3, "mhk2.fake", t0)
 	uc(rs, 2, 3, "mhk2.fake", t0)
 	if rs.seats[3].outcome != OutcomeCheatKick || len(env.kicks) != 1 || env.kicks[0].Reporters != "100,102" {

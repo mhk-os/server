@@ -13,13 +13,15 @@ import (
 	"io"
 	"math"
 	"time"
+
+	"github.com/mhk-os/server/internal/proto"
 )
 
 // Limits from docs/protocol.md "Upload validation".
 const (
 	MaxCompressed  = 8 << 20
 	MaxInflated    = 48 << 20
-	FormatVersion  = 1
+	FormatVersion  = 2
 	MaxIDLength    = 96
 	MaxLaps        = 99
 	MaxFinish      = 3 * 60 * 60 // s, exclusive
@@ -60,20 +62,21 @@ const (
 type Header struct {
 	ID               string
 	GameBuild        string
-	ContentVersion   int32
+	RulesVersion     int32
 	PlayerName       string
 	PlayerID         string
 	DateTicks        int64 // .NET DateTime ticks, UTC
 	TrackID          string
 	TrackPackID      string
 	TrackPackVersion string
-	TrackHash        string
+	TrackVersion     int32
+	Variant          string // proto.ValidVariant; "" = the track's default variant
 	KartID           string
+	KartVersion      int32
 	CharacterID      string
 	EngineClass      int32
 	EngineClassLabel string
 	Laps             int32
-	SetupHash        string
 	TickSeconds      float32
 	SpeedScale       float32
 	FinishTime       float32
@@ -285,20 +288,21 @@ func (r *reader) block(name string) ([]byte, error) {
 func readHeader(r *reader, h *Header) error {
 	h.ID = r.str()
 	h.GameBuild = r.str()
-	h.ContentVersion = r.i32()
+	h.RulesVersion = r.i32()
 	h.PlayerName = r.str()
 	h.PlayerID = r.str()
 	h.DateTicks = r.i64()
 	h.TrackID = r.str()
 	h.TrackPackID = r.str()
 	h.TrackPackVersion = r.str()
-	h.TrackHash = r.str()
+	h.TrackVersion = r.i32()
+	h.Variant = r.str()
 	h.KartID = r.str()
+	h.KartVersion = r.i32()
 	h.CharacterID = r.str()
 	h.EngineClass = r.i32()
 	h.EngineClassLabel = r.str()
 	h.Laps = r.i32()
-	h.SetupHash = r.str()
 	h.TickSeconds = r.f32()
 	h.SpeedScale = r.f32()
 	h.FinishTime = r.f32()
@@ -377,11 +381,17 @@ func (s *Summary) validateHeader() error {
 			return fail("%s %q must be 1-%d characters of A-Z a-z 0-9 _ . -", f.name, truncate(f.value), MaxIDLength)
 		}
 	}
-	if !isHex32(h.TrackHash) {
-		return fail("track hash must be 32 hex characters")
+	for _, f := range []struct {
+		name string
+		v    int32
+	}{{"rules version", h.RulesVersion}, {"track version", h.TrackVersion}, {"kart version", h.KartVersion}} {
+		if f.v < 1 {
+			return fail("%s %d is not positive", f.name, f.v)
+		}
 	}
-	if !isHex32(h.SetupHash) {
-		return fail("setup hash must be 32 hex characters")
+	if !proto.ValidVariant(h.Variant) {
+		return fail("variant %q must be empty or 1-%d distinct option ids of a-z 0-9 _ . - joined by +",
+			truncate(h.Variant), proto.MaxVariantOptions)
 	}
 	if h.EngineClass < 0 || h.EngineClass > 2 {
 		return fail("engine class %d is not 0-2", h.EngineClass)

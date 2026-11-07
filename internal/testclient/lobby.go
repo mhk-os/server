@@ -6,11 +6,11 @@ import (
 	"github.com/mhk-os/server/internal/proto"
 )
 
-// ContentHello announces packs for contentVersion (which must equal the Hello's).
-func (c *Client) ContentHello(ctx context.Context, contentVersion int32, packs []proto.PackRef) (
+// ContentHello announces packs for rulesVersion (which must equal the Hello's).
+func (c *Client) ContentHello(ctx context.Context, rulesVersion int32, packs []proto.PackRef) (
 	*proto.ContentHelloResult, error) {
 	var res proto.ContentHelloResult
-	req := &proto.ContentHello{ContentVersion: contentVersion, Packs: packs}
+	req := &proto.ContentHello{RulesVersion: rulesVersion, Packs: packs}
 	if err := c.Request(ctx, proto.TypeContentHello, req, &res); err != nil {
 		return nil, err
 	}
@@ -65,12 +65,12 @@ func (c *Client) SetReady(ctx context.Context, ready bool) error {
 	return c.Request(ctx, proto.TypeSetReady, &proto.SetReady{Ready: ready}, nil)
 }
 
-func (c *Client) Vote(ctx context.Context, trackID string) error {
-	return c.Request(ctx, proto.TypeVote, &proto.TrackChoice{TrackID: trackID}, nil)
+func (c *Client) Vote(ctx context.Context, trackID, variant string) error {
+	return c.Request(ctx, proto.TypeVote, &proto.TrackChoice{TrackID: trackID, Variant: variant}, nil)
 }
 
-func (c *Client) StartRace(ctx context.Context, trackID string) error {
-	return c.Request(ctx, proto.TypeStartRace, &proto.TrackChoice{TrackID: trackID}, nil)
+func (c *Client) StartRace(ctx context.Context, trackID, variant string) error {
+	return c.Request(ctx, proto.TypeStartRace, &proto.TrackChoice{TrackID: trackID, Variant: variant}, nil)
 }
 
 func (c *Client) StartCup(ctx context.Context, cupID string, trackIDs []string) error {

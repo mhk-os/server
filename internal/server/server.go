@@ -97,9 +97,20 @@ type Deps struct {
 // Content is what time-trial uploads ask the content catalog (content.Catalog, which registers with the server
 // and so cannot be imported here).
 type Content interface {
-	// RunContent returns why conn, logged in as accountID, may not upload a run with these kart, character and
-	// track ids (a *StatusError: content not announced yet, or one of them modified there); nil when it may.
-	RunContent(ctx context.Context, conn any, accountID uint64, kart, character, track string) error
+	// RunContent returns why conn, logged in as accountID, may not upload a run with this content (a *StatusError:
+	// content not announced yet, another rules version, track or kart missing or of another version there, or an
+	// item replaced by another pack); nil when it may.
+	RunContent(ctx context.Context, conn any, accountID uint64, run RunContent) error
+}
+
+// RunContent is the content a run was recorded with (ghost header).
+type RunContent struct {
+	RulesVersion int32
+	TrackID      string
+	TrackVersion int32 // the variant's version: the track item's version plus overlay bumps
+	KartID       string
+	KartVersion  int32
+	CharacterID  string
 }
 
 // HandlerFunc handles one request. It decodes the body from r and returns the response payload (nil for an

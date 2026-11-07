@@ -2,12 +2,13 @@
 // game can be tested against remote karts.
 //
 //	mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass secret -quick 1 [-n 3]
-//	mhk-bot dump-manifests -dsn DSN -content-version N -out packs.json mhk2 mhk3 ...
+//	mhk-bot dump-manifests -dsn DSN -rules-version N -out packs.json mhk2 mhk3 ...
 //
-// Bots know nothing about the track, so their RaceLoaded carries a hash unique to each bot: with one human (or
-// bots only) nobody has a majority, the tie keeps every racer and the race uses the lowest slot's content. With two
-// or more humans the humans form the majority and the bots leave as desync, so use bots with a single human.
-// Bots never pick up or use items; they drive the ghost's path whatever the track and finish at the ghost's time.
+// Bots know nothing about the track, so their RaceLoaded carries a track version unique to each bot (below 1, which
+// no game sends): with one human (or bots only) nobody has a majority, the tie keeps every racer and the race uses
+// the lowest slot's content. With two or more humans the humans form the majority and the bots leave as desync, so
+// use bots with a single human. Bots never pick up or use items; they drive the ghost's path whatever the track and
+// finish at the ghost's time.
 package main
 
 import (
@@ -94,7 +95,8 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg := &botConfig{addr: addr, host: host, tls: tlsConf, pass: *pass, join: strings.ToUpper(*join),
-		quick: uint8(*quick), character: *character, kart: *kart, trackID: g.TrackID, replay: newReplay(g, frames),
+		quick: uint8(*quick), character: *character, kart: *kart, trackID: g.TrackID, variant: g.Variant,
+		replay:    newReplay(g, frames),
 		manifests: mf, keepAlive: *keepAlive, platform: *platform, handOver: *handOver}
 	if *loadedPath != "" {
 		if cfg.loaded, err = readLoaded(*loadedPath); err != nil {
@@ -163,21 +165,21 @@ func parseServer(uri string) (addr, host string, conf *tls.Config, err error) {
 func dump(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("dump-manifests", flag.ContinueOnError)
 	dsn := fs.String("dsn", os.Getenv("MHK_DB_DSN"), "MariaDB DSN of the server (MHK_DB_DSN)")
-	contentVersion := fs.Int("content-version", 0, "content version of the manifests")
+	rulesVersion := fs.Int("rules-version", 0, "rules version of the manifests")
 	out := fs.String("out", "manifests.json", "file to write")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dsn == "" || *contentVersion == 0 || fs.NArg() == 0 {
+	if *dsn == "" || *rulesVersion == 0 || fs.NArg() == 0 {
 		fs.Usage()
-		return errors.New("need -dsn, -content-version and at least one pack id")
+		return errors.New("need -dsn, -rules-version and at least one pack id")
 	}
 	st, err := store.Open(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
-	if err := dumpManifests(ctx, st, int32(*contentVersion), fs.Args(), *out); err != nil {
+	if err := dumpManifests(ctx, st, int32(*rulesVersion), fs.Args(), *out); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %d packs to %s\n", fs.NArg(), *out)

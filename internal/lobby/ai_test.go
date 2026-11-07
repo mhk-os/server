@@ -63,7 +63,7 @@ func TestAICounts(t *testing.T) {
 	}
 	l := e.lobbyOf(1)
 	// Members without a loadout sit the race out: 4 humans race 5 AI.
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	must(t, e.m.StartRace(owner, "mhk2.rome", ""))
 	call := e.races.last()
 	if len(aiOf(call.racers)) != 5 || len(humansOf(call.racers)) != 4 || !call.racers[4].AI || call.racers[5].AI {
 		t.Fatalf("4 humans: racers %+v", call.racers)
@@ -73,7 +73,7 @@ func TestAICounts(t *testing.T) {
 	for id := uint64(5); id <= 6; id++ {
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.huhn", "game.kart"))
 	}
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	must(t, e.m.StartRace(owner, "mhk2.rome", ""))
 	call2 := e.races.last()
 	if len(aiOf(call2.racers)) != 4 || len(humansOf(call2.racers)) != 6 {
 		t.Fatalf("6 humans: racers %+v", call2.racers)
@@ -95,9 +95,9 @@ func TestPublicAILobby(t *testing.T) {
 		s.Summary.Name != "Races + AI #1" || len(s.AIDrivers) != 0 {
 		t.Fatalf("AI lobby %+v", s.Summary)
 	}
-	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, ""), proto.StatusForbidden, "voting")
+	wantStatus(t, e.m.StartRace(Player{AccountID: 1}, "", ""), proto.StatusForbidden, "voting")
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
 	call := e.races.last()
 	ai := aiOf(call.racers)
 	if len(ai) != 9 || len(call.racers) != 10 || call.racers[9].AccountID != 1 || call.spec.SetRace != 1 {
@@ -137,8 +137,8 @@ func TestPublicAILobby(t *testing.T) {
 	if e.phase(l) != proto.PhaseVoting {
 		t.Fatal("results did not end in Voting")
 	}
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
-	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 	call = e.races.last()
 	ai2 := aiOf(call.racers)
 	if len(ai2) != 8 || len(humansOf(call.racers)) != 2 || call.spec.SetRace != 2 {
@@ -167,8 +167,8 @@ func TestPublicAILobby(t *testing.T) {
 	e.cat.hidden[2] = map[string]bool{"mhk2.lola": true}
 	e.cat.mu.Unlock()
 	e.clock.Advance(10 * time.Second)
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
-	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 	call = e.races.last()
 	for _, d := range aiOf(call.racers) {
 		if d.CharacterID == "mhk2.lola" {
@@ -181,8 +181,8 @@ func TestPublicAILobby(t *testing.T) {
 	}
 	finish(t, e, l, call, placed(call), proto.PhaseResults)
 	e.clock.Advance(10 * time.Second)
-	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome"))
-	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome"))
+	must(t, e.m.Vote(Player{AccountID: 1}, "mhk2.rome", ""))
+	must(t, e.m.Vote(Player{AccountID: 2}, "mhk2.rome", ""))
 	finish(t, e, l, e.races.last(), placed(e.races.last()), proto.PhaseSetResults)
 	// The set ends: the drivers keep their points through SetResults, then the next set draws new ones.
 	if st := e.push.lastState(t, 1); len(st.AIDrivers) != 9 || st.AIDrivers[0].SetPoints != 60 {
@@ -214,7 +214,7 @@ func TestFiftyMemberRoom(t *testing.T) {
 	wantStatus(t, err, proto.StatusForbidden, "full")
 	// Alone with a loadout, the owner races 49 AI karts.
 	must(t, e.m.SetLoadout(owner, "game.huhn", "game.kart"))
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	must(t, e.m.StartRace(owner, "mhk2.rome", ""))
 	call := e.races.last()
 	if len(aiOf(call.racers)) != 49 || len(call.racers) != proto.MaxRacers {
 		t.Fatalf("%d racers", len(call.racers))
@@ -229,7 +229,7 @@ func TestFiftyMemberRoom(t *testing.T) {
 	for id := uint64(2); id <= 50; id++ {
 		must(t, e.m.SetLoadout(Player{AccountID: id}, "game.hank", "mhk2.speedy"))
 	}
-	must(t, e.m.StartRace(owner, "mhk2.rome"))
+	must(t, e.m.StartRace(owner, "mhk2.rome", ""))
 	if call := e.races.last(); len(call.racers) != 50 || len(aiOf(call.racers)) != 0 {
 		t.Fatalf("full room: %d racers, %d AI", len(call.racers), len(aiOf(call.racers)))
 	}
@@ -253,7 +253,7 @@ func TestCustomChampionship(t *testing.T) {
 	l := e.lobbyOf(1)
 	run := func(track, want string) {
 		t.Helper()
-		must(t, e.m.StartRace(owner, track))
+		must(t, e.m.StartRace(owner, track, ""))
 		call := e.races.last()
 		if call.spec.TrackID != want {
 			t.Fatalf("race on %s, want %s", call.spec.TrackID, want)
@@ -266,8 +266,8 @@ func TestCustomChampionship(t *testing.T) {
 		e.clock.Advance(15 * time.Second)
 	}
 	run("", "mhk2.rome")
-	wantStatus(t, e.m.StartRace(owner, "mhk2.rome"), proto.StatusBadRequest, "mhk2.alps")
-	wantStatus(t, e.m.StartRace(owner, "mhk3.paris"), proto.StatusBadRequest, "mhk2.alps")
+	wantStatus(t, e.m.StartRace(owner, "mhk2.rome", ""), proto.StatusBadRequest, "mhk2.alps")
+	wantStatus(t, e.m.StartRace(owner, "mhk3.paris", ""), proto.StatusBadRequest, "mhk2.alps")
 	run("mhk2.alps", "mhk2.alps")
 	run("", "mhk2.rome") // duplicates are fine; the third race ends the set
 	if st := e.push.lastState(t, 1); st.SetRace != 0 || e.phase(l) != proto.PhaseWaiting {
@@ -339,15 +339,15 @@ func TestOwnerCup(t *testing.T) {
 	}
 	// Inside the cup: its next track only, no other cup.
 	wantStatus(t, e.m.StartCup(owner, "mhk2.cup", cup), proto.StatusBadRequest, "1 of 3")
-	wantStatus(t, e.m.StartRace(owner, "mhk2.rome"), proto.StatusBadRequest, "mhk2.alps")
+	wantStatus(t, e.m.StartRace(owner, "mhk2.rome", ""), proto.StatusBadRequest, "mhk2.alps")
 	// Settings that still allow the cup keep it (racesPerSet 2 would have ended the set after race 2).
 	upd := aiRoom(4, 2)
 	upd.Laps = 5
 	must(t, e.m.UpdateRoom(owner, upd))
-	if res := run(func() error { return e.m.StartRace(owner, "") }, "mhk2.alps", 2, proto.PhaseResults); res.SetDone {
+	if res := run(func() error { return e.m.StartRace(owner, "", "") }, "mhk2.alps", 2, proto.PhaseResults); res.SetDone {
 		t.Fatal("cup set ended after racesPerSet races")
 	}
-	res = run(func() error { return e.m.StartRace(owner, "mhk2.rome") }, "mhk2.rome", 3, proto.PhaseSetResults)
+	res = run(func() error { return e.m.StartRace(owner, "mhk2.rome", "") }, "mhk2.rome", 3, proto.PhaseSetResults)
 	if !res.SetDone {
 		t.Fatalf("cup results %+v", res)
 	}
@@ -355,7 +355,7 @@ func TestOwnerCup(t *testing.T) {
 	if st := e.push.lastState(t, 1); st.CupID != "" || len(st.CupTrackIDs) != 0 || st.SetRace != 0 || st.SetSize != 2 {
 		t.Fatalf("after the cup %+v", st)
 	}
-	must(t, e.m.StartRace(owner, "mhk2.alps"))
+	must(t, e.m.StartRace(owner, "mhk2.alps", ""))
 	if call := e.races.last(); call.spec.TrackID != "mhk2.alps" || call.spec.SetRace != 1 || call.spec.SetSize != 2 {
 		t.Fatalf("after the cup %+v", call.spec)
 	}
@@ -408,7 +408,7 @@ func TestLoneHumanRaces(t *testing.T) {
 	e := newEnv(t)
 	e.ok(e.m.QuickJoin(e.player(1), 1))
 	must(t, e.m.SetLoadout(Player{AccountID: 1}, "game.huhn", "game.kart"))
-	must(t, e.m.StartRace(Player{AccountID: 1}, ""))
+	must(t, e.m.StartRace(Player{AccountID: 1}, "", ""))
 	call := e.races.last()
 	l := e.lobbyOf(1)
 	e.m.mu.Lock()
@@ -430,7 +430,7 @@ func TestLoneHumanRaces(t *testing.T) {
 	// A private room's owner racing alone against the room's AI: a set race, ended early for a newcomer.
 	rm := e.ok(e.m.CreateRoom(e.player(10), aiRoom(6, 5)))
 	must(t, e.m.SetLoadout(Player{AccountID: 10}, "game.huhn", "game.kart"))
-	must(t, e.m.StartRace(Player{AccountID: 10}, "mhk2.rome"))
+	must(t, e.m.StartRace(Player{AccountID: 10}, "mhk2.rome", ""))
 	call = e.races.last()
 	if len(aiOf(call.racers)) != 5 || call.spec.SetRace != 1 {
 		t.Fatalf("private race alone %+v", call.spec)
@@ -445,7 +445,7 @@ func TestLoneHumanRaces(t *testing.T) {
 	// The lone human of an AI lobby may end early too; with two humans nobody may.
 	e.ok(e.m.QuickJoin(e.player(20), 12))
 	must(t, e.m.SetLoadout(Player{AccountID: 20}, "game.huhn", "game.kart"))
-	must(t, e.m.Vote(Player{AccountID: 20}, ""))
+	must(t, e.m.Vote(Player{AccountID: 20}, "", ""))
 	aiRace := e.races.last()
 	must(t, e.m.EndRaceEarly(Player{AccountID: 20}))
 	if !slices.Contains(e.races.ended, aiRace.id) {
@@ -461,8 +461,8 @@ func TestLoneHumanRaces(t *testing.T) {
 	e.waitPhase(t, cl, proto.PhaseResults)
 	must(t, e.m.SetLoadout(Player{AccountID: 21}, "game.huhn", "game.kart"))
 	e.clock.Advance(10 * time.Second)
-	must(t, e.m.Vote(Player{AccountID: 20}, ""))
-	must(t, e.m.Vote(Player{AccountID: 21}, ""))
+	must(t, e.m.Vote(Player{AccountID: 20}, "", ""))
+	must(t, e.m.Vote(Player{AccountID: 21}, "", ""))
 	wantStatus(t, e.m.EndRaceEarly(Player{AccountID: 20}), proto.StatusBadRequest, "alone")
 	if got := fmt.Sprint(len(aiOf(e.races.last().racers))); got != "8" {
 		t.Fatalf("%s AI with two humans", got)

@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -17,27 +16,19 @@ import (
 	"github.com/mhk-os/server/internal/store"
 )
 
-// StrikeThreshold is how many distinct accounts must back a majority before differing copies get strikes and are
-// kept out of anticheat lobbies.
-const StrikeThreshold = 3
-
-// lookupTimeout bounds the database reads lookups may need (a majority manifest not in memory yet).
+// lookupTimeout bounds the database reads lookups may need (a manifest not in memory yet).
 const lookupTimeout = 5 * time.Second
 
 // Store is what the catalog persists.
 type Store interface {
-	HasManifest(ctx context.Context, v store.PackVersion, hash string) (bool, error)
 	PutManifest(ctx context.Context, m *store.Manifest, at time.Time) error
-	ManifestByHash(ctx context.Context, v store.PackVersion, hash string) (*store.Manifest, error)
-	PackVotes(ctx context.Context, v store.PackVersion) (map[uint64]string, error)
-	SetPackVote(ctx context.Context, v store.PackVersion, accountID uint64, hash string, at time.Time) error
-	AddContentStrike(ctx context.Context, k *store.ContentStrike, once bool) error
+	Manifest(ctx context.Context, v store.PackVersion) (*store.Manifest, error)
 }
 
 // Announcement is what a connection announced in ContentHello once every requested manifest arrived.
 type Announcement struct {
-	ContentVersion int32
-	Packs          map[string]proto.PackRef // by lowercase pack id; hashes lowercase
+	RulesVersion int32
+	Packs        map[string]proto.PackRef // by lowercase pack id
 }
 
 // Pack returns the announced version of packID (case-insensitive).
@@ -47,16 +38,12 @@ func (a *Announcement) Pack(packID string) (proto.PackRef, bool) {
 }
 
 type versionKey struct {
-	pack, commit   string // lowercase
-	contentVersion int32
+	pack, commit string // lowercase
+	rulesVersion int32
 }
 
-func keyOf(p proto.PackRef, contentVersion int32) versionKey {
-	return versionKey{strings.ToLower(p.PackID), strings.ToLower(p.Commit), contentVersion}
-}
-
-func (k versionKey) storeVersion() store.PackVersion {
-	return store.PackVersion{PackID: k.pack, Commit: k.commit, ContentVersion: k.contentVersion}
+func keyOf(p proto.PackRef, rulesVersion int32) versionKey {
+	return versionKey{strings.ToLower(p.PackID), strings.ToLower(p.Commit), rulesVersion}
 }
 
 // itemKey is a manifest item by kind and lowercase id.
@@ -67,53 +54,22 @@ type itemKey struct {
 
 // index is a stored manifest prepared for lookups.
 type index struct {
-	items   map[itemKey]string // fingerprints
+	items   map[itemKey]int32  // versions
 	byKind  map[uint8][]string // ids as reported, in manifest order
 	foreign []proto.ManifestItem
 }
 
 // newIndex indexes a manifest of pack; foreign holds its items under another pack's id (it replaces them).
 func newIndex(pack string, items []proto.ManifestItem) *index {
-	ix := &index{items: make(map[itemKey]string, len(items)), byKind: map[uint8][]string{}}
+	ix := &index{items: make(map[itemKey]int32, len(items)), byKind: map[uint8][]string{}}
 	for _, it := range items {
-		ix.items[itemKey{it.Kind, strings.ToLower(it.ID)}] = it.Fingerprint
+		ix.items[itemKey{it.Kind, strings.ToLower(it.ID)}] = it.Version
 		ix.byKind[it.Kind] = append(ix.byKind[it.Kind], it.ID)
 		if !strings.EqualFold(PackOf(it.ID), pack) {
 			ix.foreign = append(ix.foreign, it)
 		}
 	}
 	return ix
-}
-
-// version holds the votes of one pack version. Its mutex serializes loading and database writes so the
-// in-memory tally always matches the stored one.
-type version struct {
-	key       versionKey
-	mu        sync.Mutex
-	votes     map[uint64]string // nil until loaded
-	manifests map[string]*index // by hash; only manifests needed so far
-}
-
-// majority returns the hash reported by the most accounts and their number; "" when nobody reported or the top is
-// a tie. The caller holds v.mu.
-func (v *version) majority() (string, int) {
-	counts := map[string]int{}
-	for _, h := range v.votes {
-		counts[h]++
-	}
-	best, n, tie := "", 0, false
-	for h, c := range counts {
-		switch {
-		case c > n:
-			best, n, tie = h, c, false
-		case c == n:
-			tie = true
-		}
-	}
-	if tie {
-		return "", n
-	}
-	return best, n
 }
 
 // connState is a connection's announcement; missing holds the lowercase pack ids whose manifests are still owed.
@@ -130,10 +86,10 @@ type Catalog struct {
 	log *slog.Logger
 	now func() time.Time
 
-	mu       sync.Mutex
-	versions map[versionKey]*version
-	conns    map[any]*connState
-	seq      uint64
+	mu        sync.Mutex
+	manifests map[versionKey]*index // stored manifests loaded so far
+	conns     map[any]*connState
+	seq       uint64
 }
 
 var (
@@ -141,115 +97,69 @@ var (
 	_ server.Content = (*Catalog)(nil)
 )
 
-// New returns an empty catalog over st; votes and manifests load on demand.
+// New returns an empty catalog over st; manifests load on demand.
 func New(st Store, log *slog.Logger) *Catalog {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Catalog{st: st, log: log, now: store.Now, versions: map[versionKey]*version{}, conns: map[any]*connState{}}
+	return &Catalog{st: st, log: log, now: store.Now, manifests: map[versionKey]*index{}, conns: map[any]*connState{}}
 }
 
-func (c *Catalog) version(k versionKey) *version {
+// manifest returns the index of the stored manifest of a pack version, nil when the server does not hold it.
+func (c *Catalog) manifest(ctx context.Context, k versionKey) (*index, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	v := c.versions[k]
-	if v == nil {
-		v = &version{key: k, manifests: map[string]*index{}}
-		c.versions[k] = v
-	}
-	return v
-}
-
-// load reads the version's votes once. The caller holds v.mu.
-func (c *Catalog) load(ctx context.Context, v *version) error {
-	if v.votes != nil {
-		return nil
-	}
-	votes, err := c.st.PackVotes(ctx, v.key.storeVersion())
-	if err != nil {
-		return err
-	}
-	v.votes = votes
-	return nil
-}
-
-// manifest returns the index of a stored manifest, nil when the server does not hold it. The caller holds v.mu.
-func (c *Catalog) manifest(ctx context.Context, v *version, hash string) (*index, error) {
-	if ix := v.manifests[hash]; ix != nil {
+	ix := c.manifests[k]
+	c.mu.Unlock()
+	if ix != nil {
 		return ix, nil
 	}
-	m, err := c.st.ManifestByHash(ctx, v.key.storeVersion(), hash)
+	m, err := c.st.Manifest(ctx, store.PackVersion{PackID: k.pack, Commit: k.commit, RulesVersion: k.rulesVersion})
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	ix := newIndex(v.key.pack, m.Items)
-	v.manifests[hash] = ix
+	ix = newIndex(k.pack, m.Items)
+	c.mu.Lock()
+	if cur := c.manifests[k]; cur != nil {
+		ix = cur
+	} else {
+		c.manifests[k] = ix
+	}
+	c.mu.Unlock()
 	return ix, nil
 }
 
-// vote records the account's hash (its manifest is stored). The caller holds v.mu and loaded the votes.
-func (c *Catalog) vote(ctx context.Context, v *version, accountID uint64, hash string) error {
-	if v.votes[accountID] == hash {
-		return nil
-	}
-	if err := c.st.SetPackVote(ctx, v.key.storeVersion(), accountID, hash, c.now()); err != nil {
-		return err
-	}
-	v.votes[accountID] = hash
-	return nil
-}
-
-func strikeMessage(packID string) string {
-	return fmt.Sprintf("Your copy of %s differs from other players'.", packID)
-}
-
-// Hello handles ContentHello for the connection conn of accountID: it records the votes of packs whose manifests
-// the server holds, returns the manifests it lacks and the packs that differ from a majority backed by at least
-// StrikeThreshold accounts (stored as content strikes). Invalid announcements are *server.StatusError.
-func (c *Catalog) Hello(ctx context.Context, conn any, accountID uint64, contentVersion int32, packs []proto.PackRef) (
+// Hello handles ContentHello for the connection conn of accountID and returns the ids of the announced packs whose
+// manifests the server does not hold yet. Invalid announcements are *server.StatusError.
+func (c *Catalog) Hello(ctx context.Context, conn any, accountID uint64, rulesVersion int32, packs []proto.PackRef) (
 	*proto.ContentHelloResult, error) {
 	st := &connState{accountID: accountID,
-		ann: Announcement{ContentVersion: contentVersion, Packs: map[string]proto.PackRef{}}, missing: map[string]bool{}}
+		ann: Announcement{RulesVersion: rulesVersion, Packs: map[string]proto.PackRef{}}, missing: map[string]bool{}}
 	for _, p := range packs {
 		switch {
 		case !validPackID(p.PackID):
 			return nil, server.Errorf(proto.StatusBadRequest, "Pack id %q is invalid.", p.PackID)
 		case !printable(p.Commit):
 			return nil, server.Errorf(proto.StatusBadRequest, "The commit of pack %s is invalid.", p.PackID)
-		case !validHash(p.ManifestHash):
-			return nil, server.Errorf(proto.StatusBadRequest, "The manifest hash of pack %s is invalid.", p.PackID)
 		}
 		lower := strings.ToLower(p.PackID)
 		if _, dup := st.ann.Packs[lower]; dup {
 			return nil, server.Errorf(proto.StatusBadRequest, "Pack %s is announced twice.", p.PackID)
 		}
-		p.ManifestHash = strings.ToLower(p.ManifestHash)
 		st.ann.Packs[lower] = p
 	}
 
-	res := &proto.ContentHelloResult{Missing: []string{}, Strikes: []proto.ContentStrike{}}
+	res := &proto.ContentHelloResult{Missing: []string{}}
 	for _, p := range packs {
-		ref := st.ann.Packs[strings.ToLower(p.PackID)]
-		v := c.version(keyOf(ref, contentVersion))
-		known, differs, err := c.helloPack(ctx, v, accountID, ref)
+		ix, err := c.manifest(ctx, keyOf(p, rulesVersion))
 		if err != nil {
 			return nil, err
 		}
-		if !known {
-			st.missing[strings.ToLower(ref.PackID)] = true
-			res.Missing = append(res.Missing, p.ManifestHash)
-		}
-		if differs != "" {
-			res.Strikes = append(res.Strikes, proto.ContentStrike{PackID: ref.PackID, Message: strikeMessage(ref.PackID)})
-			err := c.st.AddContentStrike(ctx, &store.ContentStrike{AccountID: accountID,
-				PackVersion: v.key.storeVersion(), ManifestHash: ref.ManifestHash, MajorityHash: differs,
-				Reason: "announced copy differs from the catalog majority", CreatedAt: c.now()}, true)
-			if err != nil {
-				return nil, err
-			}
+		if ix == nil {
+			st.missing[strings.ToLower(p.PackID)] = true
+			res.Missing = append(res.Missing, p.PackID)
 		}
 	}
 	c.mu.Lock()
@@ -260,43 +170,16 @@ func (c *Catalog) Hello(ctx context.Context, conn any, accountID uint64, content
 	return res, nil
 }
 
-// helloPack records one announced pack: known reports whether its manifest is stored (the vote is then recorded),
-// differs is the majority hash when it is backed by StrikeThreshold accounts and is not the announced one.
-func (c *Catalog) helloPack(ctx context.Context, v *version, accountID uint64, ref proto.PackRef) (
-	known bool, differs string, err error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := c.load(ctx, v); err != nil {
-		return false, "", err
-	}
-	if v.manifests[ref.ManifestHash] != nil {
-		known = true
-	} else if known, err = c.st.HasManifest(ctx, v.key.storeVersion(), ref.ManifestHash); err != nil {
-		return false, "", err
-	}
-	if known {
-		if _, err := c.manifest(ctx, v, ref.ManifestHash); err != nil {
-			return false, "", err
-		}
-		if err := c.vote(ctx, v, accountID, ref.ManifestHash); err != nil {
-			return false, "", err
-		}
-	}
-	if maj, n := v.majority(); maj != "" && n >= StrikeThreshold && maj != ref.ManifestHash {
-		differs = maj
-	}
-	return known, differs, nil
-}
-
-// Manifests handles ContentManifests: every manifest the connection still owes is verified, stored and counted.
-// Manifests nobody asked for are ignored, so clients cannot fill the database with arbitrary ones.
+// Manifests handles ContentManifests: every manifest the connection still owes is validated and stored, unless
+// another connection stored one for the same pack version first (the first one is kept). Manifests nobody asked
+// for are ignored, so clients cannot fill the database with arbitrary ones.
 func (c *Catalog) Manifests(ctx context.Context, conn any, accountID uint64, ms []proto.PackManifest) error {
 	c.mu.Lock()
 	st := c.conns[conn]
 	var owed map[string]proto.PackRef
-	var contentVersion int32
+	var rulesVersion int32
 	if st != nil && st.accountID == accountID {
-		contentVersion = st.ann.ContentVersion
+		rulesVersion = st.ann.RulesVersion
 		owed = map[string]proto.PackRef{}
 		for id := range st.missing {
 			owed[id] = st.ann.Packs[id]
@@ -310,20 +193,24 @@ func (c *Catalog) Manifests(ctx context.Context, conn any, accountID uint64, ms 
 		m := &ms[i]
 		lower := strings.ToLower(m.PackID)
 		ref, ok := owed[lower]
-		if !ok || !strings.EqualFold(ref.Commit, m.Commit) || m.ContentVersion != contentVersion ||
-			!strings.EqualFold(ref.ManifestHash, m.ManifestHash) {
+		if !ok || !strings.EqualFold(ref.Commit, m.Commit) || m.RulesVersion != rulesVersion {
 			continue
 		}
-		hash, err := ManifestHash(m.Items)
-		if err != nil {
+		if err := ValidateItems(m.Items); err != nil {
 			return server.Errorf(proto.StatusBadRequest, "Manifest of %s: %v.", m.PackID, err)
 		}
-		if hash != ref.ManifestHash {
-			return server.Errorf(proto.StatusBadRequest, "The manifest of %s does not match its hash.", m.PackID)
-		}
-		v := c.version(keyOf(ref, contentVersion))
-		if err := c.storeManifest(ctx, v, accountID, ref, m.Items); err != nil {
+		k := keyOf(ref, rulesVersion)
+		if err := c.st.PutManifest(ctx, &store.Manifest{PackVersion: store.PackVersion{PackID: ref.PackID,
+			Commit: ref.Commit, RulesVersion: rulesVersion}, Items: m.Items}, c.now()); err != nil {
 			return err
+		}
+		// Read back what is stored: a manifest stored first by another connection wins.
+		ix, err := c.manifest(ctx, k)
+		if err != nil {
+			return err
+		}
+		if ix == nil {
+			return errors.New("content: stored manifest not found")
 		}
 		delete(owed, lower)
 		c.mu.Lock()
@@ -333,22 +220,6 @@ func (c *Catalog) Manifests(ctx context.Context, conn any, accountID uint64, ms 
 		c.mu.Unlock()
 	}
 	return nil
-}
-
-func (c *Catalog) storeManifest(ctx context.Context, v *version, accountID uint64, ref proto.PackRef,
-	items []proto.ManifestItem) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := c.load(ctx, v); err != nil {
-		return err
-	}
-	k := v.key.storeVersion()
-	if err := c.st.PutManifest(ctx, &store.Manifest{PackVersion: store.PackVersion{PackID: ref.PackID,
-		Commit: ref.Commit, ContentVersion: k.ContentVersion}, Hash: ref.ManifestHash, Items: items}, c.now()); err != nil {
-		return err
-	}
-	v.manifests[ref.ManifestHash] = newIndex(v.key.pack, items)
-	return c.vote(ctx, v, accountID, ref.ManifestHash)
 }
 
 // Forget drops the announcement of a closed connection.
@@ -382,69 +253,31 @@ func (c *Catalog) Announced(accountID uint64) (Announcement, bool) {
 	return best.ann, true
 }
 
-// announcedVersion returns the version of packID the account announced.
-func (c *Catalog) announcedVersion(accountID uint64, packID string) (*version, proto.PackRef, bool) {
+// announcedManifest returns the manifest of the version of packID the account announced; nil when the pack is not
+// announced or its manifest cannot be loaded (logged).
+func (c *Catalog) announcedManifest(accountID uint64, packID string) *index {
 	ann, ok := c.Announced(accountID)
 	if !ok {
-		return nil, proto.PackRef{}, false
+		return nil
 	}
 	ref, ok := ann.Pack(packID)
 	if !ok {
-		return nil, proto.PackRef{}, false
-	}
-	return c.version(keyOf(ref, ann.ContentVersion)), ref, true
-}
-
-// Differs reports whether the account's copy of packID differs from a majority backed by at least
-// StrikeThreshold accounts: such players cannot join anticheat lobbies with that pack.
-func (c *Catalog) Differs(accountID uint64, packID string) bool {
-	v, ref, ok := c.announcedVersion(accountID, packID)
-	if !ok {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
-	defer cancel()
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := c.load(ctx, v); err != nil {
-		c.log.Error("loading pack votes", "pack", v.key.pack, "err", err)
-		return false
-	}
-	maj, n := v.majority()
-	return maj != "" && n >= StrikeThreshold && maj != ref.ManifestHash
-}
-
-// deciding returns the manifest that decides what the account's version of packID contains: the catalog majority,
-// or the account's own manifest when there is no majority (a tie), so one tampered copy cannot block a pack
-// version while only two accounts reported it. nil when the pack is not announced or not loadable.
-func (c *Catalog) deciding(accountID uint64, packID string) *index {
-	v, ref, ok := c.announcedVersion(accountID, packID)
-	if !ok {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
 	defer cancel()
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := c.load(ctx, v); err != nil {
-		c.log.Error("loading pack votes", "pack", v.key.pack, "err", err)
-		return nil
-	}
-	hash, _ := v.majority()
-	if hash == "" {
-		hash = ref.ManifestHash
-	}
-	ix, err := c.manifest(ctx, v, hash)
+	ix, err := c.manifest(ctx, keyOf(ref, ann.RulesVersion))
 	if err != nil {
-		c.log.Error("loading manifest", "pack", v.key.pack, "hash", hash, "err", err)
+		c.log.Error("loading manifest", "pack", ref.PackID, "commit", ref.Commit, "err", err)
 		return nil
 	}
 	return ix
 }
 
-// Has reports whether (kind, id) is content of the account's version of packID (see deciding).
+// Has reports whether the manifest of the account's announced version of packID lists (kind, id). It implements
+// race.Catalog.
 func (c *Catalog) Has(accountID uint64, packID string, kind uint8, id string) bool {
-	ix := c.deciding(accountID, packID)
+	ix := c.announcedManifest(accountID, packID)
 	if ix == nil {
 		return false
 	}
@@ -452,9 +285,9 @@ func (c *Catalog) Has(accountID uint64, packID string, kind uint8, id string) bo
 	return ok
 }
 
-// Items lists the ids of one kind in the deciding manifest of the account's version of packID.
+// Items lists the ids of one kind in the manifest of the account's announced version of packID.
 func (c *Catalog) Items(accountID uint64, packID string, kind uint8) []string {
-	ix := c.deciding(accountID, packID)
+	ix := c.announcedManifest(accountID, packID)
 	if ix == nil {
 		return nil
 	}
@@ -484,10 +317,7 @@ func (c *Catalog) overrides(ctx context.Context, ann Announcement) ([]Override, 
 	var out []Override
 	var firstErr error
 	for _, ref := range ann.Packs {
-		v := c.version(keyOf(ref, ann.ContentVersion))
-		v.mu.Lock()
-		ix, err := c.manifest(ctx, v, ref.ManifestHash)
-		v.mu.Unlock()
+		ix, err := c.manifest(ctx, keyOf(ref, ann.RulesVersion))
 		if err != nil {
 			firstErr = cmp.Or(firstErr, err)
 			continue
@@ -506,10 +336,11 @@ func (c *Catalog) overrides(ctx context.Context, ann Announcement) ([]Override, 
 	return out, firstErr
 }
 
-// RunContent implements server.Content: conn may upload a run with these kart, character and track ids once its
-// announcement is complete, unless one of them is replaced by another pack there or its fingerprint differs from
-// the catalog majority of its pack version (backed by at least StrikeThreshold accounts).
-func (c *Catalog) RunContent(ctx context.Context, conn any, accountID uint64, kart, character, track string) error {
+// RunContent implements server.Content: conn may upload a run once its announcement is complete, for the rules
+// version it announced, when the manifest of the track's pack lists the track with a version up to the run's (a
+// variant adds its overlays' bumps to the track's version), the manifest of the kart's pack lists the kart with
+// exactly the run's version, and no other pack replaces the track, kart or character.
+func (c *Catalog) RunContent(ctx context.Context, conn any, accountID uint64, run server.RunContent) error {
 	c.mu.Lock()
 	st := c.conns[conn]
 	ready := st != nil && st.accountID == accountID && len(st.missing) == 0
@@ -521,12 +352,17 @@ func (c *Catalog) RunContent(ctx context.Context, conn any, accountID uint64, ka
 	if !ready {
 		return server.Errorf(proto.StatusBadRequest, "Your game hasn't sent its content yet. Try again in a moment.")
 	}
-	items := []proto.ManifestItem{{Kind: proto.ContentKart, ID: kart}, {Kind: proto.ContentCharacter, ID: character},
-		{Kind: proto.ContentTrack, ID: track}}
+	if run.RulesVersion != ann.RulesVersion {
+		return server.Errorf(proto.StatusForbidden,
+			"This run was recorded with other game rules (version %d, yours %d) and can't be uploaded.",
+			run.RulesVersion, ann.RulesVersion)
+	}
 	ovs, err := c.overrides(ctx, ann)
 	if err != nil {
 		return err
 	}
+	items := []proto.ManifestItem{{Kind: proto.ContentKart, ID: run.KartID},
+		{Kind: proto.ContentCharacter, ID: run.CharacterID}, {Kind: proto.ContentTrack, ID: run.TrackID}}
 	for _, it := range items {
 		for _, o := range ovs {
 			if o.Kind == it.Kind && strings.EqualFold(o.ID, it.ID) {
@@ -535,94 +371,45 @@ func (c *Catalog) RunContent(ctx context.Context, conn any, accountID uint64, ka
 			}
 		}
 	}
-	for _, it := range items {
-		pack, err := c.itemDiffers(ctx, ann, it.Kind, it.ID)
-		if err != nil {
-			return err
-		}
-		if pack != "" {
-			return server.Errorf(proto.StatusForbidden,
-				"Your copy of %s differs from other players' (%s). Runs with modified content can't be uploaded.",
-				pack, it.ID)
-		}
+	track, err := c.itemVersion(ctx, ann, proto.ContentTrack, run.TrackID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case track < 0:
+		return server.Errorf(proto.StatusForbidden, "Track %s isn't installed in your game.", run.TrackID)
+	case run.TrackVersion < track:
+		return server.Errorf(proto.StatusForbidden,
+			"This run was recorded on an older version of %s and can't be uploaded.", run.TrackID)
+	}
+	kart, err := c.itemVersion(ctx, ann, proto.ContentKart, run.KartID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case kart < 0:
+		return server.Errorf(proto.StatusForbidden, "Kart %s isn't installed in your game.", run.KartID)
+	case run.KartVersion != kart:
+		return server.Errorf(proto.StatusForbidden,
+			"This run was recorded with another version of %s and can't be uploaded.", run.KartID)
 	}
 	return nil
 }
 
-// itemDiffers returns the announced pack of (kind, id) when the announced copy has another fingerprint than the
-// catalog majority of that pack version backed by at least StrikeThreshold accounts (an item only one side lists
-// differs); "" otherwise.
-func (c *Catalog) itemDiffers(ctx context.Context, ann Announcement, kind uint8, id string) (string, error) {
+// itemVersion returns the version of (kind, id) in the announced manifest of its pack, -1 when it is not listed
+// there (or the pack is not announced).
+func (c *Catalog) itemVersion(ctx context.Context, ann Announcement, kind uint8, id string) (int32, error) {
 	ref, ok := ann.Pack(PackOf(id))
 	if !ok {
-		return "", nil
+		return -1, nil
 	}
-	v := c.version(keyOf(ref, ann.ContentVersion))
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := c.load(ctx, v); err != nil {
-		return "", err
+	ix, err := c.manifest(ctx, keyOf(ref, ann.RulesVersion))
+	if err != nil || ix == nil {
+		return -1, err
 	}
-	maj, n := v.majority()
-	if maj == "" || n < StrikeThreshold || maj == ref.ManifestHash {
-		return "", nil
-	}
-	mine, err := c.manifest(ctx, v, ref.ManifestHash)
-	if err != nil {
-		return "", err
-	}
-	theirs, err := c.manifest(ctx, v, maj)
-	if err != nil || mine == nil || theirs == nil {
-		return "", err
-	}
-	k := itemKey{kind, strings.ToLower(id)}
-	mfp, mok := mine.items[k]
-	tfp, tok := theirs.items[k]
-	if mok != tok || mfp != tfp {
-		return ref.PackID, nil
-	}
-	return "", nil
-}
-
-// PackCommit implements race.Catalog.
-func (c *Catalog) PackCommit(accountID uint64, packID string) string {
-	ann, ok := c.Announced(accountID)
+	v, ok := ix.items[itemKey{kind, strings.ToLower(id)}]
 	if !ok {
-		return ""
+		return -1, nil
 	}
-	ref, _ := ann.Pack(packID)
-	return ref.Commit
-}
-
-// InMajority implements race.Catalog with the same rule as Has.
-func (c *Catalog) InMajority(accountID uint64, packID string, kind uint8, id string) bool {
-	return c.Has(accountID, packID, kind, id)
-}
-
-// Strike implements race.Catalog: a race found the account's content disagreeing with the other racers.
-func (c *Catalog) Strike(accountID uint64, packID, reason string) {
-	k := &store.ContentStrike{AccountID: accountID, PackVersion: store.PackVersion{PackID: packID},
-		Reason: truncate(reason, 255), CreatedAt: c.now()}
-	if ann, ok := c.Announced(accountID); ok {
-		k.ContentVersion = ann.ContentVersion
-		if ref, ok := ann.Pack(packID); ok {
-			k.Commit, k.ManifestHash = ref.Commit, ref.ManifestHash
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
-	defer cancel()
-	if err := c.st.AddContentStrike(ctx, k, false); err != nil {
-		c.log.Error("storing content strike", "account", accountID, "pack", packID, "err", err)
-	}
-}
-
-// truncate cuts s to at most n bytes without splitting a UTF-8 sequence.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && s[n]&0xc0 == 0x80 {
-		n--
-	}
-	return s[:n]
+	return v, nil
 }

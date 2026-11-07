@@ -84,6 +84,24 @@ A malformed body (truncated, over a limit, invalid value) is answered with `BadR
 
 Push types use their own numbering in the same ranges (kind distinguishes them).
 
+## Versions and track variants
+
+- **Rules version** (`RulesVersion.Current`, `Hello.rulesVersion`): what every race shares (physics, race rules of
+  `GameConfig`, the kart root chassis). The game bumps it rarely; clients of different rules versions never race
+  together and their records never mix.
+- **Content versions**: race tracks, karts, battle arenas and track overlays carry a content version (int ≥ 1) that
+  their pack bumps when a change alters lap times for identical inputs. Pack manifests list those of tracks, arenas
+  and karts (see "Content agreement"); ghosts record the track's (the variant's, below) and the kart's (see "Time
+  trials"). Overlays and track options are not in the manifests: clients refuse uploads and lobbies themselves when
+  a mod replaces a variant's option or overlay (by id, or another pack's overlay for the same track and option).
+- **Variant keys**: a track variant is the set of options (direction, time of day, weather, … one per modifier)
+  that differ from the track's defaults, as option ids, lowercase, ordered by modifier order then modifier id, joined
+  by `+`; `""` is the track's default variant (examples: `core.reverse`, `core.night+core.rain`). A variant's
+  version is the track's content version plus the bumps of its selected overlays:
+  `track.contentVersion + Σ(overlay.contentVersion − 1)`. The server checks the syntax only, wherever a variant is
+  sent: empty, or 1–8 distinct tokens of 1–64 characters of `[a-z0-9_.-]` joined by `+`, at most 128 characters in
+  all (`string ≤ 128` on the wire). Which options a track offers is client content.
+
 ## Connection
 
 ### Hello (request 1)
@@ -93,15 +111,14 @@ Must be the first request of a connection; anything else first closes the connec
 | Field | Type | |
 | ------- | ------ | - |
 | magic | u32 | `0x4F4B484D` (bytes `M H K O`) |
-| protocol | u16 | **4** |
+| protocol | u16 | **5** |
 | gameCommit | string ≤ 40 | `BuildInfo.Commit` |
 | gameBuild | i32 | `BuildInfo.Number` |
-| contentVersion | i32 | `ContentVersion.Current` |
+| rulesVersion | i32 | `RulesVersion.Current` |
 | modApi | i32 | `ModSdk.ApiLevel` |
 | platform | string ≤ 32 | `Application.platform` name |
 
-The content version covers everything that decides race results: the game bumps it when physics, track geometry or
-content rules change. Boards, lobbies and content manifests are per content version.
+Lobbies, pack manifests and time-trial boards are per rules version (see "Versions and track variants").
 
 Response `HelloOk`:
 
@@ -196,8 +213,8 @@ Empty → empty. Revokes the session of this connection; the connection stays op
 - With `deleteRuns` the moved runs are also hidden as if a moderator had hidden them, with reason
   `Deleted by the player` and marked as deleted by their owner (`RunHiddenReason.deletedByOwner`). Moderators still
   see them and may unhide them.
-- Everything else of the account is deleted: sessions, score, achievements, reports, content votes and strikes,
-  cheat kicks. The moderation audit log keeps an entry "account deleted by the player" with the old username. The
+- Everything else of the account is deleted: sessions, score, achievements, reports, cheat kicks. The moderation
+  audit log keeps an entry "account deleted by the player" with the old username. The
   username is free again right away.
 - The account's other connections get push `Disconnect(SessionInvalid, "This account was deleted.")`; this
   connection stays open, logged out.
@@ -281,7 +298,6 @@ list of another length is invalid.
 | disabled | bool | moderators only, else false |
 | disabledReason | string ≤ 256 | moderators only, else `""` |
 | cheatKicks | u32 | moderators only, else 0 |
-| contentStrikes | u32 | moderators only, else 0 |
 | hiddenRuns | u32 | moderators only, else 0 |
 | flaggedRuns | u32 | runs with flags ≥ 1; moderators only, else 0 |
 | playtimes | list<u64> | one item: the player's playtime (see above) |
@@ -354,16 +370,18 @@ for the 2000 most unlocked achievements (most first, ties by id).
   the `playerName`/`playerId` inside the file, and runs show the account's current name (see `ChangeUsername`).
   Identified by `runId` (u64). The file's header `id` (32 hex) is unique across the server: the same account
   uploading it again gets the existing run back (`duplicate`), another account gets `Forbidden`.
-- **Board**: runs that are comparable: same `trackId` (case-insensitive), `engineClass` (0–2), `laps` and
-  `contentVersion`. A new content version is the only thing that starts a new board; older boards stay browsable
-  ("archived" in the client: any board whose `contentVersion` differs from the client's own). Runs keep their own
-  `trackHash`: a changed track hash (e.g. a mod tweaking racing lines) does not split the board.
-  A leaderboard lists **every visible run** on the board (an account may appear several times), fastest `finishMs`
+- **Versions** (see "Versions and track variants"): a ghost header records the run's `rulesVersion`, `trackVersion`
+  (the version of the run's track variant) and `kartVersion`.
+- **Board**: runs that are comparable: same `trackId` (case-insensitive), `trackVersion`, `variant`, `laps`,
+  `engineClass` (0–2) and `rulesVersion`. A new version of any of these starts a new board; older boards stay
+  browsable ("archived" in the client: a board whose versions differ from the client's installed content).
+- **Ranked runs**: a run is ranked when it is visible (not hidden, see below) and **current**: its `kartVersion` is
+  the highest `kartVersion` ever uploaded for its `kartId` (case-insensitive) on any board. Once a kart's new version
+  is uploaded, every run of an older version of that kart leaves leaderboards, ranks, personal bests and board
+  statistics for good (also for moderators); such runs stay downloadable and are listed by `MyRuns`/`PlayerRuns`
+  with `rank` 0 and `hidden` false. Uploads of an outdated kart version are accepted and never ranked.
+- A leaderboard lists **every ranked run** on the board (an account may appear several times), fastest `finishMs`
   first, ties by earlier upload, filtered as requested, ranked from 1.
-- **Setup mismatch**: `setupHash` covers kart physics, engine class and laps. For every
-  (`kartId`, `engineClass`, `laps`, `contentVersion`) the server counts distinct accounts per `setupHash`; a run whose
-  `setupHash` is not the one used by the most accounts (once ≥ 3 accounts uploaded for that key) is marked
-  `setupMismatch`. Display only; never hides anything.
 - **Flags**: game clients validate ghosts while they play back and report what they detect (`ReportRun`). `flags` =
   number of distinct accounts that reported the run. Reports from accounts that were ever kicked from a race for
   cheating, and reports on one's own run, are accepted and ignored. Nothing is hidden automatically. **Only
@@ -380,10 +398,17 @@ for the 2000 most unlocked achievements (most first, ties by id).
 
 Rejected with `BadRequest` and a message naming the problem when any check fails:
 
-- compressed size ≤ 8 MiB, inflated size ≤ 48 MiB (GZip), magic `MHKG`, format version 1, header and body block
-  lengths within the inflated data, no trailing garbage beyond the two blocks;
+- compressed size ≤ 8 MiB, inflated size ≤ 48 MiB (GZip), magic `MHKG`, format version (u16) **2** (any other
+  version is rejected), header and body block lengths within the inflated data, no trailing garbage beyond the two
+  blocks;
+- header fields, in order (strings are .NET `BinaryWriter` strings: 7-bit encoded byte length, UTF-8): `id` string,
+  `gameBuild` string, `rulesVersion` i32, `playerName` string, `playerId` string, `dateUtcTicks` i64, `trackId`
+  string, `trackPackId` string, `trackPackVersion` string, `trackVersion` i32, `variant` string, `kartId` string,
+  `kartVersion` i32, `characterId` string, `engineClass` i32, `engineClassLabel` string, `laps` i32, `tickSeconds`
+  f32, `speedScale` f32, `finishTime` f32, lap time count i32 + that many f32 `lapTimes`, `frameCount` i32;
 - header: `id` 32 hex chars; `trackId`, `trackPackId`, `kartId`, `characterId` 1–96 chars of `[A-Za-z0-9_.-]`;
-  `trackHash` and `setupHash` 32 hex chars; `engineClass` 0–2; `laps` 1–99 and equal to the lap time count;
+  `rulesVersion`, `trackVersion` and `kartVersion` ≥ 1; `variant` a valid variant key (see "Versions and track
+  variants"); `engineClass` 0–2; `laps` 1–99 and equal to the lap time count;
   `tickSeconds` within 1e-6 of 1/60 … 1/30 (any `1/n`, n = 30…240); `finishTime` > 0 and < 3 h; every lap time
   > 0; `sum(lapTimes) ≤ finishTime + 0.05 s` and the run-up from the grid to the first line crossing
   `finishTime − sum(lapTimes)` ≤ 60 s; `speedScale` finite and > 0; `frameCount` > 0,
@@ -394,19 +419,19 @@ Rejected with `BadRequest` and a message naming the problem when any check fails
 - the account uploaded ≤ 30 runs in the last hour (`RateLimited` otherwise).
 
 Then the uploading **connection's** content announcement (`ContentHello` plus every requested manifest, see
-"Content agreement") decides whether the run's `kartId`, `characterId` (kind 3) and `trackId` (kind 1) may be used.
-An upload of a ghost already stored for the same account answers `duplicate` before these checks.
+"Content agreement") decides whether the run's header values may be used. An upload of a ghost already stored for
+the same account answers `duplicate` before these checks. All refusals but the first are `Forbidden`:
 
 - The announcement is incomplete (no `ContentHello` on this connection yet, or manifests still owed): `BadRequest`
   "Your game hasn't sent its content yet. Try again in a moment." Clients announce first and retry.
-- One of the ids is **replaced** on this connection: an announced pack P lists an item of that kind and id whose
-  pack (`PackOf(id)`, the text before the first dot) is not P: `Forbidden` "This run uses <id> replaced by <P>. Runs
-  with modified content can't be uploaded."
-- The connection's **fingerprint** of one of the ids (from its manifest of `PackOf(id)`) differs from the one in the
-  catalog-majority manifest of the same (`packId`, `commit`, `contentVersion`), when that majority is backed by ≥ 3
-  accounts; an item listed on only one side differs: `Forbidden` "Your copy of <pack> differs from other players'
-  (<id>). Runs with modified content can't be uploaded." Packs the connection does not announce, versions without
-  such a majority, and ids without a dot are not checked.
+- The header `rulesVersion` differs from the announced one.
+- One of `kartId`, `characterId` (kind 3) and `trackId` (kind 1) is **replaced** on this connection: an announced
+  pack P lists an item of that kind and id whose pack (`PackOf(id)`, the text before the first dot) is not P ("This
+  run uses <id> replaced by <P>. Runs with modified content can't be uploaded.").
+- The announced manifest of `PackOf(trackId)` does not list the track, or lists it with a version **above** the
+  header `trackVersion` (a header version above the item's is fine: the variant's overlays add their bumps).
+- The announced manifest of `PackOf(kartId)` does not list the kart, or lists it with a version **other than** the
+  header `kartVersion`.
 
 These checks see what is enabled at upload time, not what the run was recorded with; viewers' ghost validation is
 the backstop for that.
@@ -419,20 +444,21 @@ the backstop for that.
 | ------- | ------ | - |
 | boardId | u64 | |
 | trackId | string ≤ 96 | |
+| trackVersion | i32 | |
+| variant | string ≤ 128 | variant key, `""` = default variant |
 | engineClass | u8 | |
 | laps | u8 | |
-| contentVersion | i32 | |
-| trackHash | string ≤ 32 | track hash of the newest visible upload, `""` when none |
-| players | u32 | accounts with a visible run |
-| bestMs | i32 | fastest visible finish, 0 when none |
-| lastUpload | time | 0 when none |
+| rulesVersion | i32 | |
+| players | u32 | accounts with a ranked run |
+| bestMs | i32 | fastest ranked finish, 0 when none |
+| lastUpload | time | newest ranked upload, 0 when none |
 
 `RunEntry`:
 
 | Field | Type | |
 | ------- | ------ | - |
 | runId | u64 | |
-| rank | u32 | position in the requested (filtered) leaderboard, elsewhere among the visible runs of its board; 0 when hidden |
+| rank | u32 | position in the requested (filtered) leaderboard, elsewhere among the ranked runs of its board; 0 when not ranked (hidden or outdated kart version) |
 | accountId | u64 | |
 | username | string ≤ 20 | |
 | country | string ≤ 2 | |
@@ -440,17 +466,21 @@ the backstop for that.
 | bestLapMs | i32 | |
 | lapMs | list<i32> ≤ 99 | |
 | kartId | string ≤ 96 | |
+| kartVersion | i32 | header `kartVersion` |
 | characterId | string ≤ 96 | |
 | ghostId | string ≤ 32 | header `id` |
 | recorded | time | header date |
 | uploaded | time | |
 | flags | u32 | distinct reporters; 0 unless the asking account is a moderator |
-| setupMismatch | bool | |
 | hidden | bool | only ever true for moderators |
 | fileSize | u32 | compressed bytes |
 | boardId | u64 | |
 | trackId | string ≤ 96 | the board's track |
 | engineClass | u8 | the board's engine class |
+| trackVersion | i32 | the board's track version |
+| variant | string ≤ 128 | the board's variant |
+| laps | u8 | the board's laps |
+| rulesVersion | i32 | the board's rules version |
 
 `LeaderboardFilter`:
 
@@ -467,21 +497,26 @@ A kart/character (or any other) filter narrows the list before ranking: ranks ar
 
 ### ListBoards (request 128)
 
-`trackId: string ≤ 96`, `engineClass: u8` (255 = any), `contentVersion: i32` (0 = any) → `list<BoardInfo> ≤ 200`,
-most recent upload first. No login needed.
+`trackId: string ≤ 96`, `engineClass: u8` (255 = any), `rulesVersion: i32` (0 = any), `variant: string ≤ 128`
+(`*` = any; anything else, `""` included, must be a valid variant key and matches exactly, `BadRequest` otherwise)
+→ `list<BoardInfo> ≤ 200`, most recent ranked upload first. No login needed.
 
 ### GetLeaderboard (request 129)
 
 `boardId: u64`, `offset: u32`, `limit: u16` (1–100), `filter: LeaderboardFilter` →
 `total: u32` (rows in the filtered list), `entries: list<RunEntry>`, `hasMine: bool`, then `mine: RunEntry` when
-`hasMine` (the logged-in account's best visible run matching the filter, with its rank). No login needed.
+`hasMine` (the logged-in account's best ranked run matching the filter, with its rank). No login needed.
+`includeHidden` adds hidden runs of current kart versions with rank 0; runs of outdated kart versions never appear.
 
 ### UploadRun (request 130)
 
-`file: bytes ≤ 8 MiB` → `run: RunEntry` (rank among the visible runs of its unfiltered board), `personalBest: bool`
-(the run is now the account's best visible run on its board), `duplicate: bool`. Needs login and the connection's
+`file: bytes ≤ 8 MiB` → `run: RunEntry` (rank among the ranked runs of its unfiltered board), `personalBest: bool`
+(the run is now the account's best ranked run on its board), `duplicate: bool`. The run is filed under the board of
+its header's (`trackId`, `trackVersion`, `variant`, `laps`, `engineClass`, `rulesVersion`); a `kartVersion` above
+the highest seen for the kart makes the older versions' runs outdated. Needs login and the connection's
 complete content announcement. Errors (see "Upload validation"): `BadRequest` (invalid file, content not announced
-yet), `Forbidden` (ghost id uploaded by another account, run uses modified content), `RateLimited`.
+yet), `Forbidden` (ghost id uploaded by another account, other rules version, content not installed, other
+version or modified), `RateLimited`.
 
 ### DownloadRun (request 131)
 
@@ -507,7 +542,7 @@ hidden ones included with `hidden` set), so the client can mark local ghosts as 
 
 `accountId: u64`, `offset: u32`, `limit: u16` (1–100) → `total: u32`, `list<RunEntry>`: the account's visible runs
 on every board (moderators: hidden ones too, with `hidden` set), newest upload first; `rank` is the run's position
-among the visible runs of its board, 0 for hidden runs. `NotFound` when the account is unknown, or disabled or
+among the ranked runs of its board, 0 for hidden runs and outdated kart versions. `NotFound` when the account is unknown, or disabled or
 anonymous for a non-moderator. No login needed.
 
 ### RunHiddenReason (request 135)
@@ -586,7 +621,7 @@ accounts. `reason` is shown to the affected player where applicable.
 | AI host: implausible `AiStates` | 15 rejected states within 5 s → the AI karts go to another human, the host gets a strike (once per 5 s while nobody can take over) |
 | AI host: cheat reports about AI karts | within 15 s, distinct eligible reporters other than the host ≥ max(2, ⌈eligible observers of the host / 2⌉), over all AI karts → the AI karts go to another human, the host gets a strike |
 | projectile outlier | > max(4 m, 3 × median absolute deviation) from the component-wise median, ≥ 3 reporters; never for an AI kart's projectile (corrected only) |
-| unknown content | ≥ 2 distinct reporters about racer X → X leaves the race; exactly 1 reporter → the reporter leaves the race (desync); neither counts as cheating unless the item is absent from the catalog majority of X's pack version (fabricated) |
+| unknown content | ≥ 2 distinct reporters about racer X → X leaves the race; exactly 1 reporter → the reporter leaves the race (desync); neither counts as cheating unless the item is absent from the stored manifest of X's announced pack version (fabricated) |
 
 Hit claims and unknown-content reports about an AI slot are ignored; cheat reports about one count against the AI
 host.
@@ -594,24 +629,20 @@ host.
 ### Content agreement
 
 Clients describe the gameplay content of every enabled mod pack as a **pack manifest**: `packId`, `commit`
-(`ContentPack.version`) and the sorted list of items `(kind, id, fingerprint)` the pack registers, where the
-fingerprint covers the item's gameplay-relevant data (visuals and sounds excluded) of the **effective** definition
-(after load-order overrides). Kinds: 1 race track (definition data; geometry is hashed at race load), 2 kart,
-3 character, 4 powerup, 5 status effect, 6 cup, 7 battle arena (a track with the arena layout). `manifestHash` = 32 hex
-chars, SHA-256/128 over the canonical item list. A fingerprint names referenced content (a character's special
-powerup and default kart, a cup's tracks) by its declared id, also when that content's pack is not installed, so a
-pack's manifest does not depend on which other packs are installed. Votes for Random draw a random race track (race
-lobbies) or arena (battle lobbies) of the lobby's packs from the catalog-majority manifests.
+(`ContentPack.version`), the client's `rulesVersion` and the items `(kind, id, version)` the pack registers, by the
+**effective** definition (after load-order overrides). Kinds: 1 race track, 2 kart, 3 character, 4 powerup,
+5 status effect, 6 cup, 7 battle arena (a track with the arena layout). `version` is the item's content version: ≥ 1
+for race tracks, karts and arenas (see "Versions and track variants"), 0 for the other kinds. The built-in `game`
+pack is announced like any other pack, with the game build's commit as its `commit`; lobbies do not list it but its
+items are lobby content.
 
-For each (`packId`, `commit`, `contentVersion`) the server keeps which `manifestHash` each account reported; the
-**catalog majority** is the hash reported by the most distinct accounts (a tie means no majority: then each client's
-own manifest decides what it may select, without strikes). Nothing is decided by the first report. A
-client whose hash differs from a majority backed by ≥ 3 accounts gets a content strike (stored, shown to
-moderators) and cannot join anticheat lobbies with that pack, nor with the `game` pack ("Your copy of <pack> differs
-from other players'."). The catalog keeps every item's fingerprint, so time-trial uploads compare single items
-against that majority ("Upload validation"). The built-in `game` pack is announced like any other pack, with the
-game build's commit as its `commit` (builds before 2026-11 sent `""`); lobbies do not list it but its items are lobby
-content.
+The server stores **one manifest per (`packId`, `commit`, `rulesVersion`)**: the first one a client sends is kept and
+decides for everybody announcing that pack version (ids and commits compare case-insensitively). `ContentHello`
+announces `(packId, commit)` pairs; the server answers with the pack ids whose manifests it does not hold yet, and the
+client sends those (`ContentManifests`). Manifests nobody asked for are ignored. Lobby requests need a complete
+announcement (`BadRequest` "content not announced" otherwise); the latest complete announcement of an account counts
+for its lobby and race checks. Votes for Random draw a random race track (race lobbies) or arena (battle lobbies) of
+the lobby's packs that the manifests of every racing human list.
 
 **Overrides**: an announced pack P **replaces** every item it lists whose id belongs to another pack
 (`PackOf(id)` ≠ P): by load order P's definition is the effective one. The server derives these from the announced
@@ -620,19 +651,16 @@ manifests.
 A lobby's **content** = the items of its packs (plus the built-in `game` pack). Rules for joining (`JoinLobby`,
 `QuickJoin`, `CreateRoom`, a member's `SetLoadout`, every member on `UpdateRoom`), in every lobby:
 
-- the lobby's `contentVersion`; every pack of it enabled (extra packs are fine; their items are not selectable
+- the lobby's `rulesVersion`; every pack of it enabled (extra packs are fine; their items are not selectable
   there);
 - no announced pack replaces an item of a lobby pack or of `game`: `BadRequest` "<P> replaces content of this lobby
   (<id>[, …][ and N more]). Everybody must race with the same content: disable it on the Mods screen to join." (the
   client checks the same before joining).
 
-Anticheat lobbies additionally require identical content:
-
-- no lobby pack and not `game` differing from a catalog majority backed by ≥ 3 accounts (`Forbidden`, see above);
-- the lobby's **content set**, the `manifestHash` of each lobby pack and of `game`, equals the member's announced
-  hashes: `Forbidden` "Your version of <pack> differs from this lobby's (update your mods or pick another lobby)."
-  Public instances have the content set they are keyed by; a private room's is its owner's at creation (and at each
-  `UpdateRoom`) and stays when ownership passes.
+Anticheat lobbies additionally require identical content: the lobby's **content set**, the `commit` of each lobby
+pack and of `game`, equals the member's announced commits (case-insensitive): `Forbidden` "Your version of <pack>
+differs from this lobby's (update your mods or pick another lobby)." Public instances have the content set they are
+keyed by; a private room's is its owner's at creation (and at each `UpdateRoom`) and stays when ownership passes.
 
 ### Public lobby categories (u8)
 
@@ -653,21 +681,23 @@ Anticheat lobbies additionally require identical content:
 Categories 11–20 are the AI versions of 1–10 (same mode, packs and anticheat; names end in "+ AI"): `maxAi` =
 `maxPlayers` − 1, so AI karts fill every slot no human takes (2 humans in a 10-kart lobby race 8 AI).
 
-Instances exist per (category, `contentVersion`) and, in anticheat categories, per content set (the manifest hashes
-of the category's packs and of `game`): `ListLobbies` and `QuickJoin` use the caller's, so players with different
+Instances exist per (category, `rulesVersion`) and, in anticheat categories, per content set (the commits of the
+category's packs and of `game`): `ListLobbies` and `QuickJoin` use the caller's, so players with different
 versions of a pack race in different instances. Per key there is always one instance with a free slot; when all are
 full a new one opens; an empty instance closes while another one of its key has room. Public lobbies hold
 **10 players**, race at **150cc** (engine class 2), track laps, items on with default odds. Flow, while at least
 **two humans** are in the lobby (**one** in AI categories): **Voting** (20 s or until everyone voted: each player
-votes a track/arena or Random; one vote is drawn at random) → Loading → Countdown → Racing → Results (10 s) → after
+votes a track/arena with a variant key, or Random; one vote is drawn at random and races in its variant, Random
+races a random lobby track in its default variant) → Loading → Countdown → Racing → Results (10 s) → after
 **4 races** SetResults (15 s, points reset, the AI drivers are drawn again) → Voting. Otherwise the lobby waits
 (phase Waiting, nothing starts by itself). Players joining during a race wait for the next one. Points per race by
 position (AI karts included): 15, 12, 10, 8, 7, 6, 5, 4, 3, 2 for places 1–10, 1 for every later finished place
 (DNF 0); battles rank survivors by health, then eliminated racers by reverse elimination order.
 
 **Alone in a lobby without AI**: the lone member of a waiting public lobby of categories 1–10 may start a **solo
-race** (`StartRace`, own track pick or `""` = random lobby track) against **6 AI drivers**. A solo race is outside
-the set: no points (`RaceResultRow.points` 0), the set does not advance (`RaceSetup.setRace`/`setSize` 0) and no
+race** (`StartRace`, own track and variant pick, or `""` = random lobby track in its default variant) against
+**6 AI drivers**. A solo race is outside the set: no points (`RaceResultRow.points` 0), the set does not advance
+(`RaceSetup.setRace`/`setSize` 0) and no
 results phase follows. Whenever exactly one human races (a solo race, a private room's owner alone, the lone player
 of an AI lobby) and someone joins the lobby, the server tells that racer (`SoloRaceJoinWaiting`) and the racer may
 end the race early (`EndRaceEarly`: every kart still driving is DNF); afterwards the lobby carries on as after any
@@ -677,14 +707,17 @@ race.
 
 Created by a player with `RoomSettings`; joined by **code** (6 chars of `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`) or link
 `mhkos://join/<code>`. The owner changes settings while waiting, starts races (also alone: against the room's AI,
-or alone without AI; these races belong to the set), may kick members. When the owner leaves, the longest-present
-member becomes owner; an empty room closes. Joining follows the content rules above (anticheat rooms: the room's
-content set).
+or alone without AI; these races belong to the set), may kick members. In owner-pick rooms the owner's `StartRace`
+names the track and its variant (`""` draws a random lobby track in its default variant). When the owner leaves, the
+longest-present member becomes owner; an empty room closes. Joining follows the content rules above (anticheat
+rooms: the room's content set).
 
 **Championship rooms** (`mode` 2) race either a cup (`cupId`, the owner's client starts the cup's tracks in order)
 or a **custom track list** (`cupId` `""`, `trackIds`: 1–35 race tracks of the room's content, duplicates allowed,
 in race order). The set is the list: `racesPerSet` = the track count (the server sets it), and race n of the set
 runs `trackIds[n − 1]`: the owner's `StartRace` names that track or sends `""`, any other track is `BadRequest`.
+Championships and owner cups race every track in its default variant: a `StartRace` with a variant there is
+`BadRequest`.
 
 **Owner cups**: in a race room where the owner picks (`mode` 0, `trackPick` 0) the owner may start a **cup** instead
 of a single track while the room waits between sets (`setRace` 0): `StartCup` names a cup of the room's content and
@@ -706,7 +739,7 @@ content, no or more than 16 tracks, nobody with a loadout.
 - **Drivers**: the lobby keeps its AI drivers for a whole set (`LobbyState.aiDrivers`), so the same drivers race
   every race of the set and collect set points. A race uses the first n drivers; when it needs more than the set has
   (a new set starts with none), the server draws more: the character from the characters that are lobby content and
-  that the catalog lists for every racing human (the deciding manifests of the lobby packs and `game`, ids sorted
+  that the catalog lists for every racing human (the announced manifests of the lobby packs and `game`, ids sorted
   ordinally), shuffled by the server RNG with characters no racing human chose first, repeating when there are more
   AI than characters; the kart a uniform random draw from the karts of that common content (any driver on any kart,
   as the game's `AiRoster`). A driver whose character or kart is not common content of a race's humans is drawn
@@ -804,7 +837,7 @@ content, no or more than 16 tracks, nobody with a loadout.
 | players | u8 | humans in the lobby |
 | maxPlayers | u8 | |
 | phase | u8 | 0 Waiting, 1 Voting, 2 Loading, 3 Countdown, 4 Racing, 5 Results, 6 SetResults |
-| contentVersion | i32 | |
+| rulesVersion | i32 | |
 | engineClass | u8 | 0–2 |
 | setRace | u8 | as `LobbyState.setRace` |
 | setSize | u8 | as `LobbyState.setSize` |
@@ -839,8 +872,9 @@ content, no or more than 16 tracks, nobody with a loadout.
 | phaseEnds | time | 0 = no timer |
 | setRace | u8 | 1-based race number in the set, 0 between sets |
 | setSize | u8 | races of the set: `racesPerSet` (4 in public lobbies), a running owner cup's track count |
-| votes | list<(accountId: u64, trackId: string ≤ 96)> ≤ 50 | `""` = Random |
+| votes | list<(accountId: u64, trackId: string ≤ 96, variant: string ≤ 128)> ≤ 50 | `trackId` `""` = Random (variant `""`) |
 | trackId | string ≤ 96 | drawn/current track, `""` before the draw |
+| variant | string ≤ 128 | variant key of `trackId` (`""` = the track's default) |
 | raceId | u64 | current race, 0 = none |
 | lastResults | list<RaceResultRow> ≤ 50 | of the previous race, for the results phases |
 | aiDrivers | list<AiDriver> ≤ 49 | the set's AI drivers in grid order (see "AI drivers"); empty between sets |
@@ -857,15 +891,15 @@ content, no or more than 16 tracks, nobody with a loadout.
 
 | Type | Name | Request | Response |
 |------|------|---------|----------|
-| 256 | ContentHello | `contentVersion: i32`, `packs: list<(packId: string ≤ 64, commit: string ≤ 40, manifestHash: string ≤ 32)> ≤ 64` | `missing: list<string ≤ 32> ≤ 64` (manifest hashes the server wants), `strikes: list<(packId: string ≤ 64, message: string ≤ 256)> ≤ 64` (packs that differ from the catalog majority) |
+| 256 | ContentHello | `rulesVersion: i32` (must equal the Hello's), `packs: list<(packId: string ≤ 64, commit: string ≤ 40)> ≤ 64` | `missing: list<string ≤ 64> ≤ 64` (ids of the announced packs whose manifests the server wants) |
 | 257 | ContentManifests | `list<PackManifest> ≤ 64` | empty |
 
-`PackManifest`: `packId: string ≤ 64`, `commit: string ≤ 40`, `contentVersion: i32`, `manifestHash: string ≤ 32`,
-`items: list<(kind: u8, id: string ≤ 96, fingerprint: string ≤ 32)> ≤ 4096`. The server recomputes the hash from
-the items (canonical form: items sorted by kind ascending, then by the lowercased id (ASCII; ids are 1–96 characters
-of `[A-Za-z0-9_.-]`) in ordinal byte order; for each the UTF-8 text `<kind>\n<id lowercase>\n<fingerprint>\n`;
-SHA-256, first 16 bytes as lowercase hex; hashes compare case-insensitively) and rejects a mismatch, or two items with
-the same kind and lowercased id, with `BadRequest`.
+`PackManifest`: `packId: string ≤ 64`, `commit: string ≤ 40`, `rulesVersion: i32`,
+`items: list<(kind: u8, id: string ≤ 96, version: i32)> ≤ 4096`. The server takes a manifest only when it asked for
+it (same pack id, commit and rules version as announced); invalid items are `BadRequest`: kind 0, an id that is not
+1–96 characters of `[A-Za-z0-9_.-]`, two items with the same kind and lowercased id, a version below 1 for kinds 1,
+2 and 7 or below 0 for the others. ContentHello errors (`BadRequest`): a pack id that is not 1–64 characters of
+`[A-Za-z0-9_-]`, a commit with control characters, a pack announced twice.
 
 ContentHello must succeed (and any requested manifests be sent) before lobby requests; lobby requests before it
 answer `BadRequest` "content not announced". Needs login.
@@ -874,7 +908,7 @@ answer `BadRequest` "content not announced". Needs login.
 
 | Type | Name | Request | Response |
 | ------ | ------ | --------- | ---------- |
-| 258 | ListLobbies | empty (uses the connection's `contentVersion`) | `list<LobbySummary> ≤ 500` (public instances of every category, of the caller's content set in anticheat categories; joinable private rooms are not listed) |
+| 258 | ListLobbies | empty (uses the connection's `rulesVersion`) | `list<LobbySummary> ≤ 500` (public instances of every category, of the caller's content set in anticheat categories; joinable private rooms are not listed) |
 | 259 | JoinLobby | `lobbyId: u64`, `code: string ≤ 8` (one of them; code wins when non-empty) | `LobbyState` |
 | 260 | QuickJoin | `category: u8` | `LobbyState` (the fullest public instance with room, of the caller's content set in anticheat categories) |
 | 261 | CreateRoom | `RoomSettings` | `LobbyState` |
@@ -882,16 +916,16 @@ answer `BadRequest` "content not announced". Needs login.
 | 263 | LeaveLobby | empty | empty |
 | 264 | SetLoadout | `characterId: string ≤ 96`, `kartId: string ≤ 96` | empty (must be lobby content; choosing anything also re-applies the content rules of joining) |
 | 265 | SetReady | `ready: bool` | empty |
-| 266 | Vote | `trackId: string ≤ 96` (`""` = Random) | empty (Voting phase, lobby content) |
-| 267 | StartRace | `trackId: string ≤ 96` (a solo race on that track, `""` = random lobby track; private rooms: the track in owner-pick rooms (`""` = random, championships with a cup must name the cup's next track), `""` in vote rooms (opens the voting), the listed track or `""` in custom-list championships and during an owner cup) | empty (owner of a private room, also alone; the lone member of a waiting public lobby without AI) |
+| 266 | Vote | `trackId: string ≤ 96` (`""` = Random), `variant: string ≤ 128` (variant key; `""` for Random) | empty (Voting phase, lobby content; an invalid variant key or a variant with Random is `BadRequest`) |
+| 267 | StartRace | `trackId: string ≤ 96`, `variant: string ≤ 128` (a solo race on that track and variant, `""` = random lobby track; private rooms: the track and variant in owner-pick rooms (`""` = random, championships with a cup must name the cup's next track), `""` in vote rooms (opens the voting), the listed track or `""` in custom-list championships and during an owner cup; variant `""` with a random track, in championships and during an owner cup) | empty (owner of a private room, also alone; the lone member of a waiting public lobby without AI) |
 | 268 | EndRaceEarly | empty | empty (the only human racer of the current race) |
 | 269 | KickMember | `accountId: u64`, `reason: string ≤ 256` | empty. Both kicks remove the member from the lobby for 10 min and, during a race, from the race (`PlayerLeftRace`). Room owners kick within their private room (outcome left); moderators kick anywhere (outcome kicked: moderator; audit-logged) |
 | 270 | StartCup | `cupId: string ≤ 96`, `trackIds: list<string ≤ 96> ≤ 16` (the cup's tracks in race order) | empty (owner of a waiting owner-pick race room between sets: starts the cup's first race, the set is the cup; see "Owner cups") |
 
 Join errors: `NotFound`, `Forbidden` (full, kicked from this lobby in the last 10 min, or in an anticheat lobby a
-pack differing from the catalog majority or from the lobby's content set; message says which), `BadRequest` (missing
-packs: message lists them; a mod replaces lobby content: message names it; `contentVersion` differs: message says to
-update). A player is in at most one lobby; joining another leaves the first without a `LobbyLeft` push (the join
+pack commit differing from the lobby's content set; message says which), `BadRequest` (missing packs: message lists
+them; a mod replaces lobby content: message names it; `rulesVersion` differs: message says to update). A player is
+in at most one lobby; joining another leaves the first without a `LobbyLeft` push (the join
 answer replaces the state).
 
 ### Lobby pushes
@@ -932,6 +966,7 @@ Server → client pushes:
 | raceId | u64 | |
 | lobbyId | u64 | |
 | trackId | string ≤ 96 | |
+| variant | string ≤ 128 | variant key to load (`""` = the track's default) |
 | mode | u8 | 0 race, 1 battle |
 | engineClass | u8 | |
 | laps | u8 | 0 = track default |
@@ -972,7 +1007,9 @@ the kart the notify is about: 255 = the sender's own kart, an AI slot from the A
 | 537 | BridgeTrigger | `raceId: u64`, `bridgeId: u16`, `tick: u32` |
 | 538 | ProjectileGone | `raceId: u64`, `useId: u32`, `tick: u32` |
 
-`RaceLoaded`: `raceId: u64`, `trackHash: string ≤ 32`, `laps: u8` (laps of this race, resolved from the track default when `RaceSetup.laps` is 0), `boxes: list<ItemBoxInfo> ≤ 512`,
+`RaceLoaded`: `raceId: u64`, `trackVersion: i32` (version of the loaded track variant, see "Versions and track
+variants"), `variant: string ≤ 128` (the variant key loaded), `laps: u8` (laps of this race, resolved from the track
+default when `RaceSetup.laps` is 0), `boxes: list<ItemBoxInfo> ≤ 512`,
 `pool: list<PoolEntry> ≤ 128`, `specials: list<(slot: u8, powerupId: string ≤ 96)> ≤ 50` (the special powerup of
 each racer's character, AI included, that is lobby content; a special of another pack, e.g. a cross-pack reference
 resolved only where that pack is installed, is left out), `rules: ItemRules`, `effects: list<string ≤ 96> ≤ 1024`
@@ -990,10 +1027,10 @@ resolved only where that pack is installed, is left out), `rules: ItemRules`, `e
 
 The server first drops every `specials` entry whose powerup id's pack (the part before the first `.`) is neither
 one of the lobby's packs nor `game`, so clients with more packs installed agree with the others. It then takes the
-majority of `trackHash`, `laps`, `boxes`, `pool`, `specials`, `rules`, `effects` (compared as
-canonical hashes) among the racers; racers that differ leave the race (`PlayerLeftRace`, outcome desync) and, when
-their pack commit equals the majority's, get a content strike. A racer that did not send `RaceLoaded` within 45 s
-leaves the race. The server then sends `RaceGo` with GO = now + 3.5 s.
+majority of `trackVersion`, `variant`, `laps`, `boxes`, `pool`, `specials`, `rules`, `effects` (compared as
+canonical hashes) among the racers; racers that differ leave the race (`PlayerLeftRace`, outcome desync). Without a
+strict majority (a tie) nobody leaves and everybody races with the lowest grid slot's content. A racer that did not
+send `RaceLoaded` within 45 s leaves the race. The server then sends `RaceGo` with GO = now + 3.5 s.
 
 Item roll: position fraction f = (position − 1) / (karts − 1) over every kart still in the race, AI included,
 ranked by the latest `raceDistance`s (humans from their states, AI from `AiStates`; finished karts in finish
@@ -1033,7 +1070,7 @@ datagrams (latest valid one wins).
 | rot | 4 × i16 | quaternion components × 32767, renormalised by the receiver |
 | vel | 3 × i16 | cm/s |
 | keys | u8 | `GhostInputKeys` bits |
-| flags | u8 | bit 0 cut (teleport/respawn since the previous state), 1 controls enabled, 2 finished, 3 eliminated, 4 intangible, 5 airborne, 6 look back |
+| flags | u8 | bit 0 cut (teleport/respawn since the previous state), 1 controls enabled, 2 finished, 3 eliminated, 4 intangible, 5 airborne, 6 look back, 7 headlights on |
 | steer | i8 | steer angle / max × 127 (visual) |
 | lap | u8 | |
 | raceDistance | f32 | metres along the race (ranking) |

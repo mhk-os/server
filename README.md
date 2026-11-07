@@ -3,8 +3,8 @@
 The online backend of Moorhuhn Kart: Open Source (MHK:OS): player accounts, time-trial leaderboards with ghost
 upload and download, in-game moderation, and real-time multiplayer (public lobbies, private rooms, races over UDP).
 Clients speak a small binary protocol over one TCP (or TLS) connection plus UDP during races, specified in
-[docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run reports, content manifests and votes,
-content strikes, cheat kicks, cheat reports and the moderation audit log live in MariaDB (10.11+); the ghost files
+[docs/protocol.md](docs/protocol.md). Accounts, sessions, boards, runs, run reports, content manifests, cheat kicks,
+cheat reports and the moderation audit log live in MariaDB (10.11+); the ghost files
 themselves live in the data directory. Lobbies and races live in the server's memory: a restart ends them.
 
 ## Quick start
@@ -37,19 +37,19 @@ The compose MariaDB creates the `mhk_test` database for the integration tests on
 `cmd/mhk-bot` joins a lobby and races by replaying a ghost, to test the game against remote karts:
 
 ```sh
-go run ./cmd/mhk-bot dump-manifests -dsn "$MHK_DB_DSN" -content-version 4 -out packs.json game mhk2 mhk3 mhke mhkt
+go run ./cmd/mhk-bot dump-manifests -dsn "$MHK_DB_DSN" -rules-version 1 -out packs.json game mhk2 mhk3 mhke mhkt
 go run ./cmd/mhk-bot -manifests packs.json -ghost run.mhkghost -user bot -pass kart-racer-2026 -join ABC234 -n 3
 ```
 
-`dump-manifests` writes the pack manifests players reported most for that `contentVersion` (the game must have
-announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` (1–20; 11–20 are the AI versions
+`dump-manifests` writes the pack manifests the server stored most recently for that `rulesVersion` (the game must
+have announced them once); the bot announces them in `ContentHello`. `-quick CATEGORY` (1–20; 11–20 are the AI versions
 of 1–10) joins a public lobby instead of
 a room code, `-n` starts that many bots (`bot1` … `bot3`, registered when missing), `-character`/`-kart` default to
 the ghost's, and `-platform NAME` sets the Hello platform (a Unity `RuntimePlatform` name such as `Android` or
 `WindowsPlayer`; default `mhk-bot`, an unknown device) to test device icons. Bots ping over TCP every 15 s
-(`-keepalive`) so the idle timeout never drops them during UDP-only races. They vote for the ghost's track (else
-Random), drive the ghost's path from GO, send `Finished` at its finish time and never use items. They cannot know the
-track data, so each sends a unique `RaceLoaded` hash: with
+(`-keepalive`) so the idle timeout never drops them during UDP-only races. They vote for the ghost's track and variant
+(else Random), drive the ghost's path from GO, send `Finished` at its finish time and never use items. They cannot
+know the track data, so each sends a `RaceLoaded` with a unique track version below 1 (which no game sends): with
 one human (or bots only) nobody has a content majority and everybody races with the lowest grid slot's content
 (when that is a bot, the server knows no item boxes and denies the human's pickups); with two or more humans the
 bots leave as desync. `-loaded FILE` (the hex of a `RaceLoaded` body a game client sent on the track the races use)
@@ -114,7 +114,6 @@ mhk-server admin run delete <id> --yes                                          
 mhk-server admin run reports <id>
 mhk-server admin board list [--track T]
 mhk-server admin audit [--limit N]
-mhk-server admin content strikes [--account U] [--limit N]                       # copies differing from the majority
 mhk-server admin kicks [--account U] [--limit N]                                 # race kicks for cheating
 mhk-server admin cheat-reports [--account U] [--limit N]                         # every race cheat report, by or about U
 ```

@@ -37,7 +37,6 @@ type Profile struct {
 	TTBoards       uint32 // boards with such a run
 	TTBestRank     uint32 // best board rank, 0 = none (always 0 while disabled)
 	CheatKicks     uint32
-	ContentStrikes uint32
 	HiddenRuns     uint32 // runs hidden by a moderator
 	FlaggedRuns    uint32 // runs with at least one counted report
 }
@@ -180,12 +179,11 @@ func (s *Store) Profile(ctx context.Context, id uint64) (*Profile, error) {
 		(SELECT COUNT(*) FROM runs WHERE account_id = a.id AND hidden_at IS NULL),
 		(SELECT COUNT(DISTINCT board_id) FROM runs WHERE account_id = a.id AND hidden_at IS NULL),
 		(SELECT COUNT(*) FROM cheat_kicks WHERE account_id = a.id),
-		(SELECT COUNT(*) FROM content_strikes WHERE account_id = a.id),
 		(SELECT COUNT(*) FROM runs WHERE account_id = a.id AND hidden_at IS NOT NULL),
 		(SELECT COUNT(*) FROM runs WHERE account_id = a.id AND flags > 0)
 		FROM accounts a WHERE a.id = ?`, id),
 		&p.Listed, &p.DisabledReason, &p.Races, &p.Wins, &p.Podiums, &p.TTRuns, &p.TTBoards, &p.CheatKicks,
-		&p.ContentStrikes, &p.HiddenRuns, &p.FlaggedRuns)
+		&p.HiddenRuns, &p.FlaggedRuns)
 	if err != nil {
 		return nil, err
 	}
@@ -198,14 +196,14 @@ func (s *Store) Profile(ctx context.Context, id uint64) (*Profile, error) {
 	return &p, nil
 }
 
-// bestBoardRank returns the account's best rank over every board it has a visible run on, ranked as rankOnBoards
-// does: every visible run of the board, fastest first, ties by earlier upload.
+// bestBoardRank returns the account's best rank over every board it has a visible run on, ranked as decorate does:
+// every ranked run (visible, current kart version) of the board, fastest first, ties by earlier upload.
 func (s *Store) bestBoardRank(ctx context.Context, accountID uint64) (uint32, error) {
 	var rank uint32
 	err := s.db.QueryRowContext(ctx, `WITH vis AS (
 			SELECT r.id, r.board_id, r.account_id, r.finish_ms, r.uploaded_at
 			FROM runs r JOIN accounts a ON a.id = r.account_id
-			WHERE r.board_id IN (SELECT board_id FROM runs WHERE account_id = ? AND hidden_at IS NULL) AND `+visible+`
+			WHERE r.board_id IN (SELECT board_id FROM runs WHERE account_id = ? AND hidden_at IS NULL) AND `+rankedRun+`
 		), ranks AS (
 			SELECT account_id, ROW_NUMBER() OVER (PARTITION BY board_id ORDER BY `+rankOrder+`) AS rnk
 			FROM vis

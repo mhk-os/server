@@ -2,8 +2,6 @@ package content
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"slices"
 	"strings"
@@ -19,61 +17,34 @@ import (
 
 var _ race.Catalog = (*Catalog)(nil)
 
-func TestManifestHashCanonicalForm(t *testing.T) {
-	items := []proto.ManifestItem{
-		{Kind: proto.ContentTrack, ID: "mhk2.Rome", Fingerprint: "ab"},
-		{Kind: proto.ContentKart, ID: "mhk2.kart", Fingerprint: "cd"},
-		{Kind: proto.ContentTrack, ID: "mhk2.alps", Fingerprint: "ef"},
-	}
-	// Sorted by kind, then lowercase id; ids lowercased, fingerprints as given.
-	canonical := "1\nmhk2.alps\nef\n1\nmhk2.rome\nab\n2\nmhk2.kart\ncd\n"
-	sum := sha256.Sum256([]byte(canonical))
-	want := hex.EncodeToString(sum[:16])
-	if want != "0cf67de748fbeb1d772512d45c3b24af" {
-		t.Fatalf("pinned hash changed: %s", want)
-	}
-	got, err := ManifestHash(items)
-	if err != nil || got != want {
-		t.Fatalf("ManifestHash = %s, %v; want %s", got, err, want)
-	}
-	slices.Reverse(items)
-	if got2, _ := ManifestHash(items); got2 != want {
-		t.Fatal("hash depends on item order")
-	}
-	if empty, _ := ManifestHash(nil); empty != "e3b0c44298fc1c149afbf4c8996fb924" {
-		t.Fatalf("empty manifest hash %s", empty)
-	}
-	// The order uses the lowercased id: "p.AC" sorts before "p.ab" bytewise but after it lowercased.
-	a, _ := ManifestHash(items2(it(1, "p.AC", ""), it(1, "p.ab", "")))
-	b, _ := ManifestHash(items2(it(1, "p.ab", ""), it(1, "p.ac", "")))
-	if a != b {
-		t.Fatal("ordering is not by lowercased id")
-	}
+func it(kind uint8, id string, version int32) proto.ManifestItem {
+	return proto.ManifestItem{Kind: kind, ID: id, Version: version}
 }
 
-func it(kind uint8, id, fpr string) proto.ManifestItem {
-	return proto.ManifestItem{Kind: kind, ID: id, Fingerprint: fpr}
-}
+func items(list ...proto.ManifestItem) []proto.ManifestItem { return list }
 
-func items2(list ...proto.ManifestItem) []proto.ManifestItem { return list }
-
-func TestManifestHashRejects(t *testing.T) {
-	for name, items := range map[string][]proto.ManifestItem{
-		"kind 0":            items2(it(0, "p.a", "")),
-		"empty id":          items2(it(1, "", "")),
-		"space in id":       items2(it(1, "p.a b", "")),
-		"umlaut in id":      items2(it(1, "p.hühn", "")),
-		"97-byte id":        items2(it(1, strings.Repeat("a", 97), "")),
-		"newline in fpr":    items2(it(1, "p.a", "x\ny")),
-		"duplicate":         items2(it(1, "p.a", "1"), it(1, "p.a", "2")),
-		"duplicate by case": items2(it(2, "p.Kart", ""), it(2, "p.kart", "")),
+func TestValidateItems(t *testing.T) {
+	for name, list := range map[string][]proto.ManifestItem{
+		"kind 0":               items(it(0, "p.a", 0)),
+		"empty id":             items(it(proto.ContentCharacter, "", 0)),
+		"space in id":          items(it(proto.ContentCharacter, "p.a b", 0)),
+		"umlaut in id":         items(it(proto.ContentCharacter, "p.hühn", 0)),
+		"97-byte id":           items(it(proto.ContentCharacter, strings.Repeat("a", 97), 0)),
+		"duplicate":            items(it(proto.ContentTrack, "p.a", 1), it(proto.ContentTrack, "p.a", 2)),
+		"duplicate by case":    items(it(proto.ContentKart, "p.Kart", 1), it(proto.ContentKart, "p.kart", 1)),
+		"track version 0":      items(it(proto.ContentTrack, "p.a", 0)),
+		"kart version 0":       items(it(proto.ContentKart, "p.a", 0)),
+		"arena version 0":      items(it(proto.ContentArena, "p.a", 0)),
+		"negative cup version": items(it(proto.ContentCup, "p.a", -1)),
 	} {
-		if _, err := ManifestHash(items); err == nil {
+		if err := ValidateItems(list); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	if _, err := ManifestHash(items2(it(1, "p.a", ""), it(2, "p.a", ""))); err != nil {
-		t.Errorf("same id, different kinds: %v", err)
+	ok := items(it(proto.ContentTrack, "p.a", 1), it(proto.ContentArena, "p.a", 3), it(proto.ContentCharacter, "p.c", 0),
+		it(proto.ContentPowerup, "p.egg", 0), it(proto.ContentCup, "p.cup", 2))
+	if err := ValidateItems(ok); err != nil {
+		t.Errorf("valid items: %v", err)
 	}
 }
 
@@ -89,98 +60,52 @@ func TestPackOf(t *testing.T) {
 type memStore struct {
 	mu        sync.Mutex
 	manifests map[string]*store.Manifest
-	votes     map[string]map[uint64]string
-	strikes   []store.ContentStrike
-	fail      error
+	reads     int
 }
 
-func newMemStore() *memStore {
-	return &memStore{manifests: map[string]*store.Manifest{}, votes: map[string]map[uint64]string{}}
-}
+func newMemStore() *memStore { return &memStore{manifests: map[string]*store.Manifest{}} }
 
 func vkey(v store.PackVersion) string {
-	return strings.ToLower(v.PackID) + "\x00" + strings.ToLower(v.Commit) + "\x00" + string(rune(v.ContentVersion))
-}
-
-func (s *memStore) HasManifest(_ context.Context, v store.PackVersion, hash string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.manifests[vkey(v)+hash] != nil, s.fail
+	return strings.ToLower(v.PackID) + "\x00" + strings.ToLower(v.Commit) + "\x00" + string(rune(v.RulesVersion))
 }
 
 func (s *memStore) PutManifest(_ context.Context, m *store.Manifest, _ time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.manifests[vkey(m.PackVersion)+m.Hash] == nil {
-		s.manifests[vkey(m.PackVersion)+m.Hash] = m
+	if s.manifests[vkey(m.PackVersion)] == nil {
+		s.manifests[vkey(m.PackVersion)] = m
 	}
-	return s.fail
+	return nil
 }
 
-func (s *memStore) ManifestByHash(_ context.Context, v store.PackVersion, hash string) (*store.Manifest, error) {
+func (s *memStore) Manifest(_ context.Context, v store.PackVersion) (*store.Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if m := s.manifests[vkey(v)+hash]; m != nil {
+	s.reads++
+	if m := s.manifests[vkey(v)]; m != nil {
 		return m, nil
 	}
 	return nil, store.ErrNotFound
 }
 
-func (s *memStore) PackVotes(_ context.Context, v store.PackVersion) (map[uint64]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := map[uint64]string{}
-	for id, h := range s.votes[vkey(v)] {
-		out[id] = h
-	}
-	return out, s.fail
+const rulesVersion = 7
+
+// manifest builds a manifest of packID at commit "v1".
+func manifest(packID string, list ...proto.ManifestItem) proto.PackManifest {
+	return proto.PackManifest{PackID: packID, Commit: "v1", RulesVersion: rulesVersion, Items: list}
 }
 
-func (s *memStore) SetPackVote(_ context.Context, v store.PackVersion, id uint64, hash string, _ time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.votes[vkey(v)] == nil {
-		s.votes[vkey(v)] = map[uint64]string{}
-	}
-	s.votes[vkey(v)][id] = hash
-	return s.fail
-}
-
-func (s *memStore) AddContentStrike(_ context.Context, k *store.ContentStrike, once bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if once {
-		for _, x := range s.strikes {
-			if x.AccountID == k.AccountID && vkey(x.PackVersion) == vkey(k.PackVersion) &&
-				x.ManifestHash == k.ManifestHash && x.MajorityHash == k.MajorityHash {
-				return nil
-			}
-		}
-	}
-	s.strikes = append(s.strikes, *k)
-	return s.fail
-}
-
-func (s *memStore) strikeCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.strikes)
-}
-
-const contentVersion = 7
-
-// pack builds a manifest of pack "mhk2" at commit "v1" whose items are the given track ids (kind 1).
+// pack builds a manifest of pack "mhk2" whose items are the given track ids (kind 1, version 1).
 func pack(tracks ...string) proto.PackManifest {
-	m := proto.PackManifest{PackID: "mhk2", Commit: "v1", ContentVersion: contentVersion}
+	m := manifest("mhk2")
 	for _, t := range tracks {
-		m.Items = append(m.Items, proto.ManifestItem{Kind: proto.ContentTrack, ID: t, Fingerprint: "f"})
+		m.Items = append(m.Items, it(proto.ContentTrack, t, 1))
 	}
-	m.ManifestHash, _ = ManifestHash(m.Items)
 	return m
 }
 
 func ref(m proto.PackManifest) proto.PackRef {
-	return proto.PackRef{PackID: m.PackID, Commit: m.Commit, ManifestHash: m.ManifestHash}
+	return proto.PackRef{PackID: m.PackID, Commit: m.Commit}
 }
 
 // announce runs the full ContentHello (+ manifests when asked) for account id on connection key id.
@@ -191,7 +116,7 @@ func announce(t *testing.T, c *Catalog, id uint64, ms ...proto.PackManifest) *pr
 	for i, m := range ms {
 		refs[i] = ref(m)
 	}
-	res, err := c.Hello(ctx, id, id, contentVersion, refs)
+	res, err := c.Hello(ctx, id, id, rulesVersion, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,116 +134,88 @@ func announce(t *testing.T, c *Catalog, id uint64, ms ...proto.PackManifest) *pr
 	return res
 }
 
-func TestMajorityAndStrikes(t *testing.T) {
+func TestFirstManifestIsKept(t *testing.T) {
 	st := newMemStore()
 	c := New(st, nil)
-	good, bad := pack("mhk2.rome", "mhk2.alps"), pack("mhk2.rome", "mhk2.alps", "mhk2.fake")
+	first, second := pack("mhk2.rome", "mhk2.alps"), pack("mhk2.rome", "mhk2.alps", "mhk2.fake")
 
-	res := announce(t, c, 1, good)
-	if len(res.Missing) != 1 || res.Missing[0] != good.ManifestHash {
+	res := announce(t, c, 1, first)
+	if !slices.Equal(res.Missing, []string{"mhk2"}) {
 		t.Fatalf("first announce should ask for the manifest: %+v", res)
 	}
-	if res := announce(t, c, 2, good); len(res.Missing) != 0 {
+	// The same pack version again (any case): known, never asked for again; the stored manifest decides.
+	upper := second
+	upper.PackID, upper.Commit = "MHK2", "V1"
+	if res := announce(t, c, 2, upper); len(res.Missing) != 0 {
 		t.Fatalf("known manifest requested again: %+v", res)
 	}
-	// One differing copy against two: a majority, but not backed by 3 accounts: no strike.
-	if res := announce(t, c, 3, bad); len(res.Strikes) != 0 {
-		t.Fatalf("strike below threshold: %+v", res)
-	}
-	if c.Differs(3, "mhk2") {
-		t.Fatal("differs below threshold")
-	}
-	// The majority decides content even below the threshold: the fake track is not content for account 3.
-	if c.Has(3, "mhk2", proto.ContentTrack, "mhk2.fake") || !c.Has(3, "MHK2", proto.ContentTrack, "MHK2.Rome") {
-		t.Fatal("majority manifest does not decide")
-	}
-	announce(t, c, 4, good)
-	if !c.Differs(3, "mhk2") || c.Differs(1, "mhk2") {
-		t.Fatal("majority of 3 not applied")
-	}
-	// Account 3 announces again: now it gets a strike, stored once however often it announces.
-	res = announce(t, c, 3, bad)
-	if len(res.Strikes) != 1 || res.Strikes[0].PackID != "mhk2" ||
-		res.Strikes[0].Message != "Your copy of mhk2 differs from other players'." {
-		t.Fatalf("strikes %+v", res.Strikes)
-	}
-	announce(t, c, 3, bad)
-	if n := st.strikeCount(); n != 1 {
-		t.Fatalf("%d strikes stored", n)
-	}
-	if got := st.strikes[0]; got.ManifestHash != bad.ManifestHash || got.MajorityHash != good.ManifestHash ||
-		got.AccountID != 3 {
-		t.Fatalf("strike row %+v", got)
-	}
-	// A brand-new (unknown) hash is struck at once: its manifest is still owed.
-	odd := pack("mhk2.odd")
-	res, err := c.Hello(context.Background(), 5, 5, contentVersion, []proto.PackRef{ref(odd)})
-	if err != nil || len(res.Missing) != 1 || len(res.Strikes) != 1 {
-		t.Fatalf("unknown hash: %+v %v", res, err)
-	}
-	if c.Ready(5, 5) {
-		t.Fatal("ready while a manifest is owed")
-	}
-	if _, ok := c.Announced(5); ok {
-		t.Fatal("incomplete announcement visible")
+	if c.Has(2, "mhk2", proto.ContentTrack, "mhk2.fake") || !c.Has(2, "MHK2", proto.ContentTrack, "MHK2.Rome") {
+		t.Fatal("the first stored manifest does not decide")
 	}
 	if got := c.Items(1, "mhk2", proto.ContentTrack); !slices.Equal(got, []string{"mhk2.rome", "mhk2.alps"}) {
 		t.Fatalf("Items %v", got)
 	}
-	if c.PackCommit(1, "MHK2") != "v1" || c.PackCommit(1, "mhk3") != "" || c.PackCommit(99, "mhk2") != "" {
-		t.Fatal("PackCommit")
+	// Another commit or rules version is another manifest.
+	next := pack("mhk2.paris")
+	next.Commit = "v2"
+	if res := announce(t, c, 3, next); len(res.Missing) != 1 || !c.Has(3, "mhk2", proto.ContentTrack, "mhk2.paris") {
+		t.Fatalf("new commit: %+v", res)
+	}
+	// Two connections owing the same manifest: the first one stored wins for both.
+	ctx := context.Background()
+	race1, race2 := pack("mhk2.a"), pack("mhk2.b")
+	race1.Commit, race2.Commit = "v3", "v3"
+	for _, id := range []uint64{4, 5} {
+		if res, err := c.Hello(ctx, id, id, rulesVersion, []proto.PackRef{ref(race1)}); err != nil ||
+			len(res.Missing) != 1 {
+			t.Fatal(res, err)
+		}
+	}
+	if err := c.Manifests(ctx, uint64(4), 4, []proto.PackManifest{race1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Manifests(ctx, uint64(5), 5, []proto.PackManifest{race2}); err != nil || !c.Ready(uint64(5), 5) {
+		t.Fatal("second manifest of a version refused", err)
+	}
+	if !c.Has(5, "mhk2", proto.ContentTrack, "mhk2.a") || c.Has(5, "mhk2", proto.ContentTrack, "mhk2.b") {
+		t.Fatal("the later manifest replaced the first one")
+	}
+	// An incomplete announcement is invisible.
+	if _, err := c.Hello(ctx, 6, 6, rulesVersion, []proto.PackRef{{PackID: "mhk3", Commit: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Ready(6, 6) {
+		t.Fatal("ready while a manifest is owed")
+	}
+	if _, ok := c.Announced(6); ok {
+		t.Fatal("incomplete announcement visible")
 	}
 }
 
-func TestTieUsesOwnManifest(t *testing.T) {
-	c := New(newMemStore(), nil)
-	a, b := pack("mhk2.rome"), pack("mhk2.alps")
-	announce(t, c, 1, a)
-	announce(t, c, 2, b)
-	// 1:1 is no majority: each player's own manifest decides; nobody is struck or kept out.
-	if !c.Has(1, "mhk2", proto.ContentTrack, "mhk2.rome") || c.Has(1, "mhk2", proto.ContentTrack, "mhk2.alps") {
-		t.Fatal("account 1 does not use its own manifest")
-	}
-	if !c.Has(2, "mhk2", proto.ContentTrack, "mhk2.alps") || !c.InMajority(2, "mhk2", proto.ContentTrack, "mhk2.alps") {
-		t.Fatal("account 2 does not use its own manifest")
-	}
-	if c.Differs(1, "mhk2") || c.Differs(2, "mhk2") {
-		t.Fatal("tie differs")
-	}
-	// A third account breaks the tie for everybody.
-	announce(t, c, 3, a)
-	if c.Has(2, "mhk2", proto.ContentTrack, "mhk2.alps") || !c.Has(2, "mhk2", proto.ContentTrack, "mhk2.rome") {
-		t.Fatal("majority after the tie broke not applied")
-	}
-	// Votes change with the account's latest report: 2 switches to a, 1 to b; a still leads 2:1.
-	announce(t, c, 2, a)
-	announce(t, c, 1, b)
-	if !c.Has(1, "mhk2", proto.ContentTrack, "mhk2.rome") {
-		t.Fatal("latest votes not counted")
-	}
-}
-
-func TestVotesPersist(t *testing.T) {
+func TestManifestsPersist(t *testing.T) {
 	st := newMemStore()
+	announce(t, New(st, nil), 1, pack("mhk2.rome"))
+	// A restarted server finds the stored manifest and asks for nothing; later lookups are cached.
 	c := New(st, nil)
-	a, b := pack("mhk2.rome"), pack("mhk2.alps")
-	for id := uint64(1); id <= 3; id++ {
-		announce(t, c, id, a)
-	}
-	announce(t, c, 4, b)
-	// A restarted server loads the votes from the store and strikes at once.
-	c2 := New(st, nil)
-	res := announce(t, c2, 4, b)
-	if len(res.Strikes) != 1 || !c2.Differs(4, "mhk2") || len(res.Missing) != 0 {
+	if res := announce(t, c, 2, pack("mhk2.alps")); len(res.Missing) != 0 {
 		t.Fatalf("after restart: %+v", res)
 	}
+	reads := st.reads
+	for range 3 {
+		if !c.Has(2, "mhk2", proto.ContentTrack, "mhk2.rome") {
+			t.Fatal("stored manifest not used")
+		}
+	}
+	if st.reads != reads {
+		t.Fatal("lookups read the store again")
+	}
 }
 
-func wantStatus(t *testing.T, err error, want proto.Status) {
+func wantStatus(t *testing.T, err error, want proto.Status, msg string) {
 	t.Helper()
 	var se *server.StatusError
-	if !errors.As(err, &se) || se.Status != want {
-		t.Fatalf("error %v, want status %s", err, want)
+	if !errors.As(err, &se) || se.Status != want || !strings.Contains(se.Message, msg) {
+		t.Fatalf("error %v, want status %s with %q", err, want, msg)
 	}
 }
 
@@ -327,40 +224,38 @@ func TestHelloAndManifestValidation(t *testing.T) {
 	c := New(newMemStore(), nil)
 	m := pack("mhk2.rome")
 	for name, refs := range map[string][]proto.PackRef{
-		"dotted pack id": {{PackID: "mhk.2", ManifestHash: m.ManifestHash}},
-		"empty pack id":  {{PackID: "", ManifestHash: m.ManifestHash}},
-		"short hash":     {{PackID: "mhk2", ManifestHash: "abc"}},
-		"non-hex hash":   {{PackID: "mhk2", ManifestHash: strings.Repeat("g", 32)}},
-		"duplicate pack": {ref(m), {PackID: "MHK2", ManifestHash: m.ManifestHash}},
-		"control commit": {{PackID: "mhk2", Commit: "a\nb", ManifestHash: m.ManifestHash}},
+		"dotted pack id": {{PackID: "mhk.2"}},
+		"empty pack id":  {{PackID: ""}},
+		"duplicate pack": {ref(m), {PackID: "MHK2", Commit: "other"}},
+		"control commit": {{PackID: "mhk2", Commit: "a\nb"}},
 	} {
-		_, err := c.Hello(ctx, 1, 1, contentVersion, refs)
+		_, err := c.Hello(ctx, 1, 1, rulesVersion, refs)
 		if err == nil {
 			t.Errorf("%s accepted", name)
 			continue
 		}
-		wantStatus(t, err, proto.StatusBadRequest)
+		wantStatus(t, err, proto.StatusBadRequest, "")
 	}
-	wantStatus(t, c.Manifests(ctx, 1, 1, []proto.PackManifest{m}), proto.StatusBadRequest) // before hello
+	wantStatus(t, c.Manifests(ctx, 1, 1, []proto.PackManifest{m}), proto.StatusBadRequest, "ContentHello") // before hello
 
-	upper := ref(m)
-	upper.ManifestHash = strings.ToUpper(upper.ManifestHash)
-	res, err := c.Hello(ctx, 1, 1, contentVersion, []proto.PackRef{upper})
-	if err != nil || len(res.Missing) != 1 {
+	res, err := c.Hello(ctx, 1, 1, rulesVersion, []proto.PackRef{ref(m)})
+	if err != nil || !slices.Equal(res.Missing, []string{"mhk2"}) {
 		t.Fatal(res, err)
 	}
-	// A manifest whose items do not produce the announced hash is refused.
-	tampered := m
-	tampered.Items = []proto.ManifestItem{{Kind: proto.ContentTrack, ID: "mhk2.other", Fingerprint: "f"}}
-	wantStatus(t, c.Manifests(ctx, 1, 1, []proto.PackManifest{tampered}), proto.StatusBadRequest)
-	// A manifest nobody asked for is ignored (not stored, no error).
+	// Invalid items are refused.
+	bad := pack("mhk2.rome")
+	bad.Items[0].Version = 0
+	wantStatus(t, c.Manifests(ctx, 1, 1, []proto.PackManifest{bad}), proto.StatusBadRequest, "version 0")
+	// Manifests nobody asked for (another pack, commit or rules version) are ignored: not stored, no error.
 	other := pack("mhk2.x")
 	other.PackID = "mhk3"
-	other.ManifestHash, _ = ManifestHash(other.Items)
-	if err := c.Manifests(ctx, 1, 1, []proto.PackManifest{other}); err != nil || c.Ready(1, 1) {
+	commit := pack("mhk2.x")
+	commit.Commit = "v9"
+	rules := pack("mhk2.x")
+	rules.RulesVersion = rulesVersion + 1
+	if err := c.Manifests(ctx, 1, 1, []proto.PackManifest{other, commit, rules}); err != nil || c.Ready(1, 1) {
 		t.Fatal("unrequested manifest changed the state", err)
 	}
-	// The uppercase announced hash matches the lowercase computed one.
 	if err := c.Manifests(ctx, 1, 1, []proto.PackManifest{m}); err != nil || !c.Ready(1, 1) {
 		t.Fatal("manifest not accepted", err)
 	}
@@ -377,17 +272,65 @@ func TestHelloAndManifestValidation(t *testing.T) {
 	}
 }
 
-func TestRaceStrike(t *testing.T) {
-	st := newMemStore()
-	c := New(st, nil)
-	m := pack("mhk2.rome")
-	announce(t, c, 1, m)
-	c.Strike(1, "mhk2", "desync: "+strings.Repeat("x", 300))
-	if len(st.strikes) != 1 {
-		t.Fatal("no strike stored")
+func TestOverrides(t *testing.T) {
+	c := New(newMemStore(), nil)
+	announce(t, c, 1, pack("mhk2.rome"), manifest("tuning", it(proto.ContentKart, "mhk2.speedy", 2),
+		it(proto.ContentKart, "tuning.kart", 1)))
+	ann, ok := c.Announced(1)
+	if !ok {
+		t.Fatal("not announced")
 	}
-	k := st.strikes[0]
-	if k.Commit != "v1" || k.ContentVersion != contentVersion || k.ManifestHash != m.ManifestHash || len(k.Reason) != 255 {
-		t.Fatalf("strike %+v", k)
+	got := c.Overrides(ann)
+	if len(got) != 1 || got[0] != (Override{Kind: proto.ContentKart, ID: "mhk2.speedy", Pack: "tuning"}) {
+		t.Fatalf("overrides %+v", got)
+	}
+}
+
+func TestRunContent(t *testing.T) {
+	ctx := context.Background()
+	c := New(newMemStore(), nil)
+	game := manifest("game", it(proto.ContentCharacter, "game.huhn", 0), it(proto.ContentKart, "game.kart", 2))
+	mhk2 := manifest("mhk2", it(proto.ContentTrack, "mhk2.rome", 3))
+	run := server.RunContent{RulesVersion: rulesVersion, TrackID: "MHK2.Rome", TrackVersion: 3, KartID: "game.kart",
+		KartVersion: 2, CharacterID: "game.huhn"}
+
+	wantStatus(t, c.RunContent(ctx, 1, 1, run), proto.StatusBadRequest, "hasn't sent its content")
+	announce(t, c, 1, game, mhk2)
+	if err := c.RunContent(ctx, uint64(1), 1, run); err != nil {
+		t.Fatal(err)
+	}
+	// Overlay bumps make a variant's version higher than the track's: accepted.
+	bumped := run
+	bumped.TrackVersion = 5
+	if err := c.RunContent(ctx, uint64(1), 1, bumped); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*server.RunContent)
+		msg    string
+	}{
+		{"rules", func(r *server.RunContent) { r.RulesVersion++ }, "other game rules"},
+		{"old track", func(r *server.RunContent) { r.TrackVersion = 2 }, "older version of MHK2.Rome"},
+		{"unknown track", func(r *server.RunContent) { r.TrackID = "mhk2.paris" }, "isn't installed"},
+		{"track of an unannounced pack", func(r *server.RunContent) { r.TrackID = "mhk3.paris" }, "isn't installed"},
+		{"kart version", func(r *server.RunContent) { r.KartVersion = 3 }, "another version of game.kart"},
+		{"older kart", func(r *server.RunContent) { r.KartVersion = 1 }, "another version of game.kart"},
+		{"unknown kart", func(r *server.RunContent) { r.KartID = "game.other" }, "isn't installed"},
+	} {
+		r := run
+		tc.change(&r)
+		wantStatus(t, c.RunContent(ctx, uint64(1), 1, r), proto.StatusForbidden, tc.msg)
+	}
+	// Another connection of the account has its own announcement.
+	wantStatus(t, c.RunContent(ctx, uint64(2), 1, run), proto.StatusBadRequest, "hasn't sent its content")
+
+	// A pack replacing the kart, character or track refuses the run.
+	for _, item := range []proto.ManifestItem{it(proto.ContentKart, "game.kart", 2),
+		it(proto.ContentCharacter, "game.huhn", 0), it(proto.ContentTrack, "mhk2.rome", 3)} {
+		mod := manifest("mod", item)
+		mod.Commit = item.ID
+		announce(t, c, 3, game, mhk2, mod)
+		wantStatus(t, c.RunContent(ctx, uint64(3), 3, run), proto.StatusForbidden, "replaced by mod")
 	}
 }
